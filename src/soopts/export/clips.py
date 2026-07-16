@@ -8,8 +8,9 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from soopts.config import Config
@@ -25,8 +26,27 @@ class Clip:
     end: int            # 노래 끝(전역초, 정밀)
     duration: int
     path: str           # 추출된 클립 파일 경로
-    title: str | None = None
+    title: str | None = None   # 확정 곡명(검수 단계에서 채움). None/"" = 곡명 미상
     lyrics: str = ""
+
+
+def clips_json_path(clips_dir: Path) -> Path:
+    return clips_dir / "clips.json"
+
+
+def write_clips(clips_dir: Path, clips: list[Clip]) -> Path:
+    p = clips_json_path(clips_dir)
+    p.write_text(
+        json.dumps([asdict(c) for c in clips], ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return p
+
+
+def read_clips(clips_dir: Path) -> list[Clip]:
+    p = clips_json_path(clips_dir)
+    if not p.exists():
+        return []
+    return [Clip(**d) for d in json.loads(p.read_text(encoding="utf-8"))]
 
 
 def longest_music_block(
