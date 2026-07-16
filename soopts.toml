@@ -39,4 +39,5 @@ crf = 20                   # 재인코딩 화질(낮을수록 고화질)
 client_secret = "client_secret.json"          # Google Cloud OAuth 클라이언트(사용자 준비)
 token_file = "~/.config/soopts/yt_token.json" # 최초 동의 후 토큰 저장(이후 자동)
 privacy = "unlisted"       # unlisted=링크로만 시청 가능
-title_template = "{bj} - {title} [{vod_id} {hms}]"
+# 사용 가능 치환자: {title}(곡명/미상) {bj} {date}(방송일 YYYY-MM-DD) {hms}(시각) {vod_id}
+title_template = "{title} - {bj} ({date})"

@@ -79,7 +79,7 @@ class YouTubeConfig:
     token_file: str = "~/.config/soopts/yt_token.json"  # 최초 동의 후 저장되는 토큰
     privacy: str = "unlisted"        # unlisted=링크로 시청 가능
     category_id: str = "10"          # 10 = Music
-    title_template: str = "{bj} - {title} [{vod_id} {hms}]"
+    title_template: str = "{title} - {bj} ({date})"
     made_for_kids: bool = False
 
 
