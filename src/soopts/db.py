@@ -60,7 +60,10 @@ def select_pending(
         row = existing_by_no.get(title_no)
         if row is not None:
             if row.get("status") == "failed" and row.get("retry_count", 0) < MAX_RETRIES:
-                picked.append({**row, "soop_title_no": title_no})
+                # id는 GENERATED ALWAYS AS IDENTITY라 upsert 페이로드에 넣으면
+                # PostgREST가 거부한다(실제로 재시도 케이스에서 발생 확인) — 제외.
+                retry_row = {k: v for k, v in row.items() if k != "id"}
+                picked.append({**retry_row, "soop_title_no": title_no})
             continue
         picked.append({
             "soop_title_no": title_no,
