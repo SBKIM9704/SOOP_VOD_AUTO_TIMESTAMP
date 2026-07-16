@@ -15,6 +15,7 @@ class WorkPaths:
     segmentation: Path    # audio_segmentation.json (값비싼 STT 세그먼트 캐시)
     songs_json: Path      # songs.json (감지·식별 결과)
     songs_txt: Path       # songs_{vod_id}.txt (복붙용)
+    clips_dir: Path       # clips/ (추출된 노래 영상 클립 + 업로드 기록)
 
     def ensure(self) -> WorkPaths:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -32,6 +33,7 @@ def work_paths(work_root: Path, vod_id: str) -> WorkPaths:
         segmentation=root / "audio_segmentation.json",
         songs_json=root / "songs.json",
         songs_txt=root / f"songs_{vod_id}.txt",
+        clips_dir=root / "clips",
     )
 
 

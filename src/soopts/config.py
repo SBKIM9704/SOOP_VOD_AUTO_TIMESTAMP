@@ -64,11 +64,33 @@ class SttConfig:
 
 
 @dataclass
+class ClipConfig:
+    quality: str = "hls-original"    # yt-dlp 포맷 (1080p). hls-hd4k=720p, hls-hd=540p
+    dl_pad_before_s: float = 120.0   # 경계 탐지 여유를 위해 후보 구간을 넉넉히 받음
+    dl_pad_after_s: float = 90.0
+    min_song_s: float = 45.0         # 구간 내 최장 음악 블록이 이보다 짧으면 노래 아님(스킵)
+    boundary_pad_s: float = 1.0      # 정밀 경계에서 앞뒤 살짝 여유
+    crf: int = 20                    # 재인코딩 화질(낮을수록 고화질). 클린 컷 위해 재인코딩
+
+
+@dataclass
+class YouTubeConfig:
+    client_secret: str = "client_secret.json"  # Google Cloud OAuth 클라이언트(사용자 준비)
+    token_file: str = "~/.config/soopts/yt_token.json"  # 최초 동의 후 저장되는 토큰
+    privacy: str = "unlisted"        # unlisted=링크로 시청 가능
+    category_id: str = "10"          # 10 = Music
+    title_template: str = "{bj} - {title} [{vod_id} {hms}]"
+    made_for_kids: bool = False
+
+
+@dataclass
 class Config:
     endpoints: Endpoints = field(default_factory=Endpoints)
     collector: CollectorConfig = field(default_factory=CollectorConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     stt: SttConfig = field(default_factory=SttConfig)
+    clip: ClipConfig = field(default_factory=ClipConfig)
+    youtube: YouTubeConfig = field(default_factory=YouTubeConfig)
     work_root: Path = Path("work")
 
 
@@ -91,6 +113,8 @@ def load_config(path: Path | None = None, work_root: Path | None = None) -> Conf
         collector=_build_section(CollectorConfig, data.get("collector", {})),
         audio=_build_section(AudioConfig, data.get("audio", {})),
         stt=_build_section(SttConfig, data.get("stt", {})),
+        clip=_build_section(ClipConfig, data.get("clip", {})),
+        youtube=_build_section(YouTubeConfig, data.get("youtube", {})),
     )
     if data.get("work_root") is not None:
         cfg.work_root = Path(data["work_root"])

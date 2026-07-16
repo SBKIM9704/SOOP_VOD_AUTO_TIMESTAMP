@@ -27,3 +27,16 @@ model = "small"            # base/small/medium… (노래는 small 이상 권장
 # language = "en"          # 노래 언어 강제 시 정확도 큼 (미지정=자동)
 beam_size = 5
 lyric_chars = 300          # 출력 가사 길이 컷
+
+[clip]                     # 노래 클립 추출 (soopts clips)
+quality = "hls-original"   # 1080p. hls-hd4k=720p, hls-hd=540p
+dl_pad_before_s = 120.0    # 경계 탐지 여유 위해 후보 구간 넉넉히 받음
+dl_pad_after_s = 90.0
+min_song_s = 45.0          # 구간 내 최장 음악 블록이 이보다 짧으면 노래 아님(스킵)
+crf = 20                   # 재인코딩 화질(낮을수록 고화질)
+
+[youtube]                  # 노래 클립 unlisted 자동 업로드 (soopts clips --upload)
+client_secret = "client_secret.json"          # Google Cloud OAuth 클라이언트(사용자 준비)
+token_file = "~/.config/soopts/yt_token.json" # 최초 동의 후 토큰 저장(이후 자동)
+privacy = "unlisted"       # unlisted=링크로만 시청 가능
+title_template = "{bj} - {title} [{vod_id} {hms}]"
