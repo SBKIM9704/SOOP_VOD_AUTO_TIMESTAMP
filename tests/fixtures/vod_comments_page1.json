@@ -1,0 +1,43 @@
+{
+  "data": [
+    {
+      "p_comment_no": 118110317,
+      "is_best_top": false,
+      "title_no": 201651295,
+      "user_nick": "[테스트유저1]",
+      "user_id": "testuser01",
+      "profile_image": "//profile.img.sooplive.co.kr/LOGO/te/testuser01/testuser01.jpg",
+      "comment": "초록주먹뱅 잘봐써 띵규리!",
+      "c_comment_cnt": 0,
+      "like_cnt": 0,
+      "reg_date": "2026-07-17 03:20:40"
+    },
+    {
+      "p_comment_no": 118102329,
+      "is_best_top": false,
+      "title_no": 201651295,
+      "user_nick": "[테스트유저2]",
+      "user_id": "testuser02",
+      "profile_image": "//profile.img.sooplive.co.kr/LOGO/te/testuser02/testuser02.jpg",
+      "comment": "📢 17(금) 휴방 / 18(토) 방송예정\n🎵 4곡\n\n00:03:38 💛 띵하\n00:04:36 🍊 치즈돈가스 먹어서 치돈 추천합니다\n01:03:22 🎤 [오프닝곡] 아이유 - 애타는 마음\n\n🍊 카페 - 하이봤\n01:48:15 🎤 윤하 - 기다리다\n02:01:08 🍊 챈나랑 낙원할때 무서워 직진밖에 없어\n02:03:39 🎤 아이유 - 이름에게\n02:10:46 🎤 [방종곡] 윤하 - 오늘 헤어졌어요\n02:16:00 🍊 레슨 잘 받고 일도 하고 잘 쉬고 토요일에 올게요",
+      "c_comment_cnt": 0,
+      "like_cnt": 3,
+      "reg_date": "2026-07-16 20:30:00"
+    }
+  ],
+  "links": {
+    "first": "https://chapi.sooplive.co.kr/api/singgyul/title/201651295/comment?page=1",
+    "last": "https://chapi.sooplive.co.kr/api/singgyul/title/201651295/comment?page=1",
+    "prev": null,
+    "next": null
+  },
+  "meta": {
+    "current_page": 1,
+    "from": 1,
+    "last_page": 1,
+    "path": "https://chapi.sooplive.co.kr/api/singgyul/title/201651295/comment",
+    "per_page": 30,
+    "to": 2,
+    "total": 2
+  }
+}

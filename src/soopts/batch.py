@@ -87,7 +87,7 @@ def run_daily(cfg: Config, *, bj_id: str, count: int, upload: bool) -> dict[str,
     for vod_row in picked:
         title_no = vod_row["soop_title_no"]
         try:
-            vod_stats = _process_vod(cfg, vod_row)
+            vod_stats = _process_vod(cfg, vod_row, bj_id)
             stats["detected"] += vod_stats["detected"]
             stats["auto_matched"] += vod_stats["auto_matched"]
             stats["needs_review"] += vod_stats["needs_review"]
@@ -110,8 +110,49 @@ def run_daily(cfg: Config, *, bj_id: str, count: int, upload: bool) -> dict[str,
     return {**stats, "text": text}
 
 
-def _process_vod(cfg: Config, vod_row: dict[str, Any]) -> dict[str, Any]:
-    """collect → 노래 구간 감지 → 구간별로 하나씩(1080p 정밀 클립+STT+식별+DB 기록).
+def _find_candidates(cfg: Config, bj_id: str, title_no: str, stickers: list[float], meta) -> list[tuple]:
+    """(ds, de, hint) 후보 목록 — 댓글 타임라인이 있으면 그걸 우선 쓰고, 없으면 스티커 감지로 폴백.
+
+    댓글 타임라인은 팬이 자원해서 남긴 비공식 타임스탬프라 정확한 노래 길이를 모르니
+    ds/de를 넉넉히 잡아 뒤에서 inaSpeechSegmenter가 정밀 경계를 찾게 한다. hint가 있으면
+    이미 아티스트/제목이 확정된 것이므로 이후 identify 단계에서 Claude 가사 추측을 건너뛴다.
+    """
+    from soopts.analyzers.comment_timeline import extract_song_timeline
+    from soopts.collector.comments import fetch_comments
+
+    try:
+        comments = fetch_comments(cfg, bj_id, title_no)
+        timeline = extract_song_timeline(comments)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("VOD %s 댓글 조회/추출 실패 — 스티커 감지로 폴백: %s", title_no, ex)
+        timeline = []
+
+    if timeline:
+        log.info("VOD %s 댓글 타임라인 사용 — 노래 %d곡", title_no, len(timeline))
+        c = cfg.comment
+        return [
+            (max(0.0, t.time_s - c.pad_before_s), t.time_s + c.pad_after_s, t) for t in timeline
+        ]
+
+    from soopts.analyzers.audio_analyzer import sticker_burst_regions
+
+    a = cfg.audio
+    regions = sticker_burst_regions(
+        stickers, bucket_s=a.sticker_bucket_s, window_buckets=a.sticker_window_buckets,
+        min_per_window=a.sticker_min_per_window, pad_before_s=a.sticker_pad_before_s,
+        pad_after_s=a.sticker_pad_after_s, skip_opening_s=a.skip_opening_s,
+        total_s=meta.total_duration,
+    )
+    log.info("VOD %s 노래 후보 %d구간(스티커 감지)", title_no, len(regions))
+    return [
+        (max(0.0, s - cfg.clip.dl_pad_before_s), e + cfg.clip.dl_pad_after_s, None)
+        for s, e in regions
+    ]
+
+
+def _process_vod(cfg: Config, vod_row: dict[str, Any], bj_id: str) -> dict[str, Any]:
+    """collect → 노래 구간 후보(댓글 타임라인 우선, 없으면 스티커 감지) → 구간별로 하나씩
+    (1080p 정밀 클립+STT+식별+DB 기록).
 
     구간 하나의 실패는 그 구간만 건너뛰고 나머지는 계속 진행한다(이전엔 VOD 전체를
     실패 처리해 이미 성공한 구간까지 버렸다 — VOD 201651295에서 실제로 이렇게 30분
@@ -121,8 +162,13 @@ def _process_vod(cfg: Config, vod_row: dict[str, Any]) -> dict[str, Any]:
     잘못 종결시킨다.
     """
     from soopts import db
-    from soopts.analyzers.audio_analyzer import sticker_burst_regions, sticker_rate
-    from soopts.analyzers.identify import identify_song
+    from soopts.analyzers.audio_analyzer import sticker_rate
+    from soopts.analyzers.identify import (
+        MATCH_THRESHOLD,
+        IdentifyResult,
+        identify_song,
+        match_catalog,
+    )
     from soopts.analyzers.stt import _load_model, _transcribe_best
     from soopts.collector.chat import fetch_chat
     from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
@@ -137,16 +183,9 @@ def _process_vod(cfg: Config, vod_row: dict[str, Any]) -> dict[str, Any]:
     fetch_chat(cfg, title_no, meta, work)
 
     stickers = [float(m.t) for m in read_chat_jsonl(work.chat) if m.kind == "ogq"]
-    a = cfg.audio
-    regions = sticker_burst_regions(
-        stickers, bucket_s=a.sticker_bucket_s, window_buckets=a.sticker_window_buckets,
-        min_per_window=a.sticker_min_per_window, pad_before_s=a.sticker_pad_before_s,
-        pad_after_s=a.sticker_pad_after_s, skip_opening_s=a.skip_opening_s,
-        total_s=meta.total_duration,
-    )
-    log.info("VOD %s 노래 후보 %d구간", title_no, len(regions))
+    candidates = _find_candidates(cfg, bj_id, title_no, stickers, meta)
     stats: dict[str, Any] = {"detected": 0, "auto_matched": 0, "needs_review": 0, "region_errors": []}
-    if not regions:
+    if not candidates:
         return stats
 
     m3u8s = resolve_m3u8_list(title_no, cfg.clip.quality)
@@ -155,11 +194,9 @@ def _process_vod(cfg: Config, vod_row: dict[str, Any]) -> dict[str, Any]:
     catalog = db.load_song_catalog()
     stt_model = None
 
-    for s, e in regions:
-        label = f"{fmt_hms(int(s))}~{fmt_hms(int(e))}"
+    for ds, de, hint in candidates:
+        label = f"{fmt_hms(int(ds))}~{fmt_hms(int(de))}"
         try:
-            ds = max(0.0, s - cfg.clip.dl_pad_before_s)
-            de = e + cfg.clip.dl_pad_after_s
             m3u8, ls, le = map_to_part(ds, de, parts, m3u8s)
             if m3u8 is None:
                 log.warning("VOD %s 구간 %s 파트 매핑 실패 — 건너뜀", title_no, label)
@@ -178,10 +215,21 @@ def _process_vod(cfg: Config, vod_row: dict[str, Any]) -> dict[str, Any]:
             rate = sticker_rate((clip.t, clip.end), stickers)
             song = Song(
                 t=clip.t, end=clip.end, duration=clip.duration,
-                sticker_rate=round(rate, 1), song_likely=rate >= a.sticker_rate_strong,
+                sticker_rate=round(rate, 1),
+                song_likely=(hint is not None) or (rate >= cfg.audio.sticker_rate_strong),
                 lyrics=lyrics,
             )
-            result = identify_song(song.lyrics, song.song_likely, catalog) if song.lyrics else None
+
+            if hint is not None:
+                # 댓글에 이미 아티스트/제목이 있으니 Claude 가사 추측을 건너뛰고 바로 매칭한다.
+                entry, score = match_catalog(hint.title, hint.artist or "", catalog)
+                result = (
+                    IdentifyResult(entry.song_id, hint.title, score, "auto_matched")
+                    if entry is not None and score >= MATCH_THRESHOLD
+                    else IdentifyResult(None, hint.title, score, "needs_review")
+                )
+            else:
+                result = identify_song(song.lyrics, song.song_likely, catalog) if song.lyrics else None
 
             perf_rows = db.insert_performances(vod_row["id"], [song], [result])
             if perf_rows:
@@ -199,7 +247,7 @@ def _process_vod(cfg: Config, vod_row: dict[str, Any]) -> dict[str, Any]:
 
     if stats["detected"] == 0 and stats["region_errors"]:
         raise RuntimeError(
-            f"후보 {len(regions)}구간 전부 실패 (예: {stats['region_errors'][0]})"
+            f"후보 {len(candidates)}구간 전부 실패 (예: {stats['region_errors'][0]})"
         )
     return stats
 

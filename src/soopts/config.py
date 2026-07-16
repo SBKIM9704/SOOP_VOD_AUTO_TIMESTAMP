@@ -91,6 +91,14 @@ class StationConfig:
 
 
 @dataclass
+class CommentConfig:
+    # 댓글 타임라인(팬이 자원해서 다는 비공식 타임스탬프)에서 노래 시각을 찾으면,
+    # 정확한 길이를 모르니 앞뒤로 넉넉히 다운로드한 뒤 inaSpeechSegmenter로 정밀 경계를 찾는다.
+    pad_before_s: float = 10.0
+    pad_after_s: float = 300.0
+
+
+@dataclass
 class Config:
     endpoints: Endpoints = field(default_factory=Endpoints)
     collector: CollectorConfig = field(default_factory=CollectorConfig)
@@ -99,6 +107,7 @@ class Config:
     clip: ClipConfig = field(default_factory=ClipConfig)
     youtube: YouTubeConfig = field(default_factory=YouTubeConfig)
     station: StationConfig = field(default_factory=StationConfig)
+    comment: CommentConfig = field(default_factory=CommentConfig)
     work_root: Path = Path("work")
 
 
@@ -124,6 +133,7 @@ def load_config(path: Path | None = None, work_root: Path | None = None) -> Conf
         clip=_build_section(ClipConfig, data.get("clip", {})),
         youtube=_build_section(YouTubeConfig, data.get("youtube", {})),
         station=_build_section(StationConfig, data.get("station", {})),
+        comment=_build_section(CommentConfig, data.get("comment", {})),
     )
     if data.get("work_root") is not None:
         cfg.work_root = Path(data["work_root"])
