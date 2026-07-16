@@ -12,8 +12,12 @@ from __future__ import annotations
 import subprocess
 import urllib.request
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from soopts.log import get_logger
+
+if TYPE_CHECKING:
+    from soopts.models import MetaPart
 
 log = get_logger("collector.media")
 
@@ -68,6 +72,25 @@ def download_slice(m3u8_url: str, start_s: float, end_s: float, out_path: Path) 
             fh.write(_fetch(f"{base}/{seg_uris[i]}"))
     log.info("슬라이스 저장(seg %d~%d, %ds): %s", idxs[0], idxs[-1], int(end_s - start_s), out_path)
     return out_path
+
+
+def map_to_part(
+    s: float, e: float, parts: list[MetaPart], m3u8s: list[str]
+) -> tuple[str | None, float, float]:
+    """전역 시각 구간 (s,e)를 해당 파트의 m3u8 + 파트-로컬 시각으로 매핑.
+
+    단일 파트(메타 없음)면 그대로 첫 m3u8 사용. 파트 경계를 넘으면 시작 파트 안으로 클램프.
+    """
+    if not parts:
+        return m3u8s[0], s, e
+    for p in parts:
+        if p.offset_s <= s < p.offset_s + p.duration:
+            if p.idx >= len(m3u8s):
+                return None, 0, 0
+            ls = s - p.offset_s
+            le = min(e - p.offset_s, float(p.duration))  # 파트 끝으로 클램프
+            return m3u8s[p.idx], ls, le
+    return None, 0, 0
 
 
 # --------------------------------------------------------------------------- #

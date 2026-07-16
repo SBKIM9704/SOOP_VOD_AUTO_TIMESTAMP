@@ -68,3 +68,20 @@ def upload_unlisted(cfg: Config, video_path: str, title: str, description: str =
     url = f"https://youtu.be/{vid}"
     log.info("업로드 완료(unlisted): %s  %s", title, url)
     return url
+
+
+def update_video_metadata(
+    cfg: Config, video_id: str, title: str, description: str | None = None
+) -> None:
+    """검수 확정 곡명으로 title(옵션 description)만 갱신 — 나머지 snippet 필드는 유지한다."""
+    service = _get_service(cfg)
+    resp = service.videos().list(part="snippet", id=video_id).execute()
+    items = resp.get("items") or []
+    if not items:
+        raise RuntimeError(f"영상을 찾을 수 없음: {video_id}")
+    snippet = items[0]["snippet"]
+    snippet["title"] = title[:100]
+    if description is not None:
+        snippet["description"] = description
+    service.videos().update(part="snippet", body={"id": video_id, "snippet": snippet}).execute()
+    log.info("메타데이터 갱신: %s → %s", video_id, title)

@@ -18,6 +18,8 @@ uv venv && uv pip install -e ".[audio,stt,dev]"
 
 - `audio` extra: inaSpeechSegmenter (노래 구간 감지)
 - `stt` extra: faster-whisper (가사 전사, API 키 불필요)
+- `youtube` extra: 유튜브 unlisted 업로드
+- `batch` extra: supabase/rapidfuzz/anthropic (`soopts daily`/`sync` 배치 전용, 아래 참고)
 - `ffmpeg`, `yt-dlp` 필요 (오디오 추출·다운로드)
 
 ## 사용
@@ -83,6 +85,57 @@ soopts clips 197718401 --upload   # 추출 + 유튜브 unlisted 업로드
 - `[audio] min_sticker_rate > 0` 으로 스티커 적은 구간(BGM)을 아예 제거 가능.
 - **가사 전사 팁**: 노래는 반주와 섞여 어렵다. `[stt] language`로 언어를 강제하고
   `model`을 `small` 이상으로 하면 정확도가 크게 오른다.
+
+## 데일리 자동 배치 (GitHub Actions)
+
+`soopts daily`/`soopts sync`는 스테이션 최신 VOD를 무인으로 처리하는 배치 커맨드다.
+`.github/workflows/daily.yml`(04:00 KST)·`sync.yml`(05:00 KST)이 매일 자동 실행한다.
+
+```
+GitHub Actions (public repo = 분 무제한 무료)
+  daily : VOD 목록 → 미처리 N개 → 감지/전사/식별 → DB 기록
+          → 1080p 정밀 클립 컷 → 업로드(일 daily_upload_limit 상한 큐)
+  sync  : 검수 확정 건 유튜브 제목/설명 갱신
+        │
+        ▼
+     Supabase  ◄──── 프론트/검수 UI(별도 레포)가 상태 변경
+```
+
+- 진실의 원천은 항상 Supabase(`vods`/`performances`)다. 러너는 휘발성이라 클립 파일이
+  실행 사이 사라질 수 있지만, 업로드 큐는 `clip_status='clipped'` + `start_s`/`end_s`만으로
+  같은 경로를 재구성해 소진한다(`src/soopts/batch.py`의 `clip_file_path`/`_reslice_clip`).
+- 신곡을 `songs` 테이블에 자동 생성하지 않는다 — 미식별 곡은 항상 `needs_review`로 검수 대기.
+- 업로드 privacy는 항상 unlisted로 고정, 코드가 public 전환을 하지 않는다(사람 결정).
+
+### 필요 GitHub Secrets
+
+| 이름 | 용도 |
+|---|---|
+| `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Supabase 접속(RLS 우회) |
+| `ANTHROPIC_API_KEY` | 가사→곡명 추측(daily 전용) |
+| `YT_CLIENT_SECRET` | Google OAuth 클라이언트(client_secret.json 원문) |
+| `YT_TOKEN` | 최초 로컬 OAuth 동의로 생성된 yt_token.json 원문 |
+| `SLACK_WEBHOOK_URL` | (선택) daily 요약 알림 |
+
+최초 설정: 로컬에서 `soopts clips <vod> --upload` 또는 `soopts daily` 1회 실행 →
+브라우저 동의 → 생성된 `~/.config/soopts/yt_token.json` 내용을 `YT_TOKEN`에 등록.
+
+### self-hosted runner 폴백
+
+GitHub 호스티드 러너(미국 Azure IP)에서 SOOP API/스트림이 막히면(`verify-env.yml`로 확인),
+`daily.yml`/`sync.yml`의 `runs-on: ubuntu-latest`만 self-hosted로 바꾸면 된다 — 나머지
+워크플로우·코드는 동일. self-hosted 후보: 사용자 WSL2 PC 또는 상시 구동 서버(OCI A1 등).
+
+### 수동 실행 / 옵션
+
+```bash
+soopts daily --count 1 --no-upload   # 감지·식별·클립까지만, 업로드 생략
+soopts daily --bj other_bj_id        # 다른 스테이션 대상
+soopts sync                          # 검수 확정 건 유튜브 메타데이터 갱신
+```
+
+기존에 수동으로 올려둔 클립을 소급 등록하려면 `scripts/backfill_existing_clips.py`
+(1회성, 채널의 기존 업로드를 조회해 `needs_review`로 등록)를 실행한다.
 
 ## 캐시 / 재실행
 
