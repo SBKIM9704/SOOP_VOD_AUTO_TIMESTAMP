@@ -30,6 +30,12 @@ def clip_file_path(work_root: Path, title_no: str, start_s: float) -> Path:
     return work_paths(work_root, title_no).clips_dir / f"song_{int(start_s):06d}.mp4"
 
 
+def next_vod_status(detected: int) -> str:
+    """VOD 처리 직후 상태. 감지된 노래가 없으면 검수·업로드할 게 없으니 바로 종결(done),
+    있으면 업로드 큐 소진까지 거쳐야 하니 analyzed로 남긴다."""
+    return "done" if detected == 0 else "analyzed"
+
+
 def format_summary(stats: dict[str, int]) -> str:
     """일일 배치 결과 한 줄 요약. Slack/로그 공용."""
     parts = [
@@ -61,7 +67,7 @@ def run_daily(cfg: Config, *, bj_id: str, count: int, upload: bool) -> dict[str,
             stats["detected"] += vod_stats["detected"]
             stats["auto_matched"] += vod_stats["auto_matched"]
             stats["needs_review"] += vod_stats["needs_review"]
-            db.mark_vod(title_no, "analyzed")
+            db.mark_vod(title_no, next_vod_status(vod_stats["detected"]))
         except Exception as e:  # noqa: BLE001
             log.error("VOD %s 처리 실패: %s", title_no, e)
             db.mark_vod(title_no, "failed", error=str(e)[:500])
