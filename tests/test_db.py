@@ -27,6 +27,19 @@ def test_select_pending_retries_failed_under_limit():
     assert picked[0]["soop_title_no"] == "1"
 
 
+def test_select_pending_retry_row_excludes_identity_id_column():
+    # 실제 장애 재현: existing_by_no의 row는 SELECT *라 id(GENERATED ALWAYS)를 포함한다.
+    # 그대로 upsert 페이로드에 넣으면 PostgREST가 'cannot insert a non-DEFAULT value
+    # into column "id"'로 거부한다 — 재시도 페이로드에서 id는 반드시 빠져야 한다.
+    candidates = [{"title_no": "1", "title": "A"}]
+    existing = {"1": {"id": 42, "status": "failed", "retry_count": 0, "title": "옛 제목"}}
+    picked = select_pending(candidates, existing, n=1)
+    assert len(picked) == 1
+    assert "id" not in picked[0]
+    assert picked[0]["soop_title_no"] == "1"
+    assert picked[0]["title"] == "옛 제목"
+
+
 def test_select_pending_stops_retrying_at_limit():
     candidates = [{"title_no": "1", "title": "A"}]
     existing = {"1": {"status": "failed", "retry_count": MAX_RETRIES}}
