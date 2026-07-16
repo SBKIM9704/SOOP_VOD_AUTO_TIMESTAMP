@@ -32,3 +32,13 @@ def test_unknown_key_ignored(tmp_path):
 def test_work_root_override():
     cfg = load_config(None, work_root=Path("/tmp/xyz"))
     assert cfg.work_root == Path("/tmp/xyz")
+
+
+def test_broadcast_date_from_file_info_key():
+    from soopts.models import MetaPart, MetaResult, broadcast_date
+    m = MetaResult("v", "t", "bj", "nick", 100,
+                   parts=[MetaPart(0, "20260604_CE830094_294553483_1", 100, 0)])
+    assert broadcast_date(m) == "2026-06-04"
+    # 형식 다르면 빈 문자열(안전)
+    m2 = MetaResult("v", "t", "bj", "nick", 100, parts=[MetaPart(0, "weirdkey", 100, 0)])
+    assert broadcast_date(m2) == ""

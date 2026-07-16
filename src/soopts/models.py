@@ -46,6 +46,19 @@ class MetaResult:
         return MetaResult(**d)
 
 
+def broadcast_date(meta: MetaResult) -> str:
+    """방송 날짜(YYYY-MM-DD)를 파트 file_info_key 앞부분(예: 20260604_...)에서 뽑는다.
+
+    못 뽑으면 빈 문자열. file_info_key 형식이 바뀌어도 안전하게 실패한다.
+    """
+    if not meta.parts:
+        return ""
+    head = meta.parts[0].file_info_key.split("_", 1)[0]
+    if len(head) == 8 and head.isdigit():
+        return f"{head[:4]}-{head[4:6]}-{head[6:8]}"
+    return ""
+
+
 def write_meta(path: Path, meta: MetaResult) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(meta.to_dict(), fh, ensure_ascii=False, indent=2)
