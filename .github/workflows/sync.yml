@@ -40,7 +40,9 @@ jobs:
       - name: soopts sync
         id: sync
         continue-on-error: true
-        run: soopts -v sync 2>&1 | tee sync.log
+        run: |
+          set -o pipefail
+          soopts -v sync 2>&1 | tee sync.log
 
       - name: 요약
         if: always()
