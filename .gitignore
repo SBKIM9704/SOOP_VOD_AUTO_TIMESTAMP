@@ -5,6 +5,9 @@ work/
 client_secret*.json
 *_token.json
 yt_token.json
+.env
+.env.*
+*.log
 
 # Python
 __pycache__/

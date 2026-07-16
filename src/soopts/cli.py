@@ -108,6 +108,8 @@ def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int
     )
     log.info("노래 후보 %d구간 → 1080p 클립 추출(%s)", len(regions), cfg.clip.quality)
 
+    from soopts.collector.media import map_to_part
+
     m3u8s = resolve_m3u8_list(args.vod, cfg.clip.quality)
     parts = meta.parts if meta else []
     work.clips_dir.mkdir(parents=True, exist_ok=True)
@@ -115,7 +117,7 @@ def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int
     for s, e in regions:
         ds = max(0.0, s - cfg.clip.dl_pad_before_s)
         de = e + cfg.clip.dl_pad_after_s
-        m3u8, ls, le = _map_to_part(ds, de, parts, m3u8s)
+        m3u8, ls, le = map_to_part(ds, de, parts, m3u8s)
         if m3u8 is None:
             continue
         raw = work.clips_dir / f"region_{int(ds)}.mp4"
@@ -171,6 +173,34 @@ def _upload_clips(cfg: Config, vod_id: str, meta, clips) -> None:
             print(f"  ✅ {fmt_hms(c.t)} → {url}")
         except Exception as ex:  # noqa: BLE001
             print(f"  ❌ {fmt_hms(c.t)} 업로드 실패: {ex}")
+
+
+def cmd_daily(args) -> int:
+    """스테이션 최신 VOD 자동 처리(감지·식별·클립·업로드) — GitHub Actions 배치용."""
+    cfg = load_config(
+        Path(args.config) if args.config else None,
+        work_root=Path(args.work_root) if args.work_root else None,
+    )
+    from soopts import batch
+
+    result = batch.run_daily(
+        cfg,
+        bj_id=args.bj or cfg.station.bj_id,
+        count=args.count or cfg.station.daily_vod_count,
+        upload=not args.no_upload,
+    )
+    print(result["text"])
+    return 0
+
+
+def cmd_sync(args) -> int:
+    """검수 확정(confirmed)된 곡명을 유튜브 제목/설명에 반영."""
+    cfg = load_config(Path(args.config) if args.config else None)
+    from soopts import batch
+
+    n = batch.run_sync(cfg)
+    print(f"유튜브 메타데이터 동기화: {n}건")
+    return 0
 
 
 def cmd_upload(args) -> int:
@@ -235,7 +265,7 @@ def _songs_slice(cfg: Config, vod_id: str, work: WorkPaths, meta, args):
     """
     from soopts.analyzers.audio_analyzer import sticker_burst_regions
     from soopts.analyzers.stt import transcribe_slices
-    from soopts.collector.media import download_slice, resolve_m3u8_list
+    from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
     from soopts.models import Song, read_chat_jsonl
 
     if not work.chat.exists():
@@ -266,7 +296,7 @@ def _songs_slice(cfg: Config, vod_id: str, work: WorkPaths, meta, args):
 
     pairs = []
     for s, e in regions:
-        m3u8, ls, le = _map_to_part(s, e, parts, m3u8s)
+        m3u8, ls, le = map_to_part(s, e, parts, m3u8s)
         if m3u8 is None:
             log.warning("구간 %d-%d 파트 매핑 실패 — 건너뜀", int(s), int(e))
             continue
@@ -281,23 +311,6 @@ def _songs_slice(cfg: Config, vod_id: str, work: WorkPaths, meta, args):
     if args.no_stt:
         return [s for s, _ in pairs]
     return transcribe_slices(cfg, pairs)
-
-
-def _map_to_part(s: float, e: float, parts, m3u8s):
-    """전역 시각 구간 (s,e)를 해당 파트의 m3u8 + 파트-로컬 시각으로 매핑.
-
-    단일 파트(메타 없음)면 그대로 첫 m3u8 사용. 파트 경계를 넘으면 시작 파트 안으로 클램프.
-    """
-    if not parts:
-        return m3u8s[0], s, e
-    for p in parts:
-        if p.offset_s <= s < p.offset_s + p.duration:
-            if p.idx >= len(m3u8s):
-                return None, 0, 0
-            ls = s - p.offset_s
-            le = min(e - p.offset_s, float(p.duration))  # 파트 끝으로 클램프
-            return m3u8s[p.idx], ls, le
-    return None, 0, 0
 
 
 # --------------------------------------------------------------------------- #
@@ -324,6 +337,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--allow-untitled", action="store_true", help="곡명 미확정도 '곡명 미상'으로 업로드")
     sp.add_argument("--no-stt", action="store_true", help="클립 가사 전사 생략")
     sp.set_defaults(func=cmd_clips)
+
+    sp = sub.add_parser(
+        "daily", help="스테이션 최신 VOD 자동 처리(감지·식별·클립·업로드) — GitHub Actions 배치용"
+    )
+    sp.add_argument("--count", type=int, help="처리할 미처리 VOD 수(기본: soopts.toml [station] daily_vod_count)")
+    sp.add_argument("--bj", help="대상 스테이션 bj_id(기본: soopts.toml [station] bj_id)")
+    sp.add_argument("--no-upload", action="store_true", help="업로드 큐 소진 생략(감지·식별·클립까지만)")
+    sp.set_defaults(func=cmd_daily)
+
+    sp = sub.add_parser("sync", help="검수 확정된 곡명을 유튜브 제목/설명에 반영")
+    sp.set_defaults(func=cmd_sync)
 
     sp = sub.add_parser("upload", help="단일 영상 파일을 유튜브 unlisted 업로드(OAuth 테스트용)")
     sp.add_argument("file", help="업로드할 영상 파일 경로")

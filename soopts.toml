@@ -41,3 +41,8 @@ token_file = "~/.config/soopts/yt_token.json" # 최초 동의 후 토큰 저장(
 privacy = "unlisted"       # unlisted=링크로만 시청 가능
 # 사용 가능 치환자: {title}(곡명/미상) {bj} {date}(방송일 YYYY-MM-DD) {hms}(시각) {vod_id}
 title_template = "{title} - {bj} ({date})"
+daily_upload_limit = 5     # soopts daily 1회 실행당 업로드 상한 (YouTube 쿼터 여유는 sync용)
+
+[station]                  # 데일리 배치 대상 (soopts daily)
+bj_id = "singgyul"
+daily_vod_count = 2        # 하루 처리할 미처리 VOD 수
