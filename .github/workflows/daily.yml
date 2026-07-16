@@ -1,0 +1,86 @@
+name: daily
+
+# 스테이션 최신 VOD 무인 배치: 감지·식별·1080p 클립·업로드.
+# 휘발성 러너 전제 — 큐의 진실은 Supabase(DB)에 있고, 클립 파일은 언제든 재생성 가능하다.
+on:
+  schedule:
+    - cron: "0 19 * * *"   # 19:00 UTC = 04:00 KST
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "처리할 미처리 VOD 수 (기본: soopts.toml [station] daily_vod_count)"
+        required: false
+        type: string
+      no_upload:
+        description: "업로드 큐 소진 생략 (감지·식별·클립까지만)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: soopts-daily
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest   # Phase 0 검증 실패 시 self-hosted로 교체 (나머지는 동일)
+    timeout-minutes: 330
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Cache STT/음악감지 모델
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.keras/inaSpeechSegmenter
+          key: soopts-models-${{ runner.os }}-v1
+
+      - name: Install soopts (+audio,stt,youtube,batch)
+        run: pip install -e ".[audio,stt,youtube,batch]" yt-dlp
+
+      - name: 유튜브 OAuth 자격 복원
+        run: |
+          echo "$YT_CLIENT_SECRET" > client_secret.json
+          mkdir -p ~/.config/soopts
+          echo "$YT_TOKEN" > ~/.config/soopts/yt_token.json
+        env:
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_TOKEN: ${{ secrets.YT_TOKEN }}
+
+      - name: soopts daily
+        id: daily
+        continue-on-error: true
+        run: |
+          ARGS=()
+          if [ -n "${{ inputs.count }}" ]; then ARGS+=(--count "${{ inputs.count }}"); fi
+          if [ "${{ inputs.no_upload }}" = "true" ]; then ARGS+=(--no-upload); fi
+          soopts -v daily "${ARGS[@]}" 2>&1 | tee daily.log
+
+      - name: 요약
+        if: always()
+        run: |
+          {
+            echo "## soopts daily 결과 (${{ steps.daily.outcome }})"
+            echo ""
+            echo '```'
+            tail -n 20 daily.log 2>/dev/null || echo "(로그 없음)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 실패 판정
+        if: steps.daily.outcome == 'failure'
+        run: exit 1

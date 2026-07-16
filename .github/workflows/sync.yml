@@ -1,0 +1,58 @@
+name: sync
+
+# 검수 확정(confirmed)된 곡명을 유튜브 제목/설명에 반영. audio/stt 등 무거운 의존성 불필요.
+on:
+  schedule:
+    - cron: "0 20 * * *"   # 20:00 UTC = 05:00 KST
+  workflow_dispatch: {}
+
+concurrency:
+  group: soopts-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install soopts (+youtube,batch)
+        run: pip install -e ".[youtube,batch]"
+
+      - name: 유튜브 OAuth 자격 복원
+        run: |
+          echo "$YT_CLIENT_SECRET" > client_secret.json
+          mkdir -p ~/.config/soopts
+          echo "$YT_TOKEN" > ~/.config/soopts/yt_token.json
+        env:
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_TOKEN: ${{ secrets.YT_TOKEN }}
+
+      - name: soopts sync
+        id: sync
+        continue-on-error: true
+        run: soopts -v sync 2>&1 | tee sync.log
+
+      - name: 요약
+        if: always()
+        run: |
+          {
+            echo "## soopts sync 결과 (${{ steps.sync.outcome }})"
+            echo ""
+            echo '```'
+            tail -n 20 sync.log 2>/dev/null || echo "(로그 없음)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 실패 판정
+        if: steps.sync.outcome == 'failure'
+        run: exit 1
