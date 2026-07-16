@@ -38,7 +38,7 @@ jobs:
       - name: SOOP 메타/채팅 API 접근 확인 (soopts collect)
         id: collect
         continue-on-error: true
-        run: soopts collect "$VOD_ID" -v
+        run: soopts -v collect "$VOD_ID"
 
       - name: yt-dlp 스트림 URL 조회
         id: ytdlp
