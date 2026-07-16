@@ -65,6 +65,7 @@ jobs:
         id: daily
         continue-on-error: true
         run: |
+          set -o pipefail
           ARGS=()
           if [ -n "${{ inputs.count }}" ]; then ARGS+=(--count "${{ inputs.count }}"); fi
           if [ "${{ inputs.no_upload }}" = "true" ]; then ARGS+=(--no-upload); fi
