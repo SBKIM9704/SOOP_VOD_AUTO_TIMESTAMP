@@ -1,0 +1,180 @@
+{
+  "data": [
+    {
+      "title_no": 201651295,
+      "station_no": 26352274,
+      "bbs_no": 97351873,
+      "board_type": 105,
+      "auth_no": 101,
+      "title_name": "[하데스] 초록주먹뱅 (짧뱅이라는 뜻)",
+      "user_nick": "띵귤_",
+      "user_id": "singgyul",
+      "profile_image": "//profile.img.sooplive.co.kr/LOGO/si/singgyul/singgyul.jpg",
+      "photo_cnt": 0,
+      "platform_type": 0,
+      "notice_yn": 0,
+      "comment_yn": 1,
+      "reply_yn": 1,
+      "livepost_yn": 0,
+      "share_yn": 1,
+      "search_yn": 1,
+      "ip": "",
+      "reg_date": "2026-07-16 22:18:51",
+      "ucc": {
+        "thumb": "//videoimg.sooplive.com/php/SnapshotLoad.php?rowKey=20260716_D268BB0A_295620635_1_r",
+        "thumb_type": "SUCCEED",
+        "flag": "SUCCEED",
+        "ucc_type": "21",
+        "category": 210000,
+        "vod_category": 820000,
+        "grade": 0,
+        "category_tags": [
+          "Virtual"
+        ],
+        "hash_tags": [
+          "노래",
+          "음악",
+          "버츄얼",
+          "하데스"
+        ],
+        "auto_hashtags": [],
+        "total_file_duration": 8332900,
+        "file_type": "REVIEW",
+        "auto_delete_remain_hours": null,
+        "story_idx": null,
+        "paid_ppv": false,
+        "is_subtitle": false,
+        "lang_tags": [
+          "한국어"
+        ],
+        "catchInfo": null
+      },
+      "display": {
+        "bbs_name": "Replay"
+      },
+      "count": {
+        "like_cnt": 8,
+        "read_cnt": 8221,
+        "comment_cnt": 2,
+        "vod_read_cnt": 295,
+        "ucc_favorite_cnt": 0
+      },
+      "copyright": null,
+      "badge": null,
+      "pin": null,
+      "authority": {
+        "is_board_shareable": true,
+        "is_reason_deletable": false,
+        "is_blind_deletable": false,
+        "is_clip_reason_deletable": false,
+        "is_catch_reason_deletable": false,
+        "is_ucc_deletable": false,
+        "is_ucc_updatable": false,
+        "is_vod_pinable": false,
+        "is_vod_pin_fixable": false,
+        "is_vod_pin_cancelable": false,
+        "is_ucc_editable": false,
+        "is_ucc_mid_roll_settable": false,
+        "is_ucc_playlist_addable": true,
+        "is_ucc_chapter_settable": false,
+        "is_vod_movable_to_board": false
+      }
+    },
+    {
+      "title_no": 201586597,
+      "station_no": 26352274,
+      "bbs_no": 97351873,
+      "board_type": 105,
+      "auth_no": 101,
+      "title_name": "[하데스] 후여르 귤",
+      "user_nick": "띵귤_",
+      "user_id": "singgyul",
+      "profile_image": "//profile.img.sooplive.co.kr/LOGO/si/singgyul/singgyul.jpg",
+      "photo_cnt": 0,
+      "platform_type": 0,
+      "notice_yn": 0,
+      "comment_yn": 1,
+      "reply_yn": 1,
+      "livepost_yn": 0,
+      "share_yn": 1,
+      "search_yn": 1,
+      "ip": "",
+      "reg_date": "2026-07-16 02:04:19",
+      "ucc": {
+        "thumb": "//videoimg.sooplive.com/php/SnapshotLoad.php?rowKey=20260715_4083B6C4_295593225_4_r",
+        "thumb_type": "SUCCEED",
+        "flag": "SUCCEED",
+        "ucc_type": "21",
+        "category": 210000,
+        "vod_category": 820000,
+        "grade": 19,
+        "category_tags": [
+          "Virtual"
+        ],
+        "hash_tags": [
+          "노래",
+          "음악",
+          "버츄얼",
+          "하데스"
+        ],
+        "auto_hashtags": [],
+        "total_file_duration": 20088417,
+        "file_type": "REVIEW",
+        "auto_delete_remain_hours": null,
+        "story_idx": 737667,
+        "paid_ppv": false,
+        "is_subtitle": false,
+        "lang_tags": [
+          "한국어"
+        ],
+        "catchInfo": null
+      },
+      "display": {
+        "bbs_name": "Replay"
+      },
+      "count": {
+        "like_cnt": 16,
+        "read_cnt": 18845,
+        "comment_cnt": 4,
+        "vod_read_cnt": 905,
+        "ucc_favorite_cnt": 0
+      },
+      "copyright": null,
+      "badge": null,
+      "pin": null,
+      "authority": {
+        "is_board_shareable": true,
+        "is_reason_deletable": false,
+        "is_blind_deletable": false,
+        "is_clip_reason_deletable": false,
+        "is_catch_reason_deletable": false,
+        "is_ucc_deletable": false,
+        "is_ucc_updatable": false,
+        "is_vod_pinable": false,
+        "is_vod_pin_fixable": false,
+        "is_vod_pin_cancelable": false,
+        "is_ucc_editable": false,
+        "is_ucc_mid_roll_settable": false,
+        "is_ucc_playlist_addable": true,
+        "is_ucc_chapter_settable": false,
+        "is_vod_movable_to_board": false
+      }
+    }
+  ],
+  "links": {
+    "first": "https://chapi.sooplive.co.kr/api/singgyul/vods/review?page=1",
+    "last": "https://chapi.sooplive.co.kr/api/singgyul/vods/review?page=32",
+    "prev": null,
+    "next": "https://chapi.sooplive.co.kr/api/singgyul/vods/review?page=2"
+  },
+  "meta": {
+    "current_page": 1,
+    "from": 1,
+    "last_page": 32,
+    "path": "https://chapi.sooplive.co.kr/api/singgyul/vods/review",
+    "per_page": 20,
+    "to": 20,
+    "total": 625
+  },
+  "auto_del_vods": []
+}

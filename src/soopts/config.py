@@ -81,6 +81,13 @@ class YouTubeConfig:
     category_id: str = "10"          # 10 = Music
     title_template: str = "{title} - {bj} ({date})"
     made_for_kids: bool = False
+    daily_upload_limit: int = 5      # 쿼터: 업로드 1600유닛/건, 일일 10000유닛 → 여유는 sync용
+
+
+@dataclass
+class StationConfig:
+    bj_id: str = "singgyul"          # 데일리 배치 대상 스테이션
+    daily_vod_count: int = 2         # 하루 처리할 미처리 VOD 수
 
 
 @dataclass
@@ -91,6 +98,7 @@ class Config:
     stt: SttConfig = field(default_factory=SttConfig)
     clip: ClipConfig = field(default_factory=ClipConfig)
     youtube: YouTubeConfig = field(default_factory=YouTubeConfig)
+    station: StationConfig = field(default_factory=StationConfig)
     work_root: Path = Path("work")
 
 
@@ -115,6 +123,7 @@ def load_config(path: Path | None = None, work_root: Path | None = None) -> Conf
         stt=_build_section(SttConfig, data.get("stt", {})),
         clip=_build_section(ClipConfig, data.get("clip", {})),
         youtube=_build_section(YouTubeConfig, data.get("youtube", {})),
+        station=_build_section(StationConfig, data.get("station", {})),
     )
     if data.get("work_root") is not None:
         cfg.work_root = Path(data["work_root"])
