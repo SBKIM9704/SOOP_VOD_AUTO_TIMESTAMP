@@ -56,6 +56,134 @@ def cmd_collect(args) -> int:
     return 0
 
 
+def cmd_clips(args) -> int:
+    """BJ 부른 노래 1080p 클립 추출·검수 → 곡명 확인 후 --upload로 유튜브 업로드.
+
+    2단계: (1) `clips` 로 추출+가사 전사+clips.json 저장(검수)
+           (2) clips.json 에 곡명 채운 뒤 `clips --upload` 로 업로드
+    """
+    cfg, vod_id, work = _ctx(args)
+    from soopts.export.clips import read_clips
+    from soopts.models import read_meta
+
+    meta = read_meta(work.meta) if work.meta.exists() else None
+
+    # --- 2단계: 검수 완료된 clips.json 으로 업로드 ---
+    if args.upload:
+        clips = read_clips(work.clips_dir)
+        if not clips:
+            print("clips.json 이 없습니다. 먼저 `soopts clips <vod>` 로 클립을 추출·검수하세요.")
+            return 1
+        missing = [c for c in clips if not c.title]
+        if missing and not args.allow_untitled:
+            from soopts.output import fmt_hms
+            print(f"곡명 미확정 클립 {len(missing)}개가 있습니다 (clips.json 의 title 을 채우세요):")
+            for c in missing:
+                print(f"  {fmt_hms(c.t)}  가사: {c.lyrics[:60]}")
+            print("\n곡명 없이 '곡명 미상'으로 그냥 올리려면 --allow-untitled 를 붙이세요.")
+            return 1
+        _upload_clips(cfg, vod_id, meta, clips)
+        return 0
+
+    # --- 1단계: 추출 + 가사 전사 + 검수 파일 저장 ---
+    return _produce_clips(cfg, vod_id, work, meta, args)
+
+
+def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int:
+    from soopts.analyzers.audio_analyzer import sticker_burst_regions
+    from soopts.collector.media import download_slice, resolve_m3u8_list
+    from soopts.export.clips import make_clip, write_clips
+    from soopts.models import read_chat_jsonl
+    from soopts.output import fmt_hms
+
+    if not work.chat.exists():
+        raise RuntimeError("chat.jsonl 없음 — 먼저 `soopts collect` 로 채팅(스티커)을 수집하세요")
+    stickers = [float(m.t) for m in read_chat_jsonl(work.chat) if m.kind == "ogq"]
+    a = cfg.audio
+    regions = sticker_burst_regions(
+        stickers, bucket_s=a.sticker_bucket_s, window_buckets=a.sticker_window_buckets,
+        min_per_window=a.sticker_min_per_window, pad_before_s=a.sticker_pad_before_s,
+        pad_after_s=a.sticker_pad_after_s, skip_opening_s=a.skip_opening_s,
+        total_s=meta.total_duration if meta else None,
+    )
+    log.info("노래 후보 %d구간 → 1080p 클립 추출(%s)", len(regions), cfg.clip.quality)
+
+    m3u8s = resolve_m3u8_list(args.vod, cfg.clip.quality)
+    parts = meta.parts if meta else []
+    work.clips_dir.mkdir(parents=True, exist_ok=True)
+    clips = []
+    for s, e in regions:
+        ds = max(0.0, s - cfg.clip.dl_pad_before_s)
+        de = e + cfg.clip.dl_pad_after_s
+        m3u8, ls, le = _map_to_part(ds, de, parts, m3u8s)
+        if m3u8 is None:
+            continue
+        raw = work.clips_dir / f"region_{int(ds)}.mp4"
+        if not raw.exists() or args.force:
+            download_slice(m3u8, ls, le, raw)
+        clip = make_clip(cfg, vod_id, str(raw), ds, de, work.clips_dir, media_offset=ds)
+        if clip:
+            clips.append(clip)
+
+    if not clips:
+        print("추출된 노래 클립이 없습니다.")
+        return 0
+
+    # 정밀 컷된 클립(노래만)이라 전사가 깨끗함 → 가사 채워 곡 식별/설명에 사용
+    if not args.no_stt:
+        from soopts.analyzers.stt import _load_model, _transcribe_best
+        model = _load_model(cfg)
+        for c in clips:
+            text, _lang = _transcribe_best(model, c.path, cfg)
+            c.lyrics = text[: cfg.stt.lyric_chars]
+
+    # 검수 파일 저장 + 곡명 확인 안내
+    write_clips(work.clips_dir, clips)
+    print(f"\n🎬 노래 클립 {len(clips)}개 추출 — 곡명 확인 단계:")
+    for c in clips:
+        print(f"\n  [{fmt_hms(c.t)}~{fmt_hms(c.end)}] {c.duration}초  {Path(c.path).name}")
+        print(f"    가사: {c.lyrics[:70] or '(전사 없음)'}")
+    print(f"\n다음: {work.clips_dir / 'clips.json'} 의 각 \"title\" 에 곡명을 채운 뒤")
+    print(f"      `soopts clips {vod_id} --upload` 로 업로드하세요.")
+    print("      (곡명을 못 채운 건 그대로 두면 업로드 시 안내됩니다.)")
+    return 0
+
+
+def _upload_clips(cfg: Config, vod_id: str, meta, clips) -> None:
+    from soopts.export.youtube import upload_unlisted
+    from soopts.models import broadcast_date
+    from soopts.output import fmt_hms
+
+    bj = meta.bj_nick if meta else ""
+    date = broadcast_date(meta) if meta else ""
+    vod_url = cfg.endpoints.vod_web_url.replace("{title_no}", str(vod_id))
+    print("\n📤 유튜브 업로드(unlisted) 시작...")
+    for c in clips:
+        title = cfg.youtube.title_template.format(
+            bj=bj, title=(c.title or "곡명 미상"), vod_id=vod_id, hms=fmt_hms(c.t), date=date
+        )
+        desc = f"{bj} 다시보기 노래 구간\n원본: {vod_url.replace('{sec}', str(c.t))}"
+        if c.lyrics:
+            desc += f"\n\n가사(자동전사):\n{c.lyrics}"
+        try:
+            url = upload_unlisted(cfg, c.path, title, desc)
+            c.title = title
+            print(f"  ✅ {fmt_hms(c.t)} → {url}")
+        except Exception as ex:  # noqa: BLE001
+            print(f"  ❌ {fmt_hms(c.t)} 업로드 실패: {ex}")
+
+
+def cmd_upload(args) -> int:
+    """단일 영상 파일을 유튜브 unlisted로 업로드(OAuth 테스트/재업로드용)."""
+    cfg = load_config(Path(args.config) if args.config else None)
+    from soopts.export.youtube import upload_unlisted
+
+    title = args.title or Path(args.file).stem
+    url = upload_unlisted(cfg, args.file, title, args.desc or "")
+    print(f"✅ 업로드 완료(unlisted): {url}")
+    return 0
+
+
 def cmd_fetch(args) -> int:
     cfg, vod_id, work = _ctx(args)
     from soopts.collector.media import download_audio_full
@@ -189,6 +317,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_vod(sp)
     sp.add_argument("--reparse", action="store_true", help="raw XML에서 chat.jsonl만 재생성(네트워크 없음)")
     sp.set_defaults(func=cmd_collect)
+
+    sp = sub.add_parser("clips", help="BJ 부른 노래만 1080p 클립 추출 + (옵션)유튜브 업로드")
+    add_vod(sp)
+    sp.add_argument("--upload", action="store_true", help="검수된 clips.json 을 유튜브 unlisted 업로드")
+    sp.add_argument("--allow-untitled", action="store_true", help="곡명 미확정도 '곡명 미상'으로 업로드")
+    sp.add_argument("--no-stt", action="store_true", help="클립 가사 전사 생략")
+    sp.set_defaults(func=cmd_clips)
+
+    sp = sub.add_parser("upload", help="단일 영상 파일을 유튜브 unlisted 업로드(OAuth 테스트용)")
+    sp.add_argument("file", help="업로드할 영상 파일 경로")
+    sp.add_argument("--title", help="영상 제목(기본: 파일명)")
+    sp.add_argument("--desc", help="설명란")
+    sp.set_defaults(func=cmd_upload)
 
     sp = sub.add_parser("fetch", help="yt-dlp로 전체 오디오 다운로드")
     add_vod(sp)
