@@ -1,6 +1,11 @@
 # 작업 산출물
 work/
 
+# OAuth 비밀정보 (절대 커밋 금지)
+client_secret*.json
+*_token.json
+yt_token.json
+
 # Python
 __pycache__/
 *.py[cod]

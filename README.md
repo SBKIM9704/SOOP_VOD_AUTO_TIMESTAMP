@@ -31,7 +31,36 @@ soopts fetch 197718401                 # work/197718401/audio.mp3
 
 # 3) 노래 감지 + 전사 + 타임라인
 soopts songs 197718401 --audio work/197718401/audio.mp3
+
+# 4) BJ 부른 노래만 1080p 클립 추출(정밀 경계) → 유튜브 unlisted 자동 업로드
+soopts clips 197718401            # 클립 추출만 (검수용)
+soopts clips 197718401 --upload   # 추출 + 유튜브 unlisted 업로드
 ```
+
+### 노래 클립 추출 & 유튜브 업로드 (🎬)
+
+`clips`는 **BJ가 부른 노래만** 1080p 클립으로 만들고, 선택적으로 유튜브에 unlisted 업로드한다:
+1. 스티커로 노래 위치 특정(채팅만, 전체 다운로드 없음)
+2. 후보 구간만 1080p 슬라이스 다운로드
+3. inaSpeechSegmenter로 **음악 경계 정밀 탐지**(구간 내 최장 음악 블록=노래) → 클린 컷 (실측 1~5초 오차)
+4. faster-whisper로 클립 가사 전사(설명란/식별용)
+5. `--upload` 시 유튜브 unlisted 업로드
+
+> ⚠️ **저작권**: unlisted여도 유튜브 Content ID가 원곡을 감지해 클레임/차단할 수 있음.
+> 무엇을 올릴지는 사용자 판단·책임. `--upload` 없이 먼저 검수 권장.
+> talk 위주 방송은 스티커 구간이 길어 1080p 다운로드가 커질 수 있음(노래 위주 VOD 권장).
+
+#### 유튜브 업로드 최초 1회 설정 (OAuth)
+
+```
+설치:  uv pip install -e ".[youtube]"
+1) https://console.cloud.google.com → 새 프로젝트
+2) "YouTube Data API v3" 사용 설정(Enable)
+3) OAuth 동의 화면(External, 테스트 사용자에 본인 계정 추가)
+4) 사용자 인증 정보 → OAuth 클라이언트 ID → "데스크톱 앱" → client_secret.json 다운로드
+5) soopts.toml [youtube] client_secret 에 그 파일 경로 지정
+```
+`--upload` 최초 실행 시 브라우저 동의 → 토큰 저장 → 이후 자동 업로드.
 
 출력 예:
 
