@@ -1,0 +1,20 @@
+# 작업 산출물
+work/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 가상환경
+.venv/
+venv/
+
+# 테스트/도구 캐시
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
