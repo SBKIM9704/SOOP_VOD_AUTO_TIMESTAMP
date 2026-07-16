@@ -49,6 +49,30 @@ def format_summary(stats: dict[str, int]) -> str:
     return " / ".join(parts)
 
 
+def vod_link(cfg: Config, title_no: str) -> str:
+    """VOD 웹 플레이어 링크 (Slack 하이퍼링크용, 특정 시각 지정 없음)."""
+    return cfg.endpoints.vod_web_url.replace("{title_no}", str(title_no)).replace(
+        "?change_second={sec}", ""
+    )
+
+
+def format_vod_result(cfg: Config, title_no: str, stats: dict[str, Any]) -> str:
+    """VOD 하나 처리 결과 — Slack에 개별 발송할 상세 메시지."""
+    link = vod_link(cfg, title_no)
+    if stats.get("error"):
+        return f"❌ VOD {title_no} 처리 실패: {link}\n    {stats['error']}"
+
+    lines = [f"✅ VOD {title_no} 처리 완료: {link}"]
+    lines.append(
+        f"    감지 {stats.get('detected', 0)}곡 "
+        f"(자동매칭 {stats.get('auto_matched', 0)}, 검수대기 {stats.get('needs_review', 0)})"
+    )
+    region_errors = stats.get("region_errors") or []
+    if region_errors:
+        lines.append(f"    일부 구간 실패({len(region_errors)}건): " + " / ".join(region_errors))
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------- #
 # daily
 # --------------------------------------------------------------------------- #
@@ -68,9 +92,11 @@ def run_daily(cfg: Config, *, bj_id: str, count: int, upload: bool) -> dict[str,
             stats["auto_matched"] += vod_stats["auto_matched"]
             stats["needs_review"] += vod_stats["needs_review"]
             db.mark_vod(title_no, next_vod_status(vod_stats["detected"]))
+            _notify_slack(format_vod_result(cfg, title_no, vod_stats))
         except Exception as e:  # noqa: BLE001
             log.error("VOD %s 처리 실패: %s", title_no, e)
             db.mark_vod(title_no, "failed", error=str(e)[:500])
+            _notify_slack(format_vod_result(cfg, title_no, {"error": str(e)[:500]}))
         stats["vods"] += 1
 
     if upload:
@@ -84,11 +110,15 @@ def run_daily(cfg: Config, *, bj_id: str, count: int, upload: bool) -> dict[str,
     return {**stats, "text": text}
 
 
-def _process_vod(cfg: Config, vod_row: dict[str, Any]) -> dict[str, int]:
-    """collect → 노래 구간 감지+1080p 정밀 클립+STT → 식별 → DB 기록.
+def _process_vod(cfg: Config, vod_row: dict[str, Any]) -> dict[str, Any]:
+    """collect → 노래 구간 감지 → 구간별로 하나씩(1080p 정밀 클립+STT+식별+DB 기록).
 
-    한 VOD 안의 개별 구간 실패는 전체 VOD 실패로 전파한다(부분 커밋하지 않음) —
-    실패 시 run_daily가 mark_vod('failed')로 재시도 대상으로 남긴다.
+    구간 하나의 실패는 그 구간만 건너뛰고 나머지는 계속 진행한다(이전엔 VOD 전체를
+    실패 처리해 이미 성공한 구간까지 버렸다 — VOD 201651295에서 실제로 이렇게 30분
+    분량 작업이 통째로 날아간 사례가 있어 구간 단위로 바꿨다). 다만 후보 구간이
+    있었는데 전부 실패하면(예: 네트워크 장애) 재시도 대상이 되도록 예외를 던진다 —
+    그렇지 않으면 next_vod_status가 이걸 "노래 없음"과 구분 못 하고 done으로
+    잘못 종결시킨다.
     """
     from soopts import db
     from soopts.analyzers.audio_analyzer import sticker_burst_regions, sticker_rate
@@ -97,7 +127,9 @@ def _process_vod(cfg: Config, vod_row: dict[str, Any]) -> dict[str, int]:
     from soopts.collector.chat import fetch_chat
     from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
     from soopts.collector.meta import fetch_meta
+    from soopts.export.clips import make_clip
     from soopts.models import Song, read_chat_jsonl
+    from soopts.output import fmt_hms
 
     title_no = vod_row["soop_title_no"]
     work = work_paths(cfg.work_root, title_no).ensure()
@@ -112,59 +144,63 @@ def _process_vod(cfg: Config, vod_row: dict[str, Any]) -> dict[str, int]:
         pad_after_s=a.sticker_pad_after_s, skip_opening_s=a.skip_opening_s,
         total_s=meta.total_duration,
     )
-    stats = {"detected": 0, "auto_matched": 0, "needs_review": 0}
+    log.info("VOD %s 노래 후보 %d구간", title_no, len(regions))
+    stats: dict[str, Any] = {"detected": 0, "auto_matched": 0, "needs_review": 0, "region_errors": []}
     if not regions:
         return stats
-
-    from soopts.export.clips import make_clip
 
     m3u8s = resolve_m3u8_list(title_no, cfg.clip.quality)
     parts = meta.parts
     work.clips_dir.mkdir(parents=True, exist_ok=True)
-
-    songs: list[Song] = []
-    stt_model = None
-    for s, e in regions:
-        ds = max(0.0, s - cfg.clip.dl_pad_before_s)
-        de = e + cfg.clip.dl_pad_after_s
-        m3u8, ls, le = map_to_part(ds, de, parts, m3u8s)
-        if m3u8 is None:
-            log.warning("VOD %s 구간 %d-%d 파트 매핑 실패 — 건너뜀", title_no, int(ds), int(de))
-            continue
-        raw = work.clips_dir / f"region_{int(ds)}.mp4"
-        if not raw.exists():
-            download_slice(m3u8, ls, le, raw)
-        clip = make_clip(cfg, title_no, str(raw), ds, de, work.clips_dir, media_offset=ds)
-        if clip is None:
-            continue
-        if stt_model is None:
-            stt_model = _load_model(cfg)
-        text, _lang = _transcribe_best(stt_model, clip.path, cfg)
-        lyrics = text[: cfg.stt.lyric_chars]
-        rate = sticker_rate((clip.t, clip.end), stickers)
-        songs.append(Song(
-            t=clip.t, end=clip.end, duration=clip.duration,
-            sticker_rate=round(rate, 1), song_likely=rate >= a.sticker_rate_strong,
-            lyrics=lyrics,
-        ))
-
-    stats["detected"] = len(songs)
-    if not songs:
-        return stats
-
     catalog = db.load_song_catalog()
-    results = [
-        identify_song(s.lyrics, s.song_likely, catalog) if s.lyrics else None for s in songs
-    ]
-    for r in results:
-        if r and r.identify_status == "auto_matched":
-            stats["auto_matched"] += 1
-        else:
-            stats["needs_review"] += 1
+    stt_model = None
 
-    perf_rows = db.insert_performances(vod_row["id"], songs, results)
-    for perf in perf_rows:
-        db.update_performance(perf["id"], clip_status="clipped")
+    for s, e in regions:
+        label = f"{fmt_hms(int(s))}~{fmt_hms(int(e))}"
+        try:
+            ds = max(0.0, s - cfg.clip.dl_pad_before_s)
+            de = e + cfg.clip.dl_pad_after_s
+            m3u8, ls, le = map_to_part(ds, de, parts, m3u8s)
+            if m3u8 is None:
+                log.warning("VOD %s 구간 %s 파트 매핑 실패 — 건너뜀", title_no, label)
+                continue
+            raw = work.clips_dir / f"region_{int(ds)}.mp4"
+            if not raw.exists():
+                download_slice(m3u8, ls, le, raw)
+            clip = make_clip(cfg, title_no, str(raw), ds, de, work.clips_dir, media_offset=ds)
+            if clip is None:
+                continue
+
+            if stt_model is None:
+                stt_model = _load_model(cfg)
+            text, _lang = _transcribe_best(stt_model, clip.path, cfg)
+            lyrics = text[: cfg.stt.lyric_chars]
+            rate = sticker_rate((clip.t, clip.end), stickers)
+            song = Song(
+                t=clip.t, end=clip.end, duration=clip.duration,
+                sticker_rate=round(rate, 1), song_likely=rate >= a.sticker_rate_strong,
+                lyrics=lyrics,
+            )
+            result = identify_song(song.lyrics, song.song_likely, catalog) if song.lyrics else None
+
+            perf_rows = db.insert_performances(vod_row["id"], [song], [result])
+            if perf_rows:
+                db.update_performance(perf_rows[0]["id"], clip_status="clipped")
+
+            stats["detected"] += 1
+            if result and result.identify_status == "auto_matched":
+                stats["auto_matched"] += 1
+            else:
+                stats["needs_review"] += 1
+        except Exception as ex:  # noqa: BLE001
+            log.warning("VOD %s 구간 %s 처리 실패: %s", title_no, label, ex)
+            stats["region_errors"].append(f"{label}: {ex}")
+            continue
+
+    if stats["detected"] == 0 and stats["region_errors"]:
+        raise RuntimeError(
+            f"후보 {len(regions)}구간 전부 실패 (예: {stats['region_errors'][0]})"
+        )
     return stats
 
 
