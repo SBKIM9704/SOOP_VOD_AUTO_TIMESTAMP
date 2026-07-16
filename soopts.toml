@@ -1,0 +1,29 @@
+# soopts 설정 예시 (노래 전용). 모든 키 생략 가능(생략 시 기본값).
+# SOOP API는 비공식이라 언제든 바뀔 수 있으므로 엔드포인트를 여기서 패치한다.
+
+[endpoints]
+meta_url = "https://api.m.sooplive.com/station/video/a/view"
+chat_url = "https://videoimg.sooplive.com/php/ChatLoadSplit.php"
+api_level = 10
+
+[collector]
+request_delay_s = 0.3      # 요청 간 지연(서버 예의)
+chunk_step_s = 300         # ChatLoadSplit startTime 증가 단위(초)
+
+[audio]                    # 노래 구간 감지 (inaSpeechSegmenter)
+vad_engine = "smn"         # speech/music/noise 분류
+min_music_s = 30.0         # 이보다 짧은 음악 구간 제거(BGM 오탐)
+merge_gap_s = 15.0         # 인접 음악 구간 병합 간격
+skip_opening_s = 240.0     # 방송 초반(인사 스티커 폭증)은 노래에서 제외
+sticker_rate_strong = 2.5  # 분당 스티커 이 이상이면 "노래 유력"(떼창곡)
+min_sticker_rate = 0.0     # >0이면 스티커 적은 구간(BGM) 제거. 0=유지+주석만
+# --slice 후보 탐지: 2분 이동윈도우 안 스티커 min개 이상이면 노래 후보(얕은 지속 반응도 포착)
+sticker_window_buckets = 4   # 4×30초 = 2분 윈도우
+sticker_min_per_window = 4   # 낮출수록 조용한 곡까지 잡음(후보↑·다운로드↑, STT필터가 정리)
+sticker_pad_before_s = 90.0  # 스티커는 노래보다 늦게 터지므로 앞을 당겨 노래 시작을 덮음
+
+[stt]                      # 가사 전사 (faster-whisper, 로컬·무료)
+model = "small"            # base/small/medium… (노래는 small 이상 권장)
+# language = "en"          # 노래 언어 강제 시 정확도 큼 (미지정=자동)
+beam_size = 5
+lyric_chars = 300          # 출력 가사 길이 컷

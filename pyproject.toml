@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soopts"
+version = "0.3.0"
+description = "SOOP VOD 노래 하이라이트 추출·식별기"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.31",
+    "lxml>=5.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+# 무거운 ML 의존성은 선택 extras. 해당 analyzer의 메서드 내부에서만 import된다.
+audio = ["inaSpeechSegmenter"]   # 노래 구간 감지
+stt = ["faster-whisper"]         # 가사 전사 → 곡 식별
+dev = ["pytest>=7.0", "ruff>=0.4", "pytest-cov"]
+
+[project.scripts]
+soopts = "soopts.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
