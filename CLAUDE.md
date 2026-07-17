@@ -54,7 +54,7 @@ pipeline uses the exact same layout, which is what makes clip-file resumability 
 
 ### Lazy imports for heavy/optional dependencies
 
-`inaSpeechSegmenter`, `faster-whisper`, the `google-api-python-client` stack, `supabase`, `google-genai`,
+`inaSpeechSegmenter`, `faster-whisper`, the `google-api-python-client` stack, `supabase`, `groq`,
 and `rapidfuzz` are **only imported inside the functions that use them**, never at module top level.
 This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency extras (`audio`, `stt`,
 `youtube`, `batch`) actually be optional — a plain `pip install soopts` with no extras can still run
