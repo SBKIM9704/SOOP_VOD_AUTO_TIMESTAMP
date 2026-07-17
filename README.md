@@ -52,7 +52,7 @@ uv venv && uv pip install -e ".[audio,stt,dev]"
 | `audio` | inaSpeechSegmenter (노래 구간 감지) |
 | `stt` | faster-whisper (가사 전사, API 키 불필요) |
 | `youtube` | 유튜브 unlisted 업로드 |
-| `batch` | supabase/rapidfuzz/google-genai (`soopts daily`/`sync` 배치 전용) |
+| `batch` | supabase/rapidfuzz/groq (`soopts daily`/`sync` 배치 전용) |
 | `dev` | pytest/ruff |
 
 시스템 의존성: `ffmpeg`, `yt-dlp` (오디오 추출·다운로드).
@@ -135,7 +135,7 @@ GitHub Actions (public repo = 분 무제한 무료)
 |---|---|
 | `SUPABASE_URL` | Supabase 프로젝트 URL (경로 없이, 예: `https://xxxx.supabase.co`) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase 접속(RLS 우회) |
-| `GEMINI_API_KEY` | 가사→곡명 추측 + 댓글 타임라인 추출(daily 전용, Gemini API 무료 티어) |
+| `GROQ_API_KEY` | 가사→곡명 추측 + 댓글 타임라인 추출(daily 전용, Groq 무료 티어 — 카드 불요) |
 | `YT_CLIENT_SECRET` | Google OAuth 클라이언트(client_secret.json 원문) |
 | `YT_TOKEN` | 최초 로컬 OAuth 동의로 생성된 yt_token.json 원문 |
 | `SLACK_WEBHOOK_URL` | (선택) daily 요약 알림 |
