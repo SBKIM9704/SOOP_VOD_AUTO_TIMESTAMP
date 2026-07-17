@@ -101,9 +101,29 @@ def _norm_url(url_or_id: str) -> str:
     )
 
 
+_FETCH_RETRIES = 3
+_MIN_SEGMENT_BYTES = 512  # 이보다 작으면 명백히 잘린/빈 응답 — 재시도 대상
+
+
 def _fetch(url: str) -> bytes:
-    with urllib.request.urlopen(url, timeout=30) as r:
-        return r.read()
+    """세그먼트 하나를 받는다 — 실측 사례: 서버가 Content-Length 없이 응답하면 연결이
+    일찍 끊겨도 urllib이 예외 없이 짧은 데이터를 그대로 반환해, 오디오가 티 안 나게
+    깨진 채로 넘어간 적이 있다(같은 VOD의 다른 구간에서는 반대로 IncompleteRead가
+    터졌었다 — 서버 응답 형태가 세그먼트마다 다를 수 있다는 뜻). 그래서 예외뿐 아니라
+    비정상적으로 작은 응답도 재시도 대상으로 잡는다.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _FETCH_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = r.read()
+            if len(data) < _MIN_SEGMENT_BYTES:
+                raise RuntimeError(f"세그먼트 응답이 비정상적으로 작음({len(data)}B): {url}")
+            return data
+        except Exception as ex:  # noqa: BLE001
+            last_exc = ex
+            log.warning("세그먼트 요청 실패(%d/%d) — 재시도: %s (%s)", attempt, _FETCH_RETRIES, url, ex)
+    raise RuntimeError(f"세그먼트 요청 반복 실패: {url}") from last_exc
 
 
 def _parse_playlist(m3u8_url: str) -> tuple[str, str, list[float], list[str]]:
