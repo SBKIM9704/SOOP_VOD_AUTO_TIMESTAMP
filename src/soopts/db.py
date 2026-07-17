@@ -163,7 +163,11 @@ def update_performance(perf_id: str, **fields: Any) -> None:
 
 
 def fetch_upload_queue(limit: int) -> list[dict[str, Any]]:
-    """clip_status='clipped' 건을 오래된 순으로 최대 limit개, vods.soop_title_no를 join해 반환.
+    """clip_status='clipped'이면서 노래로 확정(auto_matched/confirmed)된 건을 오래된 순으로
+    최대 limit개, vods.soop_title_no를 join해 반환.
+
+    identify_status가 needs_review/rejected인 건(노래 아님/미확정)은 clip_status만으로
+    거르면 큐에 섞여 업로드돼버린다 — 실제로 발생해 잘못 업로드된 적이 있어 명시적으로 제외한다.
 
     러너가 휘발성이라 로컬 clip 파일이 사라질 수 있다 — 재슬라이스에 필요한 start_s/end_s/
     soop_title_no가 반환값에 이미 있으므로 파일 없이도 재생성 가능해야 한다.
@@ -173,6 +177,7 @@ def fetch_upload_queue(limit: int) -> list[dict[str, Any]]:
         .table("performances")
         .select("*, vods(soop_title_no)")
         .eq("clip_status", "clipped")
+        .in_("identify_status", ["auto_matched", "confirmed"])
         .order("created_at")
         .limit(limit)
         .execute()
@@ -194,12 +199,15 @@ def fetch_confirmed_pending_sync() -> list[dict[str, Any]]:
 
 
 def count_upload_queue() -> int:
-    """clip_status='clipped'로 아직 업로드되지 않고 남은 전체 건수(요약 출력용)."""
+    """업로드 대상(clip_status='clipped' + identify_status auto_matched/confirmed)으로
+    아직 업로드되지 않고 남은 전체 건수(요약 출력용). fetch_upload_queue와 동일 조건이어야
+    "큐 잔여"가 실제로 다음 실행에서 드레인될 건수와 일치한다."""
     resp = (
         _client()
         .table("performances")
         .select("id", count="exact")
         .eq("clip_status", "clipped")
+        .in_("identify_status", ["auto_matched", "confirmed"])
         .execute()
     )
     return resp.count or 0
