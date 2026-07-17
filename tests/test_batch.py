@@ -3,16 +3,20 @@ from pathlib import Path
 import pytest
 
 import soopts.batch as batch_module
+from soopts.analyzers.comment_timeline import TimelineSong
 from soopts.batch import (
     RunContext,
     TimelineEvent,
     _narration_preserves_numbers,
     clip_file_path,
+    comment_candidates,
     fmt_duration_s,
     format_detailed_summary,
     format_region_failure_alert,
     format_summary,
     format_upload_failure_alert,
+    format_video_description,
+    format_video_title,
     format_vod_result,
     narrate_with_llm,
     next_vod_status,
@@ -261,3 +265,61 @@ def test_narration_preserves_numbers_ignores_hms_labels():
     original = "구간 00:50:39~00:55:49 실패"
     narrated = "50분 39초부터 55분 49초 구간에서 실패했습니다."
     assert _narration_preserves_numbers(original, narrated)
+
+
+def test_comment_candidates_caps_at_next_song_start():
+    # "고양이"(10811)와 "Lip"(11139) 사이 간격(328초)이 pad_after_s(300)보다 크지만,
+    # 두 곡이 더 가까이 붙어있는 경우(예: 간격 200초)를 재현 — 다음 곡을 침범하면 안 된다.
+    timeline = [
+        TimelineSong(time_s=10811, title="고양이", artist="선우정아"),
+        TimelineSong(time_s=11011, title="Lip", artist="디어클라우드"),  # 200초 뒤
+    ]
+    candidates = comment_candidates(timeline, pad_before_s=10.0, pad_after_s=300.0)
+    ds0, de0, hint0 = candidates[0]
+    assert hint0.title == "고양이"
+    assert de0 == 11011  # 다음 곡 시작 시각에서 캡핑됨(10811+300=11111이 아니라)
+
+
+def test_comment_candidates_uses_full_pad_when_gap_is_large():
+    timeline = [
+        TimelineSong(time_s=10811, title="고양이", artist="선우정아"),
+        TimelineSong(time_s=99999, title="다음날 곡", artist="누군가"),
+    ]
+    candidates = comment_candidates(timeline, pad_before_s=10.0, pad_after_s=300.0)
+    _, de0, _ = candidates[0]
+    assert de0 == 10811 + 300.0  # 간격이 넉넉하면 그대로 pad_after_s
+
+
+def test_comment_candidates_last_song_uses_full_pad_after():
+    timeline = [TimelineSong(time_s=10811, title="고양이", artist="선우정아")]
+    candidates = comment_candidates(timeline, pad_before_s=10.0, pad_after_s=300.0)
+    ds0, de0, _ = candidates[0]
+    assert ds0 == 10801.0
+    assert de0 == 11111.0
+
+
+def test_format_video_title_uses_confirmed_song_artist():
+    cfg = Config()
+    perf = {"title_guess": "고양이", "songs": {"title": "고양이", "artist": "선우정아"}}
+    title = format_video_title(cfg, "2026-07-15", "201586597", 11049, perf)
+    assert title == "고양이 - 선우정아 | 띵귤 (2026-07-15)"
+
+
+def test_format_video_title_falls_back_without_song_join():
+    cfg = Config()
+    perf = {"title_guess": "고양이"}
+    title = format_video_title(cfg, "2026-07-15", "201586597", 11049, perf)
+    assert title == "고양이 - 아티스트 미상 | 띵귤 (2026-07-15)"
+
+
+def test_format_video_description_includes_title_artist_and_clickable_link():
+    cfg = Config()
+    perf = {
+        "title_guess": "고양이", "songs": {"title": "고양이", "artist": "선우정아"},
+        "lyrics_snippet": "멋진 너의 모습은",
+    }
+    desc = format_video_description(cfg, "2026-07-15", "201586597", 11049, perf)
+    assert desc.startswith("고양이 - 선우정아\n")
+    assert "띵귤 2026-07-15 다시보기" in desc
+    assert "원본 다시보기: https://vod.sooplive.co.kr/player/201586597?change_second=11049" in desc
+    assert "멋진 너의 모습은" in desc

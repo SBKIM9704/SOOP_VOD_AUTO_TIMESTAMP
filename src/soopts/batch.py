@@ -88,6 +88,26 @@ def fmt_duration_s(seconds: float) -> str:
     return " ".join(parts)
 
 
+def comment_candidates(
+    timeline: list, pad_before_s: float, pad_after_s: float
+) -> list[tuple[float, float, object]]:
+    """댓글 타임라인 → (ds, de, hint) 후보 목록. 순수 함수.
+
+    de는 pad_after_s만큼 넉넉히 잡되, 다음 곡의 시작 시각을 넘지 않도록 캡핑한다 —
+    안 그러면 곡 간격이 pad_after_s보다 짧을 때 다음 곡을 침범해 가사가 섞인다(실제로
+    "고양이"/"Lip" 두 곡이 섞여 잘못 식별된 사례로 확인됨). timeline은 시간순으로 온다고
+    가정한다.
+    """
+    candidates = []
+    for i, t in enumerate(timeline):
+        ds = max(0.0, t.time_s - pad_before_s)
+        de = t.time_s + pad_after_s
+        if i + 1 < len(timeline):
+            de = min(de, timeline[i + 1].time_s)
+        candidates.append((ds, de, t))
+    return candidates
+
+
 def clip_file_path(work_root: Path, title_no: str, start_s: float) -> Path:
     """title_no+start_s만으로 결정되는 클립 파일 경로. 업로드 큐 재생성의 기준점."""
     return work_paths(work_root, title_no).clips_dir / f"song_{int(start_s):06d}.mp4"
@@ -160,6 +180,40 @@ def format_upload_failure_alert(
         f"    {type(exc).__name__}: {exc}\n"
         f"    {vod_link(cfg, title_no)}"
     )
+
+
+def _resolved_title_artist(perf: dict[str, Any]) -> tuple[str, str]:
+    """확정 곡(songs join)이 있으면 그 title/artist를, 없으면 title_guess/미상으로 폴백."""
+    song = perf.get("songs") or {}
+    title = song.get("title") or perf.get("title_guess") or "곡명 미상"
+    artist = song.get("artist") or "아티스트 미상"
+    return title, artist
+
+
+def format_video_title(cfg: Config, date: str, title_no: str, start_s: float, perf: dict[str, Any]) -> str:
+    """업로드/동기화 공용 유튜브 제목 — 원곡 아티스트 포함, 스트리머 표기는 항상 고정값."""
+    from soopts.output import fmt_hms
+
+    title, artist = _resolved_title_artist(perf)
+    return cfg.youtube.title_template.format(
+        title=title, artist=artist, bj=cfg.youtube.display_name,
+        vod_id=title_no, hms=fmt_hms(int(start_s)), date=date,
+    )[:100]
+
+
+def format_video_description(cfg: Config, date: str, title_no: str, start_s: float, perf: dict[str, Any]) -> str:
+    """업로드/동기화 공용 유튜브 설명 — 제목/아티스트/날짜를 앞에 명시하고, 원본 링크는
+    독립된 줄에 둬서(예전엔 한 줄에 다 붙어있어 링크 클릭/접근이 불편하다는 피드백이 있었다)
+    보기 쉽게 한다."""
+    title, artist = _resolved_title_artist(perf)
+    vod_url = (
+        cfg.endpoints.vod_web_url.replace("{title_no}", str(title_no))
+        .replace("{sec}", str(int(start_s)))
+    )
+    desc = f"{title} - {artist}\n{cfg.youtube.display_name} {date} 다시보기\n\n원본 다시보기: {vod_url}"
+    if perf.get("lyrics_snippet"):
+        desc += f"\n\n가사(자동전사):\n{perf['lyrics_snippet']}"
+    return desc
 
 
 def format_detailed_summary(cfg: Config, ctx: RunContext, stats: dict[str, Any]) -> str:
@@ -346,9 +400,7 @@ def _find_candidates(
     if timeline:
         log.info("VOD %s 댓글 타임라인 사용 — 노래 %d곡", title_no, len(timeline))
         c = cfg.comment
-        candidates = [
-            (max(0.0, t.time_s - c.pad_before_s), t.time_s + c.pad_after_s, t) for t in timeline
-        ]
+        candidates = comment_candidates(timeline, c.pad_before_s, c.pad_after_s)
         return candidates, "comment_timeline", f"댓글 타임라인 (노래 {len(timeline)}곡 파싱됨)"
 
     from soopts.analyzers.audio_analyzer import sticker_burst_regions
@@ -520,7 +572,6 @@ def _drain_upload_queue(cfg: Config, ctx: RunContext) -> dict[str, int]:
     from soopts import db
     from soopts.export.youtube import upload_unlisted
     from soopts.models import broadcast_date
-    from soopts.output import fmt_hms
 
     stats = {"uploaded": 0, "failed": 0}
     queue = db.fetch_upload_queue(cfg.youtube.daily_upload_limit)
@@ -544,19 +595,9 @@ def _drain_upload_queue(cfg: Config, ctx: RunContext) -> dict[str, int]:
             else:
                 meta = fetch_meta(cfg, title_no, work)
 
-            bj = meta.bj_nick
             date = broadcast_date(meta)
-            title = cfg.youtube.title_template.format(
-                bj=bj, title=(perf.get("title_guess") or "곡명 미상"),
-                vod_id=title_no, hms=fmt_hms(int(start_s)), date=date,
-            )
-            vod_url = (
-                cfg.endpoints.vod_web_url.replace("{title_no}", str(title_no))
-                .replace("{sec}", str(int(start_s)))
-            )
-            desc = f"{bj} 다시보기 노래 구간\n원본: {vod_url}"
-            if perf.get("lyrics_snippet"):
-                desc += f"\n\n가사(자동전사):\n{perf['lyrics_snippet']}"
+            title = format_video_title(cfg, date, title_no, start_s, perf)
+            desc = format_video_description(cfg, date, title_no, start_s, perf)
 
             url = upload_unlisted(cfg, str(path), title, desc)
             video_id = url.rsplit("/", 1)[-1]
@@ -633,21 +674,11 @@ def run_sync(cfg: Config) -> int:
         video_id = perf.get("youtube_video_id")
         if not video_id:
             continue
-        song = perf.get("songs") or {}
-        title = song.get("title") or perf.get("title_guess") or "곡명 미상"
-        artist = song.get("artist")
-        display_title = f"{title} - {artist}" if artist else title
-
         vod = perf.get("vods") or {}
-        desc = None
-        if vod.get("soop_title_no"):
-            vod_url = (
-                cfg.endpoints.vod_web_url.replace("{title_no}", str(vod["soop_title_no"]))
-                .replace("{sec}", str(int(perf["start_s"])))
-            )
-            desc = f"원본: {vod_url}"
-            if perf.get("lyrics_snippet"):
-                desc += f"\n\n가사(자동전사):\n{perf['lyrics_snippet']}"
+        title_no = vod.get("soop_title_no")
+        date = vod.get("broadcast_date") or ""
+        display_title = format_video_title(cfg, date, title_no, perf["start_s"], perf)
+        desc = format_video_description(cfg, date, title_no, perf["start_s"], perf) if title_no else None
 
         try:
             update_video_metadata(cfg, video_id, display_title, desc)
