@@ -10,6 +10,11 @@ token_set_ratio로 매칭해 최고점을 낸다. Anthropic(결제 필요)·Gemi
 
 신곡을 songs 테이블에 자동 생성하지 않는다 — 매칭 실패는 항상 needs_review로 사람에게 넘긴다.
 무거운 의존성(groq, rapidfuzz)은 함수 내부에서만 import.
+
+GROQ_MODEL(gpt-oss 계열)은 추론(reasoning) 모델이라 답변 전에 내부적으로 생각하는 토큰을
+먼저 소비한다 — max_tokens를 너무 작게 잡으면 추론만 하다 끝나 답변이 통째로 비어버린다
+(실제로 겪음: json_validate_failed, failed_generation=''). reasoning_effort="low"로
+추론량을 줄이고 max_tokens에 여유를 둬서 우회한다.
 """
 
 from __future__ import annotations
@@ -77,7 +82,8 @@ def guess_from_lyrics(lyrics: str, *, api_key: str | None = None) -> tuple[str, 
     client = Groq(api_key=api_key)
     resp = client.chat.completions.create(
         model=GROQ_MODEL,
-        max_tokens=200,
+        max_tokens=500,
+        reasoning_effort="low",
         response_format={"type": "json_object"},
         messages=[{
             "role": "user",

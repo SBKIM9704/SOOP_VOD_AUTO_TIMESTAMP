@@ -87,7 +87,8 @@ def extract_song_timeline(comments: list[str], *, api_key: str | None = None) ->
     client = Groq(api_key=api_key)
     resp = client.chat.completions.create(
         model=GROQ_MODEL,
-        max_tokens=1000,
+        max_tokens=2000,
+        reasoning_effort="low",
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": _PROMPT + "\n\n---\n\n".join(comments)}],
     )
