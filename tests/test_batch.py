@@ -298,6 +298,21 @@ def test_comment_candidates_last_song_uses_full_pad_after():
     assert de0 == 11111.0
 
 
+def test_comment_candidates_caps_correctly_even_when_list_order_is_not_chronological():
+    # 실제 프로덕션 버그 재현: Groq가 댓글에서 곡을 시간순이 아닌 순서로 추출하면
+    # timeline[i+1] 기반 캡핑이 엉뚱한 값을 참조해 두 구간이 겹치게 된다("크레파스"
+    # 7341~7557과 "이름에게" 7435~7707이 122초 겹친 사례). 리스트 순서를 일부러 뒤섞어도
+    # 실제 시각 기준으로 올바르게 캡핑돼야 한다.
+    timeline = [
+        TimelineSong(time_s=7435, title="이름에게", artist="아이유"),  # 리스트상 먼저 나오지만
+        TimelineSong(time_s=7341, title="크레파스", artist="누군가"),  # 시각은 이게 더 이름
+    ]
+    candidates = comment_candidates(timeline, pad_before_s=10.0, pad_after_s=300.0)
+    by_title = {hint.title: (ds, de) for ds, de, hint in candidates}
+    assert by_title["크레파스"][1] == 7435  # "이름에게" 시작 전까지만
+    assert by_title["이름에게"][1] == 7435 + 300.0  # 그 뒤엔 곡이 없으니 pad_after_s 그대로
+
+
 def test_format_video_title_uses_confirmed_song_artist():
     cfg = Config()
     perf = {"title_guess": "고양이", "songs": {"title": "고양이", "artist": "선우정아"}}

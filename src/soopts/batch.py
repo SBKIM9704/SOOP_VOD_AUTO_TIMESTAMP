@@ -95,15 +95,21 @@ def comment_candidates(
 
     de는 pad_after_s만큼 넉넉히 잡되, 다음 곡의 시작 시각을 넘지 않도록 캡핑한다 —
     안 그러면 곡 간격이 pad_after_s보다 짧을 때 다음 곡을 침범해 가사가 섞인다(실제로
-    "고양이"/"Lip" 두 곡이 섞여 잘못 식별된 사례로 확인됨). timeline은 시간순으로 온다고
-    가정한다.
+    "고양이"/"Lip" 두 곡이 섞여 잘못 식별된 사례로 확인됨).
+
+    "다음 곡"은 timeline의 리스트 순서(timeline[i+1])가 아니라 **실제 시각** 기준으로
+    찾는다 — Groq가 댓글에서 곡을 추출하는 순서가 항상 시간순이라는 보장이 없어(실제로
+    리스트 순서와 시각 순서가 어긋나 캡핑이 빗나가고 두 구간이 122초 겹친 사례가 확인됨),
+    리스트 위치에 의존하면 이 캡핑 자체가 무력화될 수 있다.
     """
+    times_sorted = sorted({t.time_s for t in timeline})
     candidates = []
-    for i, t in enumerate(timeline):
+    for t in timeline:
         ds = max(0.0, t.time_s - pad_before_s)
         de = t.time_s + pad_after_s
-        if i + 1 < len(timeline):
-            de = min(de, timeline[i + 1].time_s)
+        later = [s for s in times_sorted if s > t.time_s]
+        if later:
+            de = min(de, later[0])
         candidates.append((ds, de, t))
     return candidates
 
