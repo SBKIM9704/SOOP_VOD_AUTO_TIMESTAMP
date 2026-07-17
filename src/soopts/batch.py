@@ -80,8 +80,12 @@ def run_daily(cfg: Config, *, bj_id: str, count: int, upload: bool) -> dict[str,
     from soopts import db
     from soopts.collector.vod_list import fetch_recent_vods
 
-    candidates = fetch_recent_vods(cfg, bj_id, count * 3)
-    picked = db.pick_unprocessed_vods(candidates, count)
+    try:
+        candidates = fetch_recent_vods(cfg, bj_id, count * 3)
+        picked = db.pick_unprocessed_vods(candidates, count)
+    except Exception as e:  # noqa: BLE001
+        _notify_slack_failure("VOD 목록 조회", e)
+        raise
 
     stats = {"vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0}
     for vod_row in picked:
@@ -100,9 +104,13 @@ def run_daily(cfg: Config, *, bj_id: str, count: int, upload: bool) -> dict[str,
         stats["vods"] += 1
 
     if upload:
-        upload_stats = _drain_upload_queue(cfg)
-        stats["uploaded"] = upload_stats["uploaded"]
-        stats["queue_remaining"] = db.count_upload_queue()
+        try:
+            upload_stats = _drain_upload_queue(cfg)
+            stats["uploaded"] = upload_stats["uploaded"]
+            stats["queue_remaining"] = db.count_upload_queue()
+        except Exception as e:  # noqa: BLE001
+            _notify_slack_failure("업로드 큐 소진", e)
+            raise
 
     text = format_summary(stats)
     log.info("daily 완료: %s", text)
@@ -341,8 +349,14 @@ def run_sync(cfg: Config) -> int:
     from soopts import db
     from soopts.export.youtube import update_video_metadata
 
-    rows = db.fetch_confirmed_pending_sync()
+    try:
+        rows = db.fetch_confirmed_pending_sync()
+    except Exception as e:  # noqa: BLE001
+        _notify_slack_failure("sync 대상 조회", e)
+        raise
+
     n = 0
+    failures: list[str] = []
     for perf in rows:
         video_id = perf.get("youtube_video_id")
         if not video_id:
@@ -369,6 +383,12 @@ def run_sync(cfg: Config) -> int:
             n += 1
         except Exception as e:  # noqa: BLE001
             log.error("동기화 실패 perf=%s: %s", perf.get("id"), e)
+            failures.append(f"{video_id}({display_title}): {e}")
+
+    if failures:
+        _notify_slack(
+            f"⚠️ soopts sync {len(failures)}건 실패(성공 {n}건)\n" + "\n".join(failures[:10])
+        )
     return n
 
 
@@ -385,3 +405,13 @@ def _notify_slack(text: str) -> None:
         requests.post(webhook, json={"text": text}, timeout=10)
     except Exception as e:  # noqa: BLE001
         log.warning("Slack 알림 실패: %s", e)
+
+
+def _notify_slack_failure(context: str, exc: Exception) -> None:
+    """개별 VOD/구간 단위가 아니라 배치 전체를 죽이는 예외(SOOP API 502, DB 연결 실패 등)가
+    나면 로그뿐 아니라 Slack에도 어느 단계에서 무슨 에러였는지 남긴다 — 이런 경우는 루프
+    진입 전/후라 기존 per-VOD 알림으로는 커버되지 않는다."""
+    import traceback
+
+    tb = traceback.format_exc()
+    _notify_slack(f"❌ soopts 실패 — {context}\n{type(exc).__name__}: {exc}\n```\n{tb[-1500:]}\n```")
