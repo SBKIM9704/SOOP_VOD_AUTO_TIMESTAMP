@@ -27,7 +27,7 @@ youtube = [                      # 노래 클립 unlisted 자동 업로드
 batch = [                        # soopts daily/sync (GitHub Actions 배치)
     "supabase",
     "rapidfuzz",
-    "google-genai",
+    "groq",
 ]
 dev = ["pytest>=7.0", "ruff>=0.4", "pytest-cov", "rapidfuzz"]
 
