@@ -7,6 +7,11 @@
   1) Google Cloud 프로젝트 → YouTube Data API v3 사용 설정
   2) OAuth 2.0 클라이언트(데스크톱 앱) 생성 → client_secret.json 다운로드
   3) [youtube] client_secret 경로 지정. 최초 실행 시 브라우저 동의 → 토큰 저장(이후 자동)
+
+youtube.force-ssl 스코프를 쓴다(youtube.upload만으로는 videos.list/videos.delete가
+403 insufficientPermissions로 막힌다 — 실제로 겪음). 기존에 upload 스코프로만 동의된
+토큰 파일이 남아있으면 새 스코프가 반영되지 않으니, 스코프를 바꾼 뒤에는 저장된
+토큰 파일을 지우고 다시 동의를 받아야 한다.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from soopts.log import get_logger
 
 log = get_logger("export.youtube")
 
-_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+_SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 
 
 def _get_service(cfg: Config):
