@@ -41,12 +41,10 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Cache STT/음악감지 모델
+      - name: Cache 음악감지 모델
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/huggingface
-            ~/.keras/inaSpeechSegmenter
+          path: ~/.keras/inaSpeechSegmenter
           key: soopts-models-${{ runner.os }}-v1
 
       - name: Install soopts (+audio,stt,youtube,batch)

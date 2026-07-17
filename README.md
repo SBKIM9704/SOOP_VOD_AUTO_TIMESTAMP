@@ -37,7 +37,7 @@
 1. **채팅 수집** — 스티커(작은 이모티콘) 반응을 얻는다. (로그인 불필요, 공개 API)
 2. **노래 감지** — 오디오 음악 구간(inaSpeechSegmenter) ∩ 스티커 반응. BJ가 노래하면
    채팅에 스티커가 쏟아진다는 점으로 BGM과 실제 노래를 구분한다.
-3. **가사 전사** — 각 노래 구간을 faster-whisper(로컬·무료)로 전사한다.
+3. **가사 전사** — 각 노래 구간을 Groq Whisper API로 전사한다.
 4. **곡 식별** — 전사된 가사로 곡명을 채운다(Claude/사람).
 
 ## 설치
@@ -50,7 +50,7 @@ uv venv && uv pip install -e ".[audio,stt,dev]"
 | extra | 용도 |
 |---|---|
 | `audio` | inaSpeechSegmenter (노래 구간 감지) |
-| `stt` | faster-whisper (가사 전사, API 키 불필요) |
+| `stt` | Groq Whisper API (가사 전사, `GROQ_API_KEY` 필요) |
 | `youtube` | 유튜브 unlisted 업로드 |
 | `batch` | supabase/rapidfuzz/groq (`soopts daily`/`sync` 배치 전용) |
 | `dev` | pytest/ruff |
@@ -80,7 +80,7 @@ soopts clips 197718401 --upload   # 추출 + 유튜브 unlisted 업로드
 1. 스티커로 노래 위치 특정(채팅만, 전체 다운로드 없음)
 2. 후보 구간만 1080p 슬라이스 다운로드
 3. inaSpeechSegmenter로 **음악 경계 정밀 탐지**(구간 내 최장 음악 블록=노래) → 클린 컷 (실측 1~5초 오차)
-4. faster-whisper로 클립 가사 전사(설명란/식별용)
+4. Groq Whisper API로 클립 가사 전사(설명란/식별용)
 5. `--upload` 시 유튜브 unlisted 업로드
 
 > ⚠️ **저작권**: unlisted여도 유튜브 Content ID가 원곡을 감지해 클레임/차단할 수 있음.
@@ -105,8 +105,8 @@ soopts clips 197718401 --upload   # 추출 + 유튜브 unlisted 업로드
 - **후보** = 오디오만 감지, 스티커 적음 → 잔잔한 감상곡 또는 BGM. 검수 대상.
 - 방송 초반(`skip_opening_s`, 기본 4분)의 인사 스티커 폭증은 노래에서 제외.
 - `[audio] min_sticker_rate > 0` 으로 스티커 적은 구간(BGM)을 아예 제거 가능.
-- **가사 전사 팁**: 노래는 반주와 섞여 어렵다. `[stt] language`로 언어를 강제하고
-  `model`을 `small` 이상으로 하면 정확도가 크게 오른다.
+- **가사 전사 팁**: 노래는 반주와 섞여 어렵다. `[stt] language`로 언어를 강제하면
+  정확도가 크게 오른다(미지정 시 en/ko 둘 다 시도해 더 그럴듯한 쪽을 채택).
 
 ## 데일리 자동 배치 (GitHub Actions)
 
@@ -135,7 +135,7 @@ GitHub Actions (public repo = 분 무제한 무료)
 |---|---|
 | `SUPABASE_URL` | Supabase 프로젝트 URL (경로 없이, 예: `https://xxxx.supabase.co`) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase 접속(RLS 우회) |
-| `GROQ_API_KEY` | 가사→곡명 추측 + 댓글 타임라인 추출(daily 전용, Groq 무료 티어 — 카드 불요) |
+| `GROQ_API_KEY` | 가사 전사(Whisper API) + 가사→곡명 추측 + 댓글 타임라인 추출(daily 전용, Groq 무료 티어 — 카드 불요) |
 | `YT_CLIENT_SECRET` | Google OAuth 클라이언트(client_secret.json 원문) |
 | `YT_TOKEN` | 최초 로컬 OAuth 동의로 생성된 yt_token.json 원문 |
 | `SLACK_WEBHOOK_URL` | (선택) daily 요약 알림 |

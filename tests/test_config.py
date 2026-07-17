@@ -7,7 +7,7 @@ def test_defaults_when_no_file(tmp_path):
     cfg = load_config(tmp_path / "nope.toml")
     assert cfg.audio.min_music_s == 30.0
     assert cfg.audio.sticker_rate_strong == 2.5
-    assert cfg.stt.model == "small"
+    assert cfg.stt.groq_model == "whisper-large-v3-turbo"
     assert cfg.endpoints.api_level == 10
 
 
