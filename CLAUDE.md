@@ -94,8 +94,10 @@ into the upload-queue logic.
 
 ### Testing philosophy
 
-Tests exercise pure functions only — no network, no DB, no ML model loading (`test_identify.py`,
-`test_db.py`, `test_vod_list.py`, `test_audio.py`, `test_clips.py`, `test_dedup.py`,
-`test_stt_filter.py`, `test_xml_parse.py`, `test_real_schema.py`). Fixtures under `tests/fixtures/`
-that capture real SOOP API/chat responses are anonymized (no real viewer usernames) — keep it that way
-when adding new fixtures.
+Tests exercise pure functions only — no network, no DB, no ML model loading. One file per module
+under test (`tests/test_<module>.py`). Functions that call out to Groq/Supabase/YouTube are kept
+thin and tested by isolating the pure logic around them (e.g. `test_db.py` tests `select_pending`'s
+row-filtering logic directly, without touching Supabase; `test_stt.py` passes a fake client object
+into `_transcribe_best` to test the language-selection logic without a real API call). Fixtures
+under `tests/fixtures/` that capture real SOOP API/chat responses are anonymized (no real viewer
+usernames) — keep it that way when adding new fixtures.
