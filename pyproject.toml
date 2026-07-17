@@ -29,7 +29,7 @@ batch = [                        # soopts daily/sync (GitHub Actions 배치)
     "rapidfuzz",
     "groq",
 ]
-dev = ["pytest>=7.0", "ruff>=0.4", "pytest-cov", "rapidfuzz"]
+dev = ["pytest>=7.0", "ruff>=0.4", "pytest-cov", "rapidfuzz", "groq"]
 
 [project.scripts]
 soopts = "soopts.cli:main"
