@@ -36,7 +36,7 @@ REALTIME_ALERT_LIMIT = 3
 class TimelineEvent:
     """크로놀로지컬 상세 리포트 한 줄 — 감지/구간/업로드 단계에서 시간순으로 쌓인다."""
 
-    kind: str  # "detection" | "region" | "upload_item" | "upload_summary"
+    kind: str  # "detection" | "region" | "upload_item" | "upload_summary" | "deletion_item" | "deletion_summary"
     title_no: str | None = None
     label: str | None = None
     detail: str | None = None
@@ -95,15 +95,21 @@ def comment_candidates(
 
     de는 pad_after_s만큼 넉넉히 잡되, 다음 곡의 시작 시각을 넘지 않도록 캡핑한다 —
     안 그러면 곡 간격이 pad_after_s보다 짧을 때 다음 곡을 침범해 가사가 섞인다(실제로
-    "고양이"/"Lip" 두 곡이 섞여 잘못 식별된 사례로 확인됨). timeline은 시간순으로 온다고
-    가정한다.
+    "고양이"/"Lip" 두 곡이 섞여 잘못 식별된 사례로 확인됨).
+
+    "다음 곡"은 timeline의 리스트 순서(timeline[i+1])가 아니라 **실제 시각** 기준으로
+    찾는다 — Groq가 댓글에서 곡을 추출하는 순서가 항상 시간순이라는 보장이 없어(실제로
+    리스트 순서와 시각 순서가 어긋나 캡핑이 빗나가고 두 구간이 122초 겹친 사례가 확인됨),
+    리스트 위치에 의존하면 이 캡핑 자체가 무력화될 수 있다.
     """
+    times_sorted = sorted({t.time_s for t in timeline})
     candidates = []
-    for i, t in enumerate(timeline):
+    for t in timeline:
         ds = max(0.0, t.time_s - pad_before_s)
         de = t.time_s + pad_after_s
-        if i + 1 < len(timeline):
-            de = min(de, timeline[i + 1].time_s)
+        later = [s for s in times_sorted if s > t.time_s]
+        if later:
+            de = min(de, later[0])
         candidates.append((ds, de, t))
     return candidates
 
@@ -129,6 +135,8 @@ def format_summary(stats: dict[str, int]) -> str:
     ]
     if "uploaded" in stats:
         parts.append(f"업로드 {stats['uploaded']}건 (큐 잔여 {stats.get('queue_remaining', 0)})")
+    if "deleted" in stats:
+        parts.append(f"삭제 {stats['deleted']}건")
     return " / ".join(parts)
 
 
@@ -227,9 +235,12 @@ def format_detailed_summary(cfg: Config, ctx: RunContext, stats: dict[str, Any])
     lines = [format_summary(stats)]
     by_vod: dict[str, list[TimelineEvent]] = {}
     upload_events: list[TimelineEvent] = []
+    deletion_events: list[TimelineEvent] = []
     for ev in ctx.events:
         if ev.kind.startswith("upload"):
             upload_events.append(ev)
+        elif ev.kind.startswith("deletion"):
+            deletion_events.append(ev)
         else:
             by_vod.setdefault(ev.title_no, []).append(ev)
 
@@ -260,6 +271,16 @@ def format_detailed_summary(cfg: Config, ctx: RunContext, stats: dict[str, Any])
                 lines.append(f"    {ev.title_no}: {mark} ({fmt_duration_s(ev.duration_s or 0)}){tail}")
             elif ev.kind == "upload_summary":
                 lines.append(f"    총 {ev.count}건 성공, {fmt_duration_s(ev.duration_s or 0)} 소요")
+
+    if deletion_events:
+        lines.append("\n▶ 영상 삭제")
+        for ev in deletion_events:
+            if ev.kind == "deletion_item":
+                mark = "성공" if ev.ok else "실패"
+                tail = f" — {ev.detail}" if ev.detail else ""
+                lines.append(f"    {ev.label}: {mark}{tail}")
+            elif ev.kind == "deletion_summary":
+                lines.append(f"    총 {ev.count}건 성공")
 
     if ctx.alert_suppressed:
         lines.append(
@@ -361,6 +382,20 @@ def run_daily(cfg: Config, *, bj_id: str, count: int, upload: bool) -> dict[str,
         stats["vods"] += 1
 
     if upload:
+        try:
+            result = _drain_deletion_queue(cfg)
+            stats["deleted"] = result["deleted"]
+            for item in result["items"]:
+                ctx.record(TimelineEvent(
+                    kind="deletion_item", ok=item["ok"], label=item["video_id"], detail=item["error"],
+                ))
+                if not item["ok"]:
+                    ctx.alert(f"❌ 유튜브 영상 삭제 실패: {item['video_id']}\n    {item['error']}")
+            if result["items"]:
+                ctx.record(TimelineEvent(kind="deletion_summary", count=result["deleted"]))
+        except Exception as e:  # noqa: BLE001
+            # 삭제 큐는 업로드보다 우선순위가 낮은 부가 작업 — 실패해도 업로드는 계속 진행한다.
+            _notify_slack_failure("영상 삭제 큐 소진", e)
         try:
             upload_stats = _drain_upload_queue(cfg, ctx)
             stats["uploaded"] = upload_stats["uploaded"]
@@ -566,6 +601,37 @@ def _process_vod(
 
 
 # --------------------------------------------------------------------------- #
+# 삭제 큐 (singgyul_sing_book 관리자 화면에서 발생한 유튜브 영상 삭제 요청)
+# --------------------------------------------------------------------------- #
+def _drain_deletion_queue(cfg: Config) -> dict[str, Any]:
+    """youtube_deletion_queue의 pending 요청을 처리한다.
+
+    daily(RunContext 있음)와 sync(없음) 양쪽에서 호출되므로 RunContext에 의존하지
+    않는다 — 호출부가 반환값을 각자 방식으로 리포트한다. 구간 수정으로 생긴 요청이든
+    performances 행 삭제로 생긴 요청이든(performance_id가 null이 됨) 처리는 동일하다
+    (youtube_video_id만 있으면 됨).
+    """
+    from soopts import db
+    from soopts.export.youtube import delete_video
+
+    items: list[dict[str, Any]] = []
+    deleted = failed = 0
+    for row in db.fetch_deletion_queue(cfg.youtube.daily_deletion_limit):
+        video_id = row["youtube_video_id"]
+        try:
+            delete_video(cfg, video_id)
+            db.mark_deletion(row["id"], "done")
+            deleted += 1
+            items.append({"video_id": video_id, "ok": True, "error": None})
+        except Exception as e:  # noqa: BLE001
+            log.error("영상 삭제 실패 id=%s video=%s: %s", row["id"], video_id, e)
+            db.mark_deletion(row["id"], "failed")
+            failed += 1
+            items.append({"video_id": video_id, "ok": False, "error": f"{type(e).__name__}: {e}"})
+    return {"deleted": deleted, "failed": failed, "items": items}
+
+
+# --------------------------------------------------------------------------- #
 # 업로드 큐 (휘발성 러너 대응)
 # --------------------------------------------------------------------------- #
 def _drain_upload_queue(cfg: Config, ctx: RunContext) -> dict[str, int]:
@@ -670,6 +736,21 @@ def run_sync(cfg: Config) -> int:
 
     n = 0
     failures: list[str] = []
+
+    try:
+        deletion_result = _drain_deletion_queue(cfg)
+        log.info(
+            "삭제 큐 소진: %d건 성공, %d건 실패",
+            deletion_result["deleted"], deletion_result["failed"],
+        )
+        failures.extend(
+            f"{it['video_id']}(삭제): {it['error']}"
+            for it in deletion_result["items"] if not it["ok"]
+        )
+    except Exception as e:  # noqa: BLE001
+        # 메타데이터 동기화보다 우선순위가 낮은 부가 작업 — 실패해도 동기화는 계속 진행한다.
+        _notify_slack_failure("영상 삭제 큐 소진", e)
+
     for perf in rows:
         video_id = perf.get("youtube_video_id")
         if not video_id:

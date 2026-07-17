@@ -48,11 +48,6 @@ def resolve_m3u8_list(url_or_id: str, quality: str = "hls-hd") -> list[str]:
     return out.stdout.strip().splitlines()
 
 
-def resolve_m3u8(url_or_id: str, quality: str = "hls-hd") -> str:
-    """첫 파트 m3u8 (단일 파트용)."""
-    return resolve_m3u8_list(url_or_id, quality)[0]
-
-
 def download_slice(m3u8_url: str, start_s: float, end_s: float, out_path: Path) -> Path:
     """[start_s, end_s] 구간을 덮는 세그먼트만 받아 concat한 fMP4를 저장한다.
 

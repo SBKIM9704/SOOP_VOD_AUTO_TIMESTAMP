@@ -55,11 +55,8 @@ class AudioConfig:
 
 @dataclass
 class SttConfig:
-    model: str = "small"             # faster-whisper 모델 (base/small/medium…)
-    device: str = "cpu"
-    compute_type: str = "int8"
-    language: str | None = None      # None=자동. 노래는 "en"/"ko" 강제가 정확도 큼
-    beam_size: int = 5
+    groq_model: str = "whisper-large-v3-turbo"  # Groq 호스팅 Whisper API(가사 전사)
+    language: str | None = None      # None=자동(en/ko 둘 다 시도). 노래는 강제가 정확도 큼
     lyric_chars: int = 300           # 출력 가사 길이 컷
 
 

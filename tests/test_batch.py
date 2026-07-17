@@ -49,6 +49,13 @@ def test_format_summary_with_upload_stage():
     assert text == "VOD 2건 / 감지 9곡 / 자동매칭 4 / 검수대기 5 / 업로드 5건 (큐 잔여 4)"
 
 
+def test_format_summary_with_deletion_stage():
+    text = format_summary({
+        "vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0, "deleted": 3,
+    })
+    assert text == "VOD 0건 / 감지 0곡 / 자동매칭 0 / 검수대기 0 / 삭제 3건"
+
+
 def test_next_vod_status_no_songs_detected_is_done():
     # 감지된 노래가 없으면 검수·업로드할 게 없으니 바로 종결(done) — analyzed에 영구히 머물지 않는다.
     assert next_vod_status(0) == "done"
@@ -182,6 +189,24 @@ def test_format_detailed_summary_includes_all_sections():
     assert "'노래 아님'으로 판정해 검수 큐에 올리지 않고 건너뛴 구간: 1건" in text
 
 
+def test_format_detailed_summary_includes_deletion_section():
+    cfg = Config()
+    ctx = RunContext()
+    ctx.record(TimelineEvent(kind="deletion_item", ok=True, label="abc123"))
+    ctx.record(TimelineEvent(
+        kind="deletion_item", ok=False, label="def456", detail="HttpError: 403 quota",
+    ))
+    ctx.record(TimelineEvent(kind="deletion_summary", count=1))
+    stats = {"vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0, "deleted": 1}
+
+    text = format_detailed_summary(cfg, ctx, stats)
+
+    assert "▶ 영상 삭제" in text
+    assert "abc123: 성공" in text
+    assert "def456: 실패 — HttpError: 403 quota" in text
+    assert "총 1건 성공" in text
+
+
 def test_format_detailed_summary_no_footnotes_when_nothing_suppressed():
     cfg = Config()
     ctx = RunContext()
@@ -298,6 +323,21 @@ def test_comment_candidates_last_song_uses_full_pad_after():
     assert de0 == 11111.0
 
 
+def test_comment_candidates_caps_correctly_even_when_list_order_is_not_chronological():
+    # 실제 프로덕션 버그 재현: Groq가 댓글에서 곡을 시간순이 아닌 순서로 추출하면
+    # timeline[i+1] 기반 캡핑이 엉뚱한 값을 참조해 두 구간이 겹치게 된다("크레파스"
+    # 7341~7557과 "이름에게" 7435~7707이 122초 겹친 사례). 리스트 순서를 일부러 뒤섞어도
+    # 실제 시각 기준으로 올바르게 캡핑돼야 한다.
+    timeline = [
+        TimelineSong(time_s=7435, title="이름에게", artist="아이유"),  # 리스트상 먼저 나오지만
+        TimelineSong(time_s=7341, title="크레파스", artist="누군가"),  # 시각은 이게 더 이름
+    ]
+    candidates = comment_candidates(timeline, pad_before_s=10.0, pad_after_s=300.0)
+    by_title = {hint.title: (ds, de) for ds, de, hint in candidates}
+    assert by_title["크레파스"][1] == 7435  # "이름에게" 시작 전까지만
+    assert by_title["이름에게"][1] == 7435 + 300.0  # 그 뒤엔 곡이 없으니 pad_after_s 그대로
+
+
 def test_format_video_title_uses_confirmed_song_artist():
     cfg = Config()
     perf = {"title_guess": "고양이", "songs": {"title": "고양이", "artist": "선우정아"}}
@@ -323,3 +363,4 @@ def test_format_video_description_includes_title_artist_and_clickable_link():
     assert "띵귤 2026-07-15 다시보기" in desc
     assert "원본 다시보기: https://vod.sooplive.co.kr/player/201586597?change_second=11049" in desc
     assert "멋진 너의 모습은" in desc
+

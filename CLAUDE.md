@@ -54,7 +54,7 @@ pipeline uses the exact same layout, which is what makes clip-file resumability 
 
 ### Lazy imports for heavy/optional dependencies
 
-`inaSpeechSegmenter`, `faster-whisper`, the `google-api-python-client` stack, `supabase`, `groq`,
+`inaSpeechSegmenter`, the `google-api-python-client` stack, `supabase`, `groq`,
 and `rapidfuzz` are **only imported inside the functions that use them**, never at module top level.
 This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency extras (`audio`, `stt`,
 `youtube`, `batch`) actually be optional — a plain `pip install soopts` with no extras can still run
@@ -63,11 +63,14 @@ This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency
 ### The Supabase boundary (`db.py`)
 
 `db.py` is the *only* module that talks to Supabase. The schema (`vods`, `performances`, `song_aliases`,
-and the read-only `songs` catalog) is owned by a separate private repo (`singgyul_sing_book`) — this
-codebase only consumes it and never creates migrations. `songs` rows are never created from this repo;
-unmatched songs always land as `needs_review` for a human to resolve in the separate review UI.
-`vods.status`/`performances.clip_status`/`performances.identify_status` are the actual state machine —
-treat them as the source of truth, not local files (see next point).
+`youtube_deletion_queue`, and the read-only `songs` catalog) is owned by a separate private repo
+(`singgyul_sing_book`) — this codebase only consumes it and never creates migrations. `songs` rows are
+never created from this repo; unmatched songs always land as `needs_review` for a human to resolve in
+the separate review UI. `vods.status`/`performances.clip_status`/`performances.identify_status` are the
+actual state machine — treat them as the source of truth, not local files (see next point).
+`youtube_deletion_queue` is how the admin UI (region edits / performance deletes) asks this repo to
+delete an already-uploaded video; `_drain_deletion_queue()` in `batch.py` drains it from both `daily`
+and `sync` (independent of `performance_id`, which is nullable and unused for processing).
 
 ### Volatile-runner design (`batch.py`)
 
@@ -91,8 +94,10 @@ into the upload-queue logic.
 
 ### Testing philosophy
 
-Tests exercise pure functions only — no network, no DB, no ML model loading (`test_identify.py`,
-`test_db.py`, `test_vod_list.py`, `test_audio.py`, `test_clips.py`, `test_dedup.py`,
-`test_stt_filter.py`, `test_xml_parse.py`, `test_real_schema.py`). Fixtures under `tests/fixtures/`
-that capture real SOOP API/chat responses are anonymized (no real viewer usernames) — keep it that way
-when adding new fixtures.
+Tests exercise pure functions only — no network, no DB, no ML model loading. One file per module
+under test (`tests/test_<module>.py`). Functions that call out to Groq/Supabase/YouTube are kept
+thin and tested by isolating the pure logic around them (e.g. `test_db.py` tests `select_pending`'s
+row-filtering logic directly, without touching Supabase; `test_stt.py` passes a fake client object
+into `_transcribe_best` to test the language-selection logic without a real API call). Fixtures
+under `tests/fixtures/` that capture real SOOP API/chat responses are anonymized (no real viewer
+usernames) — keep it that way when adding new fixtures.
