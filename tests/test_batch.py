@@ -49,6 +49,13 @@ def test_format_summary_with_upload_stage():
     assert text == "VOD 2건 / 감지 9곡 / 자동매칭 4 / 검수대기 5 / 업로드 5건 (큐 잔여 4)"
 
 
+def test_format_summary_with_deletion_stage():
+    text = format_summary({
+        "vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0, "deleted": 3,
+    })
+    assert text == "VOD 0건 / 감지 0곡 / 자동매칭 0 / 검수대기 0 / 삭제 3건"
+
+
 def test_next_vod_status_no_songs_detected_is_done():
     # 감지된 노래가 없으면 검수·업로드할 게 없으니 바로 종결(done) — analyzed에 영구히 머물지 않는다.
     assert next_vod_status(0) == "done"
@@ -180,6 +187,24 @@ def test_format_detailed_summary_includes_all_sections():
     assert "총 1건 성공" in text
     assert "추가 2건은 이 요약에만 반영" in text
     assert "'노래 아님'으로 판정해 검수 큐에 올리지 않고 건너뛴 구간: 1건" in text
+
+
+def test_format_detailed_summary_includes_deletion_section():
+    cfg = Config()
+    ctx = RunContext()
+    ctx.record(TimelineEvent(kind="deletion_item", ok=True, label="abc123"))
+    ctx.record(TimelineEvent(
+        kind="deletion_item", ok=False, label="def456", detail="HttpError: 403 quota",
+    ))
+    ctx.record(TimelineEvent(kind="deletion_summary", count=1))
+    stats = {"vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0, "deleted": 1}
+
+    text = format_detailed_summary(cfg, ctx, stats)
+
+    assert "▶ 영상 삭제" in text
+    assert "abc123: 성공" in text
+    assert "def456: 실패 — HttpError: 403 quota" in text
+    assert "총 1건 성공" in text
 
 
 def test_format_detailed_summary_no_footnotes_when_nothing_suppressed():
@@ -338,3 +363,4 @@ def test_format_video_description_includes_title_artist_and_clickable_link():
     assert "띵귤 2026-07-15 다시보기" in desc
     assert "원본 다시보기: https://vod.sooplive.co.kr/player/201586597?change_second=11049" in desc
     assert "멋진 너의 모습은" in desc
+

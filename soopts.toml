@@ -41,7 +41,8 @@ privacy = "unlisted"       # unlisted=링크로만 시청 가능
 # 사용 가능 치환자: {title}(곡명/미상) {artist}(원곡 아티스트) {bj} {date}(방송일 YYYY-MM-DD) {hms}(시각) {vod_id}
 title_template = "{title} - {artist} | {bj} ({date})"
 display_name = "띵귤"      # 제목/설명에 쓰는 스트리머 표기(고정값 — meta.bj_nick 안 씀)
-daily_upload_limit = 5     # soopts daily 1회 실행당 업로드 상한 (YouTube 쿼터 여유는 sync용)
+daily_upload_limit = 50    # soopts daily 1회 실행당 업로드 상한 ("Video Uploads per day" 100건 중 여유있게)
+daily_deletion_limit = 50  # 1회 실행당(daily/sync 둘 다) 삭제 큐 처리 상한
 
 [station]                  # 데일리 배치 대상 (soopts daily)
 bj_id = "singgyul"

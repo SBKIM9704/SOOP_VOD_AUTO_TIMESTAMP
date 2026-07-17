@@ -75,6 +75,21 @@ def upload_unlisted(cfg: Config, video_path: str, title: str, description: str =
     return url
 
 
+def delete_video(cfg: Config, video_id: str) -> None:
+    """영상을 삭제한다. 이미 삭제된 영상(404)이면 조용히 성공 처리(멱등)."""
+    from googleapiclient.errors import HttpError
+
+    service = _get_service(cfg)
+    try:
+        service.videos().delete(id=video_id).execute()
+        log.info("영상 삭제 완료: %s", video_id)
+    except HttpError as e:
+        if e.resp.status == 404:
+            log.info("영상이 이미 없음(404) — 삭제 완료로 간주: %s", video_id)
+            return
+        raise
+
+
 def update_video_metadata(
     cfg: Config, video_id: str, title: str, description: str | None = None
 ) -> None:

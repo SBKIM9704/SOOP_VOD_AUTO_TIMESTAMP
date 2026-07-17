@@ -63,11 +63,14 @@ This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency
 ### The Supabase boundary (`db.py`)
 
 `db.py` is the *only* module that talks to Supabase. The schema (`vods`, `performances`, `song_aliases`,
-and the read-only `songs` catalog) is owned by a separate private repo (`singgyul_sing_book`) — this
-codebase only consumes it and never creates migrations. `songs` rows are never created from this repo;
-unmatched songs always land as `needs_review` for a human to resolve in the separate review UI.
-`vods.status`/`performances.clip_status`/`performances.identify_status` are the actual state machine —
-treat them as the source of truth, not local files (see next point).
+`youtube_deletion_queue`, and the read-only `songs` catalog) is owned by a separate private repo
+(`singgyul_sing_book`) — this codebase only consumes it and never creates migrations. `songs` rows are
+never created from this repo; unmatched songs always land as `needs_review` for a human to resolve in
+the separate review UI. `vods.status`/`performances.clip_status`/`performances.identify_status` are the
+actual state machine — treat them as the source of truth, not local files (see next point).
+`youtube_deletion_queue` is how the admin UI (region edits / performance deletes) asks this repo to
+delete an already-uploaded video; `_drain_deletion_queue()` in `batch.py` drains it from both `daily`
+and `sync` (independent of `performance_id`, which is nullable and unused for processing).
 
 ### Volatile-runner design (`batch.py`)
 

@@ -168,8 +168,10 @@ def fetch_upload_queue(limit: int) -> list[dict[str, Any]]:
 
     identify_status가 needs_review/rejected인 건(노래 아님/미확정)은 clip_status만으로
     거르면 큐에 섞여 업로드돼버린다 — 실제로 발생해 잘못 업로드된 적이 있어 명시적으로 제외한다.
-    songs(title,artist)는 유튜브 제목/설명에 원곡 아티스트를 넣기 위해 join한다 — 여기서
-    거른 조건(auto_matched/confirmed) 덕분에 song_id는 항상 있어 join이 비지 않는다.
+    song_id IS NOT NULL도 명시적으로 건다 — auto_matched/confirmed면 song_id가 항상 있어야
+    맞지만, DB에 그걸 강제하는 제약조건이 없어 혹시라도 어긋나는 행이 있으면(둘 중 하나가
+    버그로 어긋난 경우) 업로드해버리기 전에 걸러내는 안전장치다. songs(title,artist)는
+    유튜브 제목/설명에 원곡 아티스트를 넣기 위해 join한다.
 
     러너가 휘발성이라 로컬 clip 파일이 사라질 수 있다 — 재슬라이스에 필요한 start_s/end_s/
     soop_title_no가 반환값에 이미 있으므로 파일 없이도 재생성 가능해야 한다.
@@ -180,6 +182,7 @@ def fetch_upload_queue(limit: int) -> list[dict[str, Any]]:
         .select("*, songs(title, artist), vods(soop_title_no)")
         .eq("clip_status", "clipped")
         .in_("identify_status", ["auto_matched", "confirmed"])
+        .not_.is_("song_id", "null")
         .order("created_at")
         .limit(limit)
         .execute()
@@ -201,18 +204,46 @@ def fetch_confirmed_pending_sync() -> list[dict[str, Any]]:
 
 
 def count_upload_queue() -> int:
-    """업로드 대상(clip_status='clipped' + identify_status auto_matched/confirmed)으로
-    아직 업로드되지 않고 남은 전체 건수(요약 출력용). fetch_upload_queue와 동일 조건이어야
-    "큐 잔여"가 실제로 다음 실행에서 드레인될 건수와 일치한다."""
+    """업로드 대상(clip_status='clipped' + identify_status auto_matched/confirmed +
+    song_id not null)으로 아직 업로드되지 않고 남은 전체 건수(요약 출력용).
+    fetch_upload_queue와 동일 조건이어야 "큐 잔여"가 실제로 다음 실행에서 드레인될
+    건수와 일치한다."""
     resp = (
         _client()
         .table("performances")
         .select("id", count="exact")
         .eq("clip_status", "clipped")
         .in_("identify_status", ["auto_matched", "confirmed"])
+        .not_.is_("song_id", "null")
         .execute()
     )
     return resp.count or 0
+
+
+def fetch_deletion_queue(limit: int) -> list[dict[str, Any]]:
+    """youtube_deletion_queue에서 status='pending'인 요청을 오래된 순으로 최대 limit개.
+
+    singgyul_sing_book(Next.js 관리자 화면)이 구간 수정/performances 행 삭제 시 이 큐에
+    삭제 요청을 남긴다. performance_id는 참고용(행 삭제로 생긴 요청은 on delete set null로
+    null)이라 여기선 안 쓴다 — youtube_video_id만 있으면 처리 가능.
+    """
+    return (
+        _client()
+        .table("youtube_deletion_queue")
+        .select("*")
+        .eq("status", "pending")
+        .order("created_at")
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+
+def mark_deletion(row_id: Any, status: str) -> None:
+    """youtube_deletion_queue 행의 처리 결과 기록(done/failed)."""
+    _client().table("youtube_deletion_queue").update(
+        {"status": status, "processed_at": _now_iso()}
+    ).eq("id", row_id).execute()
 
 
 def count_clipped_for_vod(title_no: str) -> int:

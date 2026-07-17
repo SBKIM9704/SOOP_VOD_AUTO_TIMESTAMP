@@ -117,7 +117,8 @@ soopts clips 197718401 --upload   # 추출 + 유튜브 unlisted 업로드
 GitHub Actions (public repo = 분 무제한 무료)
   daily : VOD 목록 → 미처리 N개 → 감지/전사/식별 → DB 기록
           → 1080p 정밀 클립 컷 → 업로드(일 daily_upload_limit 상한 큐)
-  sync  : 검수 확정 건 유튜브 제목/설명 갱신
+          → 삭제 큐 소진(daily_deletion_limit 상한)
+  sync  : 검수 확정 건 유튜브 제목/설명 갱신 → 삭제 큐 소진
         │
         ▼
      Supabase  ◄──── 프론트/검수 UI(별도 레포)가 상태 변경
@@ -128,6 +129,8 @@ GitHub Actions (public repo = 분 무제한 무료)
   같은 경로를 재구성해 소진한다(`src/soopts/batch.py`의 `clip_file_path`/`_reslice_clip`).
 - 신곡을 `songs` 테이블에 자동 생성하지 않는다 — 미식별 곡은 항상 `needs_review`로 검수 대기.
 - 업로드 privacy는 항상 unlisted로 고정, 코드가 public 전환을 하지 않는다(사람 결정).
+- 검수 UI에서 구간을 수정하거나 performance를 삭제하면 `youtube_deletion_queue`에 요청이
+  쌓이고, daily/sync가 그때그때 소진해 이미 올라간 영상을 삭제한다.
 
 ### 필요 GitHub Secrets
 

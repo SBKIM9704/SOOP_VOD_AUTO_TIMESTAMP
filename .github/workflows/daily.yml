@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       no_upload:
-        description: "업로드 큐 소진 생략 (감지·식별·클립까지만)"
+        description: "업로드/삭제 큐 소진 생략 (감지·식별·클립까지만)"
         required: false
         type: boolean
         default: false

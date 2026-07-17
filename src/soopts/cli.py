@@ -343,7 +343,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--count", type=int, help="처리할 미처리 VOD 수(기본: soopts.toml [station] daily_vod_count)")
     sp.add_argument("--bj", help="대상 스테이션 bj_id(기본: soopts.toml [station] bj_id)")
-    sp.add_argument("--no-upload", action="store_true", help="업로드 큐 소진 생략(감지·식별·클립까지만)")
+    sp.add_argument("--no-upload", action="store_true", help="업로드/삭제 큐 소진 생략(감지·식별·클립까지만)")
     sp.set_defaults(func=cmd_daily)
 
     sp = sub.add_parser("sync", help="검수 확정된 곡명을 유튜브 제목/설명에 반영")
