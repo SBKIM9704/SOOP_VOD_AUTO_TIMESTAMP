@@ -7,6 +7,11 @@
   1) Google Cloud 프로젝트 → YouTube Data API v3 사용 설정
   2) OAuth 2.0 클라이언트(데스크톱 앱) 생성 → client_secret.json 다운로드
   3) [youtube] client_secret 경로 지정. 최초 실행 시 브라우저 동의 → 토큰 저장(이후 자동)
+
+youtube.force-ssl 스코프를 쓴다(youtube.upload만으로는 videos.list/videos.delete가
+403 insufficientPermissions로 막힌다 — 실제로 겪음). 기존에 upload 스코프로만 동의된
+토큰 파일이 남아있으면 새 스코프가 반영되지 않으니, 스코프를 바꾼 뒤에는 저장된
+토큰 파일을 지우고 다시 동의를 받아야 한다.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from soopts.log import get_logger
 
 log = get_logger("export.youtube")
 
-_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+_SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 
 
 def _get_service(cfg: Config):
@@ -68,3 +73,35 @@ def upload_unlisted(cfg: Config, video_path: str, title: str, description: str =
     url = f"https://youtu.be/{vid}"
     log.info("업로드 완료(unlisted): %s  %s", title, url)
     return url
+
+
+def delete_video(cfg: Config, video_id: str) -> None:
+    """영상을 삭제한다. 이미 삭제된 영상(404)이면 조용히 성공 처리(멱등)."""
+    from googleapiclient.errors import HttpError
+
+    service = _get_service(cfg)
+    try:
+        service.videos().delete(id=video_id).execute()
+        log.info("영상 삭제 완료: %s", video_id)
+    except HttpError as e:
+        if e.resp.status == 404:
+            log.info("영상이 이미 없음(404) — 삭제 완료로 간주: %s", video_id)
+            return
+        raise
+
+
+def update_video_metadata(
+    cfg: Config, video_id: str, title: str, description: str | None = None
+) -> None:
+    """검수 확정 곡명으로 title(옵션 description)만 갱신 — 나머지 snippet 필드는 유지한다."""
+    service = _get_service(cfg)
+    resp = service.videos().list(part="snippet", id=video_id).execute()
+    items = resp.get("items") or []
+    if not items:
+        raise RuntimeError(f"영상을 찾을 수 없음: {video_id}")
+    snippet = items[0]["snippet"]
+    snippet["title"] = title[:100]
+    if description is not None:
+        snippet["description"] = description
+    service.videos().update(part="snippet", body={"id": video_id, "snippet": snippet}).execute()
+    log.info("메타데이터 갱신: %s → %s", video_id, title)

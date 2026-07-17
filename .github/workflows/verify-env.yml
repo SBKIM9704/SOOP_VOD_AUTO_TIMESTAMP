@@ -1,0 +1,77 @@
+name: verify-env
+
+# Phase 0 — GitHub 호스티드 러너(미국 Azure IP)에서 SOOP API/스트림이
+# 접근 가능한지 확인한다. 실패하면 self-hosted runner로 폴백해야 한다
+# (runs-on만 바꾸면 되고 나머지 워크플로우/코드는 동일).
+on:
+  workflow_dispatch:
+    inputs:
+      vod_id:
+        description: "테스트용 SOOP VOD 번호 (title_no)"
+        required: true
+        type: string
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VOD_ID: ${{ inputs.vod_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install soopts + yt-dlp
+        run: |
+          pip install -e .
+          pip install yt-dlp
+
+      - name: 러너 아웃바운드 IP
+        run: curl -s https://ifconfig.me || true
+
+      - name: SOOP 메타/채팅 API 접근 확인 (soopts collect)
+        id: collect
+        continue-on-error: true
+        run: soopts -v collect "$VOD_ID"
+
+      - name: yt-dlp 스트림 URL 조회
+        id: ytdlp
+        continue-on-error: true
+        run: yt-dlp -f hls-hd -g "https://vod.sooplive.com/player/$VOD_ID"
+
+      - name: 30초 슬라이스 다운로드 확인
+        id: slice
+        continue-on-error: true
+        run: |
+          python -c "
+          import os
+          from soopts.collector.media import resolve_m3u8_list, download_slice
+          m3u8 = resolve_m3u8_list(os.environ['VOD_ID'])[0]
+          download_slice(m3u8, 0, 30, 'verify_slice.mp4')
+          "
+          ls -la verify_slice.mp4
+
+      - name: 결과 요약
+        if: always()
+        run: |
+          {
+            echo "## 러너 환경 검증 결과 (vod_id=$VOD_ID)"
+            echo ""
+            echo "| 항목 | 결과 |"
+            echo "|---|---|"
+            echo "| SOOP 메타/채팅 API (\`soopts collect\`) | ${{ steps.collect.outcome }} |"
+            echo "| yt-dlp 스트림 URL 조회 | ${{ steps.ytdlp.outcome }} |"
+            echo "| 30초 슬라이스 다운로드 | ${{ steps.slice.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 실패 판정
+        if: steps.collect.outcome == 'failure' || steps.ytdlp.outcome == 'failure' || steps.slice.outcome == 'failure'
+        run: |
+          echo "하나 이상의 단계가 실패했습니다 — IP 차단 가능성. self-hosted runner 폴백을 검토하세요."
+          exit 1

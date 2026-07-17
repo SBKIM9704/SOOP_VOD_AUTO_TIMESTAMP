@@ -69,7 +69,11 @@ def longest_music_block(
 def refine_boundary(
     cfg: Config, media_path: str, region_start: float, region_end: float
 ) -> tuple[float, float] | None:
-    """구간 [region_start, region_end]에서 노래(최장 음악블록)의 정밀 경계를 반환한다."""
+    """구간 [region_start, region_end]에서 노래(최장 음악블록)의 정밀 경계를 반환한다.
+
+    merge_gap_s는 cfg.audio.merge_gap_s를 쓴다 — analyzers/audio_analyzer.py의 스티커 기반
+    구간 병합과 같은 값을 공유한다(예전엔 이 함수만 자체 하드코딩된 기본값 15.0을 썼다).
+    """
     import os
 
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
@@ -77,7 +81,7 @@ def refine_boundary(
 
     seg = Segmenter(vad_engine=cfg.audio.vad_engine, detect_gender=False)
     res = [(lab, float(s), float(e)) for lab, s, e in seg(media_path, start_sec=region_start, stop_sec=region_end)]
-    block = longest_music_block(res)
+    block = longest_music_block(res, merge_gap_s=cfg.audio.merge_gap_s)
     if block is None or (block[1] - block[0]) < cfg.clip.min_song_s:
         return None
     return block

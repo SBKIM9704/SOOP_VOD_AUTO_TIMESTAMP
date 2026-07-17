@@ -141,8 +141,3 @@ def write_songs(path: Path, songs: list[Song], vod_id: str) -> None:
     }
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
-
-
-def read_songs(path: Path) -> list[Song]:
-    with open(path, encoding="utf-8") as fh:
-        return [Song.from_dict(s) for s in json.load(fh).get("songs", [])]

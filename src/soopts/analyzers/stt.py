@@ -1,8 +1,12 @@
-"""노래 구간 전사 + 노래/토크 판별 — faster-whisper (로컬, API 키 불필요).
+"""노래 구간 전사 + 노래/토크 판별 — Groq Whisper API(호스팅, GROQ_API_KEY 필요).
 
 - 언어 자동: 후보 언어(기본 en/ko)로 각각 전사해 평균 logprob이 높은 쪽을 채택
   (노래는 반주와 섞여 자동 언어감지가 자주 틀리므로).
 - 노래/토크 필터: 전사가 대화체(잠시만요/근데/이거…)면 BGM 깔린 토크로 보고 걸러낸다.
+- 예전엔 로컬 faster-whisper를 썼으나, 노래 오디오에 대해 압축률/logprob 임계값을 못
+  넘겨 temperature 0.0~1.0 재시도 루프를 반복하는 바람에 GH Actions CPU 러너에서 곡 하나에
+  수 분씩 걸려 배치 전체가 5시간을 넘긴 사례가 있었다. Groq 호스팅 모델은 재시도 없이
+  한 번에 결과를 반환해 이 지연이 없다.
 무거운 import는 함수 내부에서만.
 """
 
@@ -50,28 +54,37 @@ def _extract_wav(audio_path: str, start: float, dur: float, out: Path) -> None:
     )
 
 
-def _transcribe_best(model, wav: str, cfg: Config) -> tuple[str, str]:
-    """후보 언어로 전사해 평균 logprob 높은 결과를 (가사, 언어)로 반환."""
+def _transcribe_best(client, path: str, cfg: Config) -> tuple[str, str]:
+    """Groq Whisper API로 후보 언어별 전사해 평균 logprob 높은 결과를 (가사, 언어)로 반환."""
     scfg = cfg.stt
     langs = [scfg.language] if scfg.language else ["en", "ko"]
     best_text, best_lang, best_score = "", "", -1e9
     for lang in langs:
-        segs, _info = model.transcribe(wav, language=lang, vad_filter=True, beam_size=scfg.beam_size)
-        segs = list(segs)
+        try:
+            with open(path, "rb") as f:
+                resp = client.audio.transcriptions.create(
+                    file=f, model=scfg.groq_model, language=lang, response_format="verbose_json",
+                )
+        except Exception as e:  # noqa: BLE001
+            # 언어 하나가 API 오류(레이트리밋/타임아웃 등)로 실패해도 나머지 후보 언어는
+            # 계속 시도한다 — 여기서 전파하면 호출부의 곡 하나가 아니라 전사 루프 전체가
+            # 죽어 이미 끝난 다른 곡의 결과까지 날아간다.
+            log.warning("Groq 전사 실패(lang=%s): %s", lang, e)
+            continue
+        segs = resp.segments or []
         if not segs:
             continue
-        text = " ".join(s.text.strip() for s in segs).strip()
-        score = sum(s.avg_logprob for s in segs) / len(segs)
+        text = " ".join(s.get("text", "").strip() for s in segs).strip()
+        score = sum(s.get("avg_logprob", 0.0) for s in segs) / len(segs)
         if score > best_score:
             best_text, best_lang, best_score = text, lang, score
     return best_text, best_lang
 
 
 def _load_model(cfg: Config):
-    from faster_whisper import WhisperModel
+    from groq import Groq
 
-    scfg = cfg.stt
-    return WhisperModel(scfg.model, device=scfg.device, compute_type=scfg.compute_type)
+    return Groq()
 
 
 def _finalize(song: Song, text: str, lang: str, cfg: Config) -> bool:
@@ -111,7 +124,7 @@ def transcribe_slices(
     model = _load_model(cfg)
     kept: list[Song] = []
     for song, path in pairs:
-        text, lang = _transcribe_best(model, path, cfg)  # faster-whisper가 mp4 직접 읽음
+        text, lang = _transcribe_best(model, path, cfg)  # Groq API가 mp4 파일을 직접 받음
         if _finalize(song, text, lang, cfg) or not drop_talk:
             kept.append(song)
     log.info("전사 후 노래 %d곡 (토크/BGM %d개 제외)", len(kept), len(pairs) - len(kept))

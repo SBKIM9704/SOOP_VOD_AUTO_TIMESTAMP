@@ -55,11 +55,8 @@ class AudioConfig:
 
 @dataclass
 class SttConfig:
-    model: str = "small"             # faster-whisper 모델 (base/small/medium…)
-    device: str = "cpu"
-    compute_type: str = "int8"
-    language: str | None = None      # None=자동. 노래는 "en"/"ko" 강제가 정확도 큼
-    beam_size: int = 5
+    groq_model: str = "whisper-large-v3-turbo"  # Groq 호스팅 Whisper API(가사 전사)
+    language: str | None = None      # None=자동(en/ko 둘 다 시도). 노래는 강제가 정확도 큼
     lyric_chars: int = 300           # 출력 가사 길이 컷
 
 
@@ -79,8 +76,25 @@ class YouTubeConfig:
     token_file: str = "~/.config/soopts/yt_token.json"  # 최초 동의 후 저장되는 토큰
     privacy: str = "unlisted"        # unlisted=링크로 시청 가능
     category_id: str = "10"          # 10 = Music
-    title_template: str = "{title} - {bj} ({date})"
+    title_template: str = "{title} - {artist} | {bj} ({date})"
+    display_name: str = "띵귤"        # 제목/설명에 쓰는 스트리머 표기 — meta.bj_nick은 API마다
+                                      # "띵귤_"처럼 값이 흔들릴 수 있어 고정 문자열로 씀
     made_for_kids: bool = False
+    daily_upload_limit: int = 5      # 쿼터: 업로드 1600유닛/건, 일일 10000유닛 → 여유는 sync용
+
+
+@dataclass
+class StationConfig:
+    bj_id: str = "singgyul"          # 데일리 배치 대상 스테이션
+    daily_vod_count: int = 2         # 하루 처리할 미처리 VOD 수
+
+
+@dataclass
+class CommentConfig:
+    # 댓글 타임라인(팬이 자원해서 다는 비공식 타임스탬프)에서 노래 시각을 찾으면,
+    # 정확한 길이를 모르니 앞뒤로 넉넉히 다운로드한 뒤 inaSpeechSegmenter로 정밀 경계를 찾는다.
+    pad_before_s: float = 10.0
+    pad_after_s: float = 300.0
 
 
 @dataclass
@@ -91,6 +105,8 @@ class Config:
     stt: SttConfig = field(default_factory=SttConfig)
     clip: ClipConfig = field(default_factory=ClipConfig)
     youtube: YouTubeConfig = field(default_factory=YouTubeConfig)
+    station: StationConfig = field(default_factory=StationConfig)
+    comment: CommentConfig = field(default_factory=CommentConfig)
     work_root: Path = Path("work")
 
 
@@ -115,6 +131,8 @@ def load_config(path: Path | None = None, work_root: Path | None = None) -> Conf
         stt=_build_section(SttConfig, data.get("stt", {})),
         clip=_build_section(ClipConfig, data.get("clip", {})),
         youtube=_build_section(YouTubeConfig, data.get("youtube", {})),
+        station=_build_section(StationConfig, data.get("station", {})),
+        comment=_build_section(CommentConfig, data.get("comment", {})),
     )
     if data.get("work_root") is not None:
         cfg.work_root = Path(data["work_root"])
