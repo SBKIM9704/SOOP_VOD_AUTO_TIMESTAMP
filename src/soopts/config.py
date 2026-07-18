@@ -58,6 +58,10 @@ class SttConfig:
     groq_model: str = "whisper-large-v3-turbo"  # Groq 호스팅 Whisper API(가사 전사)
     language: str | None = None      # None=자동(en/ko 둘 다 시도). 노래는 강제가 정확도 큼
     lyric_chars: int = 300           # 출력 가사 길이 컷
+    # 전사 성공률이 이 값 미만이면 실행을 실패로 처리한다. 노래는 반주에 묻혀 원래 일부는
+    # 빈 결과가 나오므로 100%를 기대하면 안 되지만, 대량 실패(API 한도 초과·인증 만료 등)는
+    # 반드시 잡아야 한다 — 실제로 413으로 전량 실패하는 동안 몇 달간 아무도 몰랐다.
+    min_success_rate: float = 0.5
 
 
 @dataclass

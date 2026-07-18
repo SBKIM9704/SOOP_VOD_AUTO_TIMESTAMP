@@ -105,6 +105,20 @@ NULL wherever a row lacks one — so mixing a retry row (rich, straight from `se
 row (sparse) made `retry_count` NULL on the new row and Postgres rejected the whole batch with
 `23502`. Never build the upsert dicts per-row-shape.
 
+### Quality gate (`quality_warning`)
+
+Failures here show up as **degradation, not exceptions** — when Groq rejected every clip with 413 the
+run still finished "successfully", songs just piled up in the review queue with no lyrics, and the
+summary looked normal because it only counted detections. So `run_daily` measures `stt_ok /
+stt_attempted` and raises if it drops below `cfg.stt.min_success_rate` (default 0.5). The summary is
+sent to Slack *before* the gate raises, and DB writes are already committed, so failing the run never
+loses work — it just makes someone look.
+
+`format_summary` also splits auto-matches by basis (`hint_available` vs `lyrics_only`). That split is
+the specific blind spot from the incident: comment-timeline hints kept producing auto-matches while
+STT was dead, so the match rate looked fine. Note that when a hint exists the code skips lyric-based
+identification entirely, so `lyrics_only` staying at 0 is expected for VODs with a fan timeline.
+
 ### Schema debt owned by the other repo
 
 `singgyul_sing_book` owns the schema, so these can only be cleaned up there — this repo just stops

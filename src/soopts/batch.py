@@ -120,6 +120,26 @@ def next_vod_status(detected: int) -> str:
     return "done" if detected == 0 else "analyzed"
 
 
+def quality_warning(cfg: Config, stats: dict[str, Any]) -> str | None:
+    """품질 지표가 임계값 미달이면 사유를, 정상이면 None을 반환한다.
+
+    이 게이트가 없어서 STT가 몇 달간 전량 실패(413)하는 동안에도 실행은 계속 "성공"으로
+    끝났다. 곡은 가사 없이 needs_review로 쌓였고, 요약에는 감지 곡 수만 찍혀 정상처럼
+    보였다. 예외가 아니라 **품질 저하**로 나타나는 장애를 잡으려면 수치를 직접 봐야 한다.
+    """
+    attempted = stats.get("stt_attempted", 0)
+    if attempted == 0:
+        return None
+    ok = stats.get("stt_ok", 0)
+    rate = ok / attempted
+    if rate < cfg.stt.min_success_rate:
+        return (
+            f"STT 성공률 {rate:.0%} (가사 확보 {ok}/{attempted}곡)가 임계값 "
+            f"{cfg.stt.min_success_rate:.0%} 미만 — 전사가 대량 실패하는 장애일 수 있다"
+        )
+    return None
+
+
 def format_summary(stats: dict[str, int]) -> str:
     """일일 배치 결과 한 줄 요약. Slack/로그 공용."""
     parts = [
@@ -128,6 +148,16 @@ def format_summary(stats: dict[str, int]) -> str:
         f"자동매칭 {stats.get('auto_matched', 0)}",
         f"검수대기 {stats.get('needs_review', 0)}",
     ]
+    attempted = stats.get("stt_attempted", 0)
+    if attempted:
+        ok = stats.get("stt_ok", 0)
+        parts.append(f"가사확보 {ok}/{attempted}({ok / attempted:.0%})")
+    # 자동매칭이 가사 덕분인지 댓글 타임라인 덕분인지 구분한다 — 예전엔 STT가 죽어도
+    # 타임라인 힌트만으로 매칭이 되어 성공률이 정상처럼 보였다.
+    if stats.get("hint_available") or stats.get("lyrics_only"):
+        parts.append(
+            f"근거 타임라인 {stats.get('hint_available', 0)}/가사 {stats.get('lyrics_only', 0)}"
+        )
     if "deleted" in stats:
         parts.append(f"삭제 {stats['deleted']}건")
     return " / ".join(parts)
@@ -300,7 +330,10 @@ def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
         raise
 
     ctx = RunContext()
-    stats: dict[str, Any] = {"vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0}
+    stats: dict[str, Any] = {
+        "vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0,
+        "stt_attempted": 0, "stt_ok": 0, "hint_available": 0, "lyrics_only": 0,
+    }
     for vod_row in picked:
         title_no = vod_row["soop_title_no"]
         try:
@@ -308,6 +341,8 @@ def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
             stats["detected"] += vod_stats["detected"]
             stats["auto_matched"] += vod_stats["auto_matched"]
             stats["needs_review"] += vod_stats["needs_review"]
+            for k in ("stt_attempted", "stt_ok", "hint_available", "lyrics_only"):
+                stats[k] += vod_stats.get(k, 0)
             if vod_stats.get("not_song_skipped"):
                 stats["not_song_skipped"] = (
                     stats.get("not_song_skipped", 0) + vod_stats["not_song_skipped"]
@@ -323,6 +358,13 @@ def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
     deterministic = format_detailed_summary(cfg, ctx, stats)
     log.info("daily 완료: %s", deterministic)
     _notify_slack(narrate_with_llm(deterministic))
+
+    # 요약을 먼저 보낸 뒤에 판정한다 — 여기서 죽더라도 무엇이 처리됐는지는 남아야 한다.
+    # DB 기록도 이미 끝났으므로 실패로 표시해도 작업이 유실되지 않는다.
+    warning = quality_warning(cfg, stats)
+    if warning:
+        _notify_slack(f"⚠️ 품질 경보: {warning}")
+        raise RuntimeError(warning)
     return {**stats, "text": deterministic}
 
 
@@ -412,7 +454,10 @@ def _process_vod(
         kind="detection", title_no=title_no, detail=detail,
         duration_s=time.monotonic() - detect_t0,
     ))
-    stats: dict[str, Any] = {"detected": 0, "auto_matched": 0, "needs_review": 0, "region_errors": []}
+    stats: dict[str, Any] = {
+        "detected": 0, "auto_matched": 0, "needs_review": 0, "region_errors": [],
+        "stt_attempted": 0, "stt_ok": 0, "hint_available": 0, "lyrics_only": 0,
+    }
     if not candidates:
         return stats
 
@@ -454,6 +499,11 @@ def _process_vod(
             )
             stt_dur = time.monotonic() - stt_t0
             lyrics = text[: cfg.stt.lyric_chars]
+            # 전사 성공률은 조용한 장애를 잡는 유일한 신호다 — Groq가 413으로 전량
+            # 거절하던 시절에도 실행은 계속 "성공"으로 끝났고 곡만 검수 큐에 쌓였다.
+            stats["stt_attempted"] += 1
+            if lyrics.strip():
+                stats["stt_ok"] += 1
             rate = sticker_rate((clip.t, clip.end), stickers)
             song = Song(
                 t=clip.t, end=clip.end, duration=clip.duration,
@@ -463,6 +513,7 @@ def _process_vod(
             )
 
             step = "곡 식별"
+            stats["hint_available" if hint is not None else "lyrics_only"] += 1
             if hint is not None:
                 # 댓글에 이미 아티스트/제목이 있으니 Claude 가사 추측을 건너뛰고 바로 매칭한다.
                 result = resolve_song_match(
