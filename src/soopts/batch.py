@@ -481,7 +481,7 @@ def _process_vod(
             step = "다운로드"
             raw = work.clips_dir / f"region_{int(ds)}.mp4"
             if not raw.exists():
-                download_slice(m3u8, ls, le, raw)
+                download_slice(m3u8, ls, le, raw, workers=cfg.collector.segment_workers)
             step = "경계 탐지"
             span = detect_song_span(cfg, str(raw), ds, de, media_offset=ds)
             if span is None:

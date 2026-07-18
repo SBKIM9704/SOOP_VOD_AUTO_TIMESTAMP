@@ -26,6 +26,10 @@ class Endpoints:
 @dataclass
 class CollectorConfig:
     request_delay_s: float = 0.3
+    # HLS 세그먼트 동시 요청 수. 구간 하나가 50여 개 세그먼트라 순차로 받으면 요청당
+    # 왕복 지연이 그대로 쌓인다(실측: 화질 8배↓에도 다운로드는 2배만 줄었다).
+    # 영상 플레이어의 프리페치와 비슷한 수준으로만 올린다.
+    segment_workers: int = 4
     chunk_step_s: int = 300
     timeout_s: float = 15.0
     max_retries: int = 3

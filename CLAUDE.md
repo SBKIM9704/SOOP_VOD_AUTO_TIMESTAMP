@@ -91,6 +91,13 @@ ffmpeg used to be 76% of total runtime (6.6 min per song); removing it took a VO
 the same AAC audio, and audio is all the segmenter and Whisper ever see, so the higher ones only cost
 download time. Don't raise it "for quality" — there is no video output to have quality.
 
+What remains after that is round-trip latency, not bandwidth: a region is ~50 segments fetched one by
+one, and dropping the bitrate 8× only halved download time. `_write_segments` therefore fetches
+`cfg.collector.segment_workers` (default 4) segments concurrently while writing them in **submission
+order** — out-of-order writes corrupt the fMP4. It keeps a sliding window rather than gathering
+everything first, so memory stays bounded at `workers` segments. Measured against the real stream:
+11.8s → 5.6s for a 300s region, byte-identical output.
+
 A run killed mid-VOD (timeout, cancel, runner reset) leaves `vods.status = 'pending'` because
 `mark_vod` never runs. `select_pending()` therefore treats **both** `failed` and `pending` as
 retryable. Any `pending` seen at selection time is necessarily stale: `concurrency: soopts-daily`
