@@ -15,6 +15,7 @@ from soopts.batch import (
     format_vod_result,
     narrate_with_llm,
     next_vod_status,
+    quality_warning,
     song_link,
     vod_link,
 )
@@ -300,3 +301,54 @@ def test_comment_candidates_caps_correctly_even_when_list_order_is_not_chronolog
 
 
 
+
+
+# --------------------------------------------------------------------------- #
+# 품질 게이트 — 조용한 장애를 실패로 드러낸다
+# --------------------------------------------------------------------------- #
+def test_quality_warning_fires_when_stt_fails_wholesale():
+    """실제로 있었던 장애: Groq가 413으로 전량 거절하는 동안 실행은 계속 성공으로 끝났다."""
+    cfg = Config()
+    w = quality_warning(cfg, {"stt_attempted": 32, "stt_ok": 0})
+    assert w is not None
+    assert "0%" in w and "0/32" in w
+
+
+def test_quality_warning_silent_when_rate_is_healthy():
+    assert quality_warning(Config(), {"stt_attempted": 10, "stt_ok": 8}) is None
+
+
+def test_quality_warning_silent_when_nothing_attempted():
+    """처리할 VOD가 없던 실행을 실패로 만들면 안 된다."""
+    assert quality_warning(Config(), {"stt_attempted": 0, "stt_ok": 0}) is None
+
+
+def test_quality_warning_respects_configured_threshold():
+    cfg = Config()
+    cfg.stt.min_success_rate = 0.9
+    assert quality_warning(cfg, {"stt_attempted": 10, "stt_ok": 8}) is not None
+    cfg.stt.min_success_rate = 0.7
+    assert quality_warning(cfg, {"stt_attempted": 10, "stt_ok": 8}) is None
+
+
+def test_quality_warning_boundary_is_inclusive():
+    cfg = Config()
+    cfg.stt.min_success_rate = 0.5
+    assert quality_warning(cfg, {"stt_attempted": 10, "stt_ok": 5}) is None
+
+
+def test_format_summary_shows_lyric_rate_and_match_basis():
+    """자동매칭이 가사 덕분인지 타임라인 덕분인지 구분되어야 한다 —
+    STT가 죽어도 타임라인 힌트만으로 매칭돼 정상처럼 보이던 게 이번 사건의 사각지대였다."""
+    text = format_summary({
+        "vods": 1, "detected": 11, "auto_matched": 7, "needs_review": 4,
+        "stt_attempted": 11, "stt_ok": 9, "hint_available": 11, "lyrics_only": 0,
+    })
+    assert "가사확보 9/11(82%)" in text
+    assert "근거 타임라인 11/가사 0" in text
+
+
+def test_format_summary_omits_metrics_when_nothing_processed():
+    text = format_summary({"vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0})
+    assert "가사확보" not in text
+    assert "근거" not in text

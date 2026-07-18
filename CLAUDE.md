@@ -91,6 +91,13 @@ ffmpeg used to be 76% of total runtime (6.6 min per song); removing it took a VO
 the same AAC audio, and audio is all the segmenter and Whisper ever see, so the higher ones only cost
 download time. Don't raise it "for quality" — there is no video output to have quality.
 
+What remains after that is round-trip latency, not bandwidth: a region is ~50 segments fetched one by
+one, and dropping the bitrate 8× only halved download time. `_write_segments` therefore fetches
+`cfg.collector.segment_workers` (default 4) segments concurrently while writing them in **submission
+order** — out-of-order writes corrupt the fMP4. It keeps a sliding window rather than gathering
+everything first, so memory stays bounded at `workers` segments. Measured against the real stream:
+11.8s → 5.6s for a 300s region, byte-identical output.
+
 A run killed mid-VOD (timeout, cancel, runner reset) leaves `vods.status = 'pending'` because
 `mark_vod` never runs. `select_pending()` therefore treats **both** `failed` and `pending` as
 retryable. Any `pending` seen at selection time is necessarily stale: `concurrency: soopts-daily`
@@ -104,6 +111,20 @@ PostgREST builds the column list from the union of keys across the batch and wri
 NULL wherever a row lacks one — so mixing a retry row (rich, straight from `select *`) with a new
 row (sparse) made `retry_count` NULL on the new row and Postgres rejected the whole batch with
 `23502`. Never build the upsert dicts per-row-shape.
+
+### Quality gate (`quality_warning`)
+
+Failures here show up as **degradation, not exceptions** — when Groq rejected every clip with 413 the
+run still finished "successfully", songs just piled up in the review queue with no lyrics, and the
+summary looked normal because it only counted detections. So `run_daily` measures `stt_ok /
+stt_attempted` and raises if it drops below `cfg.stt.min_success_rate` (default 0.5). The summary is
+sent to Slack *before* the gate raises, and DB writes are already committed, so failing the run never
+loses work — it just makes someone look.
+
+`format_summary` also splits auto-matches by basis (`hint_available` vs `lyrics_only`). That split is
+the specific blind spot from the incident: comment-timeline hints kept producing auto-matches while
+STT was dead, so the match rate looked fine. Note that when a hint exists the code skips lyric-based
+identification entirely, so `lyrics_only` staying at 0 is expected for VODs with a fan timeline.
 
 ### Schema debt owned by the other repo
 

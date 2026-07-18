@@ -99,7 +99,7 @@ def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int
             continue
         raw = work.clips_dir / f"region_{int(ds)}.mp4"
         if not raw.exists() or args.force:
-            download_slice(m3u8, ls, le, raw)
+            download_slice(m3u8, ls, le, raw, workers=cfg.collector.segment_workers)
         span = detect_song_span(cfg, str(raw), ds, de, media_offset=ds)
         if span:
             clip, local_start, local_end = span
@@ -233,7 +233,7 @@ def _songs_slice(cfg: Config, vod_id: str, work: WorkPaths, meta, args):
             continue
         path = slice_dir / f"slice_{int(s)}_{int(e)}.mp4"
         if not path.exists() or args.force:
-            download_slice(m3u8, ls, le, path)
+            download_slice(m3u8, ls, le, path, workers=cfg.collector.segment_workers)
         rate = sum(1 for t in stickers if s <= t <= e) / max((e - s) / 60.0, 1e-6)
         song = Song(t=int(s), end=int(e), duration=int(e - s),
                     sticker_rate=round(rate, 1), song_likely=rate >= cfg.audio.sticker_rate_strong)
