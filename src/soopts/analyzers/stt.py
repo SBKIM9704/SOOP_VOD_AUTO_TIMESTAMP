@@ -46,7 +46,9 @@ def looks_like_song(text: str) -> bool:
     return (talk_ratio < 0.12 and q_ratio < 0.1) or rep >= 0.45
 
 
-# 16kHz 모노 WAV는 초당 32KB라 이 상한이면 20MB 미만 — Groq 업로드 한도(25MB) 안쪽이다.
+_GROQ_MAX_BYTES = 25 * 1024 * 1024  # Groq 오디오 업로드 한도
+
+# 16kHz 모노 WAV는 초당 32KB라 이 상한이면 20MB 미만 — 위 한도 안쪽이다.
 # 클립은 min_song_s~310초 범위라 실제로 잘릴 일은 없고, 비정상적으로 긴 입력만 막는다.
 _SLICE_MAX_SECONDS = 600.0
 
@@ -70,10 +72,36 @@ def _extract_wav(audio_path: str, start: float, dur: float, out: Path) -> bool:
     return True
 
 
+def _ensure_uploadable(path: str, tmpdir: Path) -> str | None:
+    """Groq에 올릴 수 있는 오디오 파일 경로를 보장한다(없으면 None).
+
+    호출부가 1080p mp4 클립 경로를 그대로 넘기는 일이 실제로 있었다(batch.py의 슬라이스
+    경로). 수백 MB를 그대로 올리면 Groq가 413으로 전량 거절하는데, 실패해도 WARNING만
+    남고 needs_review로 흘러가 몇 달간 아무도 눈치채지 못했다. 그래서 호출부를 믿지 않고
+    Groq로 나가는 유일한 관문인 여기서 불변식을 세운다.
+
+    이미 한도 안쪽의 WAV면 그대로 쓴다 — transcribe_songs는 구간을 잘라 WAV를 넘기므로
+    여기서 다시 변환할 이유가 없다.
+    """
+    p = Path(path)
+    if p.suffix.lower() == ".wav" and p.exists() and p.stat().st_size <= _GROQ_MAX_BYTES:
+        return path
+    out = tmpdir / "stt.wav"
+    return str(out) if _extract_wav(path, 0.0, _SLICE_MAX_SECONDS, out) else None
+
+
 def _transcribe_best(client, path: str, cfg: Config) -> tuple[str, str]:
     """Groq Whisper API로 후보 언어별 전사해 평균 logprob 높은 결과를 (가사, 언어)로 반환."""
     scfg = cfg.stt
     langs = [scfg.language] if scfg.language else ["en", "ko"]
+    with tempfile.TemporaryDirectory() as td:
+        path = _ensure_uploadable(path, Path(td))
+        if path is None:
+            return "", ""
+        return _transcribe_langs(client, path, scfg, langs)
+
+
+def _transcribe_langs(client, path: str, scfg, langs: list[str]) -> tuple[str, str]:
     best_text, best_lang, best_score = "", "", -1e9
     for lang in langs:
         try:
@@ -140,15 +168,10 @@ def transcribe_slices(
         return []
     model = _load_model(cfg)
     kept: list[Song] = []
-    with tempfile.TemporaryDirectory() as td:
-        wav = Path(td) / "seg.wav"
-        for song, path in pairs:
-            # 슬라이스는 1080p mp4(수백 MB)라 그대로 올리면 Groq가 413 request_too_large로
-            # 전부 거절한다 — 오디오만 뽑아 보낸다. 전사에 영상 트랙은 어차피 쓸모없다.
-            if not _extract_wav(path, 0.0, _SLICE_MAX_SECONDS, wav):
-                continue
-            text, lang = _transcribe_best(model, str(wav), cfg)
-            if _finalize(song, text, lang, cfg) or not drop_talk:
-                kept.append(song)
+    for song, path in pairs:
+        # 슬라이스는 1080p mp4(수백 MB)지만 _transcribe_best가 오디오만 뽑아 올린다.
+        text, lang = _transcribe_best(model, path, cfg)
+        if _finalize(song, text, lang, cfg) or not drop_talk:
+            kept.append(song)
     log.info("전사 후 노래 %d곡 (토크/BGM %d개 제외)", len(kept), len(pairs) - len(kept))
     return kept
