@@ -81,6 +81,7 @@ class YouTubeConfig:
                                       # "띵귤_"처럼 값이 흔들릴 수 있어 고정 문자열로 씀
     made_for_kids: bool = False
     daily_upload_limit: int = 5      # 쿼터: 업로드 1600유닛/건, 일일 10000유닛 → 여유는 sync용
+    daily_deletion_limit: int = 50   # 1회 실행당(daily/sync 둘 다) 삭제 큐 처리 상한
 
 
 @dataclass
