@@ -145,6 +145,29 @@ def mark_vod(title_no: str, status: str, error: str | None = None) -> None:
 # --------------------------------------------------------------------------- #
 # performances
 # --------------------------------------------------------------------------- #
+def clear_machine_performances(vod_row_id: int) -> int:
+    """VOD의 기계 생성 performances를 지우고 지운 건수를 반환한다.
+
+    재처리는 이제 일상이다 — 중단된 실행이 남긴 pending VOD를 다음 실행이 다시 잡는다.
+    그런데 insert만 하면 같은 구간이 매번 새 행으로 쌓인다. 실제로 201142227에서
+    같은 start_s/end_s가 두 벌씩 생겼다(타임아웃 실행 4건 + 재처리 4건).
+
+    identify_status='confirmed'는 남긴다 — 사람이 검수 UI에서 확정한 결과이고, 기계가
+    다시 만들어낼 수 없는 유일한 정보다. 나머지(needs_review/auto_matched/rejected)는
+    이번 실행이 다시 만들어낸다.
+    """
+    rows = (
+        _client()
+        .table("performances")
+        .delete()
+        .eq("vod_id", vod_row_id)
+        .neq("identify_status", "confirmed")
+        .execute()
+        .data
+    )
+    return len(rows or [])
+
+
 def insert_performances(
     vod_row_id: str,
     songs: list[Song],
@@ -179,7 +202,15 @@ def insert_performances(
         }
         for s, r in zip(songs, results, strict=True)
     ]
-    return _client().table("performances").insert(rows).execute().data
+    # (vod_id, start_s) 유니크 위반은 무시한다 — confirmed로 남겨둔 행과 같은 구간을
+    # 다시 감지한 경우다. 사람이 확정한 쪽을 덮어쓰지 않는다.
+    return (
+        _client()
+        .table("performances")
+        .upsert(rows, on_conflict="vod_id,start_s", ignore_duplicates=True)
+        .execute()
+        .data
+    )
 
 
 # --------------------------------------------------------------------------- #

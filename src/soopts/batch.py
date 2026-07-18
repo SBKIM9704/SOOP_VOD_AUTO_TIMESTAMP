@@ -447,6 +447,11 @@ def _process_vod(
     meta = fetch_meta(cfg, title_no, work)
     fetch_chat(cfg, title_no, meta, work)
 
+    # 재처리면 이전 실행이 남긴 기계 생성 행을 먼저 치운다(사람 확정분은 유지).
+    cleared = db.clear_machine_performances(vod_row["id"])
+    if cleared:
+        log.info("VOD %s 재처리 — 기존 기계 생성 %d건 정리", title_no, cleared)
+
     stickers = [float(m.t) for m in read_chat_jsonl(work.chat) if m.kind == "ogq"]
     detect_t0 = time.monotonic()
     candidates, mode, detail = _find_candidates(cfg, bj_id, title_no, stickers, meta)

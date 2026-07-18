@@ -103,7 +103,7 @@ class _FakeTable:
     def __init__(self, sink):
         self.sink = sink
 
-    def insert(self, rows):
+    def upsert(self, rows, on_conflict=None, ignore_duplicates=None):
         self.sink["rows"] = rows
         return self
 
@@ -191,3 +191,54 @@ def test_select_pending_retry_prefers_fresh_candidate_metadata():
     row = select_pending(candidates, existing, n=1)[0]
     assert row["title"] == "새 제목"
     assert row["duration_s"] == 999
+
+
+# --------------------------------------------------------------------------- #
+# 재처리 중복 방지
+# --------------------------------------------------------------------------- #
+def test_insert_performances_upserts_on_vod_and_start(monkeypatch):
+    """재처리가 같은 구간을 다시 감지해도 새 행이 쌓이면 안 된다 —
+    실제로 201142227에 같은 start_s/end_s가 두 벌씩 생겼다."""
+    seen: dict = {}
+
+    class _T:
+        def upsert(self, rows, on_conflict=None, ignore_duplicates=None):
+            seen.update(rows=rows, on_conflict=on_conflict, ignore=ignore_duplicates)
+            return self
+
+        def insert(self, rows):
+            raise AssertionError("insert를 쓰면 재처리마다 중복이 쌓인다")
+
+        def execute(self):
+            return type("R", (), {"data": seen["rows"]})()
+
+    monkeypatch.setattr(db, "_client", lambda: type("C", (), {"table": lambda s, n: _T()})())
+    db.insert_performances("v1", [_song()], [None])
+    assert seen["on_conflict"] == "vod_id,start_s"
+    assert seen["ignore"] is True   # confirmed 행을 덮어쓰지 않는다
+
+
+def test_clear_machine_performances_spares_human_confirmations(monkeypatch):
+    """사람이 확정한 건 기계가 다시 만들 수 없다 — 재처리해도 남겨야 한다."""
+    calls: dict = {}
+
+    class _T:
+        def delete(self):
+            calls["delete"] = True
+            return self
+
+        def eq(self, col, val):
+            calls.setdefault("eq", []).append((col, val))
+            return self
+
+        def neq(self, col, val):
+            calls["neq"] = (col, val)
+            return self
+
+        def execute(self):
+            return type("R", (), {"data": [{"id": 1}, {"id": 2}]})()
+
+    monkeypatch.setattr(db, "_client", lambda: type("C", (), {"table": lambda s, n: _T()})())
+    assert db.clear_machine_performances(7) == 2
+    assert calls["eq"] == [("vod_id", 7)]
+    assert calls["neq"] == ("identify_status", "confirmed")

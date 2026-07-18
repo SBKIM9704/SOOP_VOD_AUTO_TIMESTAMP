@@ -103,6 +103,13 @@ A run killed mid-VOD (timeout, cancel, runner reset) leaves `vods.status = 'pend
 `mark_vod` never runs. `select_pending()` therefore treats **both** `failed` and `pending` as
 retryable. Any `pending` seen at selection time is necessarily stale: `concurrency: soopts-daily`
 forbids overlapping runs, and within one run selection happens once, before processing.
+Because retries are routine, **reprocessing must be idempotent**. `insert_performances` upserts on
+`(vod_id, start_s)` with `ignore_duplicates`, and `_process_vod` calls
+`clear_machine_performances()` first to drop the previous run's rows for that VOD. Rows with
+`identify_status = 'confirmed'` are spared — a human decided those and the machine cannot recreate
+them. Before this, every reprocess appended a fresh copy of each span (201142227 ended up with two
+sets of identical `start_s`/`end_s`).
+
 Retrying `pending` bumps `retry_count` inside `select_pending` — `mark_vod` only bumps it on
 `failed`, so without this a VOD that kills the runner every time would never reach `MAX_RETRIES`
 and would block the queue forever.
