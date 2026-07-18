@@ -1,7 +1,11 @@
 """Groq Whisper API 기반 전사 선택 로직 테스트 — 실제 네트워크 호출 없이 fake client로."""
 
+import pytest
+
+from soopts.analyzers import stt
 from soopts.analyzers.stt import _transcribe_best
 from soopts.config import Config
+from soopts.models import Song
 
 
 class _FakeTranscriptions:
@@ -85,3 +89,71 @@ def test_transcribe_best_returns_empty_when_all_languages_raise(tmp_path):
     text, lang = _transcribe_best(client, str(wav), Config())
     assert text == ""
     assert lang == ""
+
+
+# --------------------------------------------------------------------------- #
+# _extract_wav — ffmpeg 실행 없이 반환값/정리 동작만 검증
+# --------------------------------------------------------------------------- #
+def _song() -> Song:
+    return Song(t=600, end=780, duration=180, sticker_rate=1.0, song_likely=True)
+
+
+class _FakeProc:
+    def __init__(self, returncode, stderr=b""):
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+def test_extract_wav_returns_false_when_ffmpeg_fails(tmp_path, monkeypatch):
+    out = tmp_path / "seg.wav"
+    monkeypatch.setattr(stt.subprocess, "run", lambda *a, **k: _FakeProc(1, b"boom"))
+    assert stt._extract_wav("in.mp4", 0.0, 10.0, out) is False
+
+
+def test_extract_wav_returns_false_when_output_missing(tmp_path, monkeypatch):
+    """ffmpeg가 0을 반환해도 산출물이 없으면 실패로 본다."""
+    out = tmp_path / "seg.wav"
+    monkeypatch.setattr(stt.subprocess, "run", lambda *a, **k: _FakeProc(0))
+    assert stt._extract_wav("in.mp4", 0.0, 10.0, out) is False
+
+
+def test_extract_wav_removes_stale_output_before_running(tmp_path, monkeypatch):
+    """직전 곡의 WAV가 남아 다음 곡 가사로 잘못 붙는 것을 막는다."""
+    out = tmp_path / "seg.wav"
+    out.write_bytes(b"previous-song")
+    monkeypatch.setattr(stt.subprocess, "run", lambda *a, **k: _FakeProc(1, b"boom"))
+    assert stt._extract_wav("in.mp4", 0.0, 10.0, out) is False
+    assert not out.exists()
+
+
+def test_extract_wav_returns_true_on_success(tmp_path, monkeypatch):
+    out = tmp_path / "seg.wav"
+
+    def _run(*a, **k):
+        out.write_bytes(b"wav-data")
+        return _FakeProc(0)
+
+    monkeypatch.setattr(stt.subprocess, "run", _run)
+    assert stt._extract_wav("in.mp4", 0.0, 10.0, out) is True
+
+
+def test_transcribe_slices_sends_extracted_wav_not_the_mp4(monkeypatch):
+    """슬라이스 mp4를 그대로 올리면 Groq가 413으로 거절한다 — WAV 경로가 가야 한다."""
+    sent: list[str] = []
+    monkeypatch.setattr(stt, "_load_model", lambda cfg: object())
+    monkeypatch.setattr(stt, "_extract_wav", lambda src, s, d, out: True)
+    monkeypatch.setattr(stt, "_transcribe_best",
+                        lambda model, path, cfg: (sent.append(path), ("가사", "ko"))[1])
+    song = _song()
+    stt.transcribe_slices(Config(), [(song, "work/1/clips/region_600.mp4")], drop_talk=False)
+    assert len(sent) == 1
+    assert sent[0].endswith("seg.wav")
+
+
+def test_transcribe_slices_skips_song_when_extraction_fails(monkeypatch):
+    monkeypatch.setattr(stt, "_load_model", lambda cfg: object())
+    monkeypatch.setattr(stt, "_extract_wav", lambda src, s, d, out: False)
+    monkeypatch.setattr(stt, "_transcribe_best",
+                        lambda *a, **k: pytest.fail("추출 실패 시 전사를 시도하면 안 된다"))
+    song = _song()
+    assert stt.transcribe_slices(Config(), [(song, "x.mp4")], drop_talk=False) == []
