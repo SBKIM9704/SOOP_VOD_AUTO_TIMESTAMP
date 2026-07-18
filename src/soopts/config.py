@@ -71,20 +71,6 @@ class ClipConfig:
 
 
 @dataclass
-class YouTubeConfig:
-    client_secret: str = "client_secret.json"  # Google Cloud OAuth 클라이언트(사용자 준비)
-    token_file: str = "~/.config/soopts/yt_token.json"  # 최초 동의 후 저장되는 토큰
-    privacy: str = "unlisted"        # unlisted=링크로 시청 가능
-    category_id: str = "10"          # 10 = Music
-    title_template: str = "{title} - {artist} | {bj} ({date})"
-    display_name: str = "띵귤"        # 제목/설명에 쓰는 스트리머 표기 — meta.bj_nick은 API마다
-                                      # "띵귤_"처럼 값이 흔들릴 수 있어 고정 문자열로 씀
-    made_for_kids: bool = False
-    daily_upload_limit: int = 5      # 쿼터: 업로드 1600유닛/건, 일일 10000유닛 → 여유는 sync용
-    daily_deletion_limit: int = 50   # 1회 실행당(daily/sync 둘 다) 삭제 큐 처리 상한
-
-
-@dataclass
 class StationConfig:
     bj_id: str = "singgyul"          # 데일리 배치 대상 스테이션
     daily_vod_count: int = 2         # 하루 처리할 미처리 VOD 수
@@ -105,7 +91,6 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     stt: SttConfig = field(default_factory=SttConfig)
     clip: ClipConfig = field(default_factory=ClipConfig)
-    youtube: YouTubeConfig = field(default_factory=YouTubeConfig)
     station: StationConfig = field(default_factory=StationConfig)
     comment: CommentConfig = field(default_factory=CommentConfig)
     work_root: Path = Path("work")
@@ -131,7 +116,6 @@ def load_config(path: Path | None = None, work_root: Path | None = None) -> Conf
         audio=_build_section(AudioConfig, data.get("audio", {})),
         stt=_build_section(SttConfig, data.get("stt", {})),
         clip=_build_section(ClipConfig, data.get("clip", {})),
-        youtube=_build_section(YouTubeConfig, data.get("youtube", {})),
         station=_build_section(StationConfig, data.get("station", {})),
         comment=_build_section(CommentConfig, data.get("comment", {})),
     )

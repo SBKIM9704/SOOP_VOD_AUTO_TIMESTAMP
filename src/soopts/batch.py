@@ -1,13 +1,14 @@
-"""`soopts daily` / `soopts sync` 오케스트레이션 — GitHub Actions 무인 배치.
+"""`soopts daily` 오케스트레이션 — GitHub Actions 무인 배치.
 
-daily: 스테이션 최신 VOD 중 미처리분 → 감지(스티커 구간)+1080p 정밀 클립 컷+STT →
-       Claude/rapidfuzz 곡 식별 → DB(performances) 기록 → 업로드 큐 소진.
-sync : 검수 확정(confirmed)된 건의 유튜브 제목/설명을 갱신.
+스테이션 최신 VOD 중 미처리분 → 감지(스티커 구간)+1080p 정밀 클립 컷+STT →
+Groq/rapidfuzz 곡 식별 → DB(performances)에 노래 구간(start_s/end_s) 기록.
 
-휘발성 러너 대응이 핵심 설계 포인트: 업로드 큐의 진실은 파일이 아니라 DB
-(clip_status + start_s/end_s + vods.soop_title_no)다. 클립 파일 경로는
-`clip_file_path()`로 title_no+start_s만으로 결정론적으로 재구성되므로, 이전
-실행에서 파일이 사라졌어도(러너 초기화) 같은 경로가 없으면 그 구간만 재슬라이스한다.
+산출물은 **타임스탬프**다. 시청은 SOOP 원본 딥링크(`song_link()`)로 연결하며,
+이 저장소는 영상을 어디에도 업로드하지 않는다 — 예전엔 유튜브 unlisted 업로드가
+붙어 있었으나 저장 비용·저작권 노출·단일 벤더 계정 의존을 이유로 제거했다.
+
+상태의 진실은 파일이 아니라 DB(vods.status + performances.clip_status)다.
+러너가 초기화되어 클립 파일이 사라져도 DB만 보면 어디까지 처리됐는지 알 수 있다.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from soopts.config import Config
@@ -36,7 +36,7 @@ REALTIME_ALERT_LIMIT = 3
 class TimelineEvent:
     """크로놀로지컬 상세 리포트 한 줄 — 감지/구간/업로드 단계에서 시간순으로 쌓인다."""
 
-    kind: str  # "detection" | "region" | "upload_item" | "upload_summary" | "deletion_item" | "deletion_summary"
+    kind: str  # "detection" | "region"
     title_no: str | None = None
     label: str | None = None
     detail: str | None = None
@@ -114,11 +114,6 @@ def comment_candidates(
     return candidates
 
 
-def clip_file_path(work_root: Path, title_no: str, start_s: float) -> Path:
-    """title_no+start_s만으로 결정되는 클립 파일 경로. 업로드 큐 재생성의 기준점."""
-    return work_paths(work_root, title_no).clips_dir / f"song_{int(start_s):06d}.mp4"
-
-
 def next_vod_status(detected: int) -> str:
     """VOD 처리 직후 상태. 감지된 노래가 없으면 검수·업로드할 게 없으니 바로 종결(done),
     있으면 업로드 큐 소진까지 거쳐야 하니 analyzed로 남긴다."""
@@ -133,8 +128,6 @@ def format_summary(stats: dict[str, int]) -> str:
         f"자동매칭 {stats.get('auto_matched', 0)}",
         f"검수대기 {stats.get('needs_review', 0)}",
     ]
-    if "uploaded" in stats:
-        parts.append(f"업로드 {stats['uploaded']}건 (큐 잔여 {stats.get('queue_remaining', 0)})")
     if "deleted" in stats:
         parts.append(f"삭제 {stats['deleted']}건")
     return " / ".join(parts)
@@ -144,6 +137,18 @@ def vod_link(cfg: Config, title_no: str) -> str:
     """VOD 웹 플레이어 링크 (Slack 하이퍼링크용, 특정 시각 지정 없음)."""
     return cfg.endpoints.vod_web_url.replace("{title_no}", str(title_no)).replace(
         "?change_second={sec}", ""
+    )
+
+
+def song_link(cfg: Config, title_no: str, start_s: float) -> str:
+    """노래 시작 시각으로 바로 이동하는 SOOP 딥링크.
+
+    유튜브 업로드를 대체하는 시청 경로다. 영상을 복제해 어딘가에 올리는 대신 원본
+    VOD의 해당 시각을 가리키므로 저장 비용이 없고, 저작권도 원 방송 플랫폼 안에
+    머문다. title_no와 start_s만으로 계산되니 DB에 따로 저장할 것도 없다.
+    """
+    return cfg.endpoints.vod_web_url.replace("{title_no}", str(title_no)).replace(
+        "{sec}", str(int(start_s))
     )
 
 
@@ -176,52 +181,12 @@ def format_region_failure_alert(
     )
 
 
-def format_upload_failure_alert(
-    cfg: Config, title_no: str, perf_id: Any, start_s: float, end_s: float, exc: Exception
-) -> str:
-    """업로드 실패 실시간 알림 — 실패 시점에 바로 Slack에 보낸다."""
-    from soopts.output import fmt_hms
-
-    return (
-        f"⚠️ VOD {title_no} 업로드 실패: {fmt_hms(int(start_s))}~{fmt_hms(int(end_s))} "
-        f"(perf={perf_id})\n"
-        f"    {type(exc).__name__}: {exc}\n"
-        f"    {vod_link(cfg, title_no)}"
-    )
-
-
 def _resolved_title_artist(perf: dict[str, Any]) -> tuple[str, str]:
     """확정 곡(songs join)이 있으면 그 title/artist를, 없으면 title_guess/미상으로 폴백."""
     song = perf.get("songs") or {}
     title = song.get("title") or perf.get("title_guess") or "곡명 미상"
     artist = song.get("artist") or "아티스트 미상"
     return title, artist
-
-
-def format_video_title(cfg: Config, date: str, title_no: str, start_s: float, perf: dict[str, Any]) -> str:
-    """업로드/동기화 공용 유튜브 제목 — 원곡 아티스트 포함, 스트리머 표기는 항상 고정값."""
-    from soopts.output import fmt_hms
-
-    title, artist = _resolved_title_artist(perf)
-    return cfg.youtube.title_template.format(
-        title=title, artist=artist, bj=cfg.youtube.display_name,
-        vod_id=title_no, hms=fmt_hms(int(start_s)), date=date,
-    )[:100]
-
-
-def format_video_description(cfg: Config, date: str, title_no: str, start_s: float, perf: dict[str, Any]) -> str:
-    """업로드/동기화 공용 유튜브 설명 — 제목/아티스트/날짜를 앞에 명시하고, 원본 링크는
-    독립된 줄에 둬서(예전엔 한 줄에 다 붙어있어 링크 클릭/접근이 불편하다는 피드백이 있었다)
-    보기 쉽게 한다."""
-    title, artist = _resolved_title_artist(perf)
-    vod_url = (
-        cfg.endpoints.vod_web_url.replace("{title_no}", str(title_no))
-        .replace("{sec}", str(int(start_s)))
-    )
-    desc = f"{title} - {artist}\n{cfg.youtube.display_name} {date} 다시보기\n\n원본 다시보기: {vod_url}"
-    if perf.get("lyrics_snippet"):
-        desc += f"\n\n가사(자동전사):\n{perf['lyrics_snippet']}"
-    return desc
 
 
 def format_detailed_summary(cfg: Config, ctx: RunContext, stats: dict[str, Any]) -> str:
@@ -234,15 +199,8 @@ def format_detailed_summary(cfg: Config, ctx: RunContext, stats: dict[str, Any])
     """
     lines = [format_summary(stats)]
     by_vod: dict[str, list[TimelineEvent]] = {}
-    upload_events: list[TimelineEvent] = []
-    deletion_events: list[TimelineEvent] = []
     for ev in ctx.events:
-        if ev.kind.startswith("upload"):
-            upload_events.append(ev)
-        elif ev.kind.startswith("deletion"):
-            deletion_events.append(ev)
-        else:
-            by_vod.setdefault(ev.title_no, []).append(ev)
+        by_vod.setdefault(ev.title_no, []).append(ev)
 
     for title_no, events in by_vod.items():
         lines.append(f"\n▶ VOD {title_no} ({vod_link(cfg, title_no)})")
@@ -262,25 +220,6 @@ def format_detailed_summary(cfg: Config, ctx: RunContext, stats: dict[str, Any])
                     f"    구간 {ev.label}: {mark} ({fmt_duration_s(ev.duration_s or 0)}){extra}{tail}"
                 )
 
-    if upload_events:
-        lines.append("\n▶ 업로드")
-        for ev in upload_events:
-            if ev.kind == "upload_item":
-                mark = "성공" if ev.ok else "실패"
-                tail = f" — {ev.detail}" if ev.detail else ""
-                lines.append(f"    {ev.title_no}: {mark} ({fmt_duration_s(ev.duration_s or 0)}){tail}")
-            elif ev.kind == "upload_summary":
-                lines.append(f"    총 {ev.count}건 성공, {fmt_duration_s(ev.duration_s or 0)} 소요")
-
-    if deletion_events:
-        lines.append("\n▶ 영상 삭제")
-        for ev in deletion_events:
-            if ev.kind == "deletion_item":
-                mark = "성공" if ev.ok else "실패"
-                tail = f" — {ev.detail}" if ev.detail else ""
-                lines.append(f"    {ev.label}: {mark}{tail}")
-            elif ev.kind == "deletion_summary":
-                lines.append(f"    총 {ev.count}건 성공")
 
     if ctx.alert_suppressed:
         lines.append(
@@ -349,7 +288,7 @@ def narrate_with_llm(deterministic_text: str, *, api_key: str | None = None) -> 
 # --------------------------------------------------------------------------- #
 # daily
 # --------------------------------------------------------------------------- #
-def run_daily(cfg: Config, *, bj_id: str, count: int, upload: bool) -> dict[str, Any]:
+def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
     from soopts import db
     from soopts.collector.vod_list import fetch_recent_vods
 
@@ -380,29 +319,6 @@ def run_daily(cfg: Config, *, bj_id: str, count: int, upload: bool) -> dict[str,
             db.mark_vod(title_no, "failed", error=str(e)[:500])
             _notify_slack(format_vod_result(cfg, title_no, {"error": str(e)[:500]}))
         stats["vods"] += 1
-
-    if upload:
-        try:
-            result = _drain_deletion_queue(cfg)
-            stats["deleted"] = result["deleted"]
-            for item in result["items"]:
-                ctx.record(TimelineEvent(
-                    kind="deletion_item", ok=item["ok"], label=item["video_id"], detail=item["error"],
-                ))
-                if not item["ok"]:
-                    ctx.alert(f"❌ 유튜브 영상 삭제 실패: {item['video_id']}\n    {item['error']}")
-            if result["items"]:
-                ctx.record(TimelineEvent(kind="deletion_summary", count=result["deleted"]))
-        except Exception as e:  # noqa: BLE001
-            # 삭제 큐는 업로드보다 우선순위가 낮은 부가 작업 — 실패해도 업로드는 계속 진행한다.
-            _notify_slack_failure("영상 삭제 큐 소진", e)
-        try:
-            upload_stats = _drain_upload_queue(cfg, ctx)
-            stats["uploaded"] = upload_stats["uploaded"]
-            stats["queue_remaining"] = db.count_upload_queue()
-        except Exception as e:  # noqa: BLE001
-            _notify_slack_failure("업로드 큐 소진", e)
-            raise
 
     deterministic = format_detailed_summary(cfg, ctx, stats)
     log.info("daily 완료: %s", deterministic)
@@ -598,182 +514,6 @@ def _process_vod(
             f"후보 {len(candidates)}구간 전부 실패 (예: {stats['region_errors'][0]})"
         )
     return stats
-
-
-# --------------------------------------------------------------------------- #
-# 삭제 큐 (singgyul_sing_book 관리자 화면에서 발생한 유튜브 영상 삭제 요청)
-# --------------------------------------------------------------------------- #
-def _drain_deletion_queue(cfg: Config) -> dict[str, Any]:
-    """youtube_deletion_queue의 pending 요청을 처리한다.
-
-    daily(RunContext 있음)와 sync(없음) 양쪽에서 호출되므로 RunContext에 의존하지
-    않는다 — 호출부가 반환값을 각자 방식으로 리포트한다. 구간 수정으로 생긴 요청이든
-    performances 행 삭제로 생긴 요청이든(performance_id가 null이 됨) 처리는 동일하다
-    (youtube_video_id만 있으면 됨).
-    """
-    from soopts import db
-    from soopts.export.youtube import delete_video
-
-    items: list[dict[str, Any]] = []
-    deleted = failed = 0
-    for row in db.fetch_deletion_queue(cfg.youtube.daily_deletion_limit):
-        video_id = row["youtube_video_id"]
-        try:
-            delete_video(cfg, video_id)
-            db.mark_deletion(row["id"], "done")
-            deleted += 1
-            items.append({"video_id": video_id, "ok": True, "error": None})
-        except Exception as e:  # noqa: BLE001
-            log.error("영상 삭제 실패 id=%s video=%s: %s", row["id"], video_id, e)
-            db.mark_deletion(row["id"], "failed")
-            failed += 1
-            items.append({"video_id": video_id, "ok": False, "error": f"{type(e).__name__}: {e}"})
-    return {"deleted": deleted, "failed": failed, "items": items}
-
-
-# --------------------------------------------------------------------------- #
-# 업로드 큐 (휘발성 러너 대응)
-# --------------------------------------------------------------------------- #
-def _drain_upload_queue(cfg: Config, ctx: RunContext) -> dict[str, int]:
-    from soopts import db
-    from soopts.export.youtube import upload_unlisted
-    from soopts.models import broadcast_date
-
-    stats = {"uploaded": 0, "failed": 0}
-    queue = db.fetch_upload_queue(cfg.youtube.daily_upload_limit)
-    touched_vod_nos: set[str] = set()
-    upload_t0 = time.monotonic()
-
-    for perf in queue:
-        title_no = perf["vods"]["soop_title_no"]
-        touched_vod_nos.add(title_no)
-        start_s, end_s = perf["start_s"], perf["end_s"]
-        path = clip_file_path(cfg.work_root, title_no, start_s)
-        item_t0 = time.monotonic()
-        try:
-            from soopts.collector.meta import fetch_meta
-
-            work = work_paths(cfg.work_root, title_no).ensure()
-            if not path.exists():
-                log.info("클립 파일 없음(러너 재시작) — %s %s초 재슬라이스", title_no, start_s)
-                meta = fetch_meta(cfg, title_no, work)
-                path = _reslice_clip(cfg, title_no, meta, start_s, end_s)
-            else:
-                meta = fetch_meta(cfg, title_no, work)
-
-            date = broadcast_date(meta)
-            title = format_video_title(cfg, date, title_no, start_s, perf)
-            desc = format_video_description(cfg, date, title_no, start_s, perf)
-
-            url = upload_unlisted(cfg, str(path), title, desc)
-            video_id = url.rsplit("/", 1)[-1]
-            db.update_performance(perf["id"], clip_status="uploaded", youtube_video_id=video_id)
-            stats["uploaded"] += 1
-            ctx.record(TimelineEvent(
-                kind="upload_item", title_no=title_no, ok=True,
-                detail=(perf.get("title_guess") or "곡명 미상"),
-                duration_s=time.monotonic() - item_t0,
-            ))
-        except Exception as e:  # noqa: BLE001
-            log.error("업로드 실패 perf=%s: %s", perf.get("id"), e)
-            db.update_performance(perf["id"], clip_status="failed")
-            stats["failed"] += 1
-            ctx.record(TimelineEvent(
-                kind="upload_item", title_no=title_no, ok=False,
-                detail=f"{type(e).__name__}: {e}",
-                duration_s=time.monotonic() - item_t0,
-            ))
-            ctx.alert(format_upload_failure_alert(cfg, title_no, perf.get("id"), start_s, end_s, e))
-        finally:
-            Path(path).unlink(missing_ok=True)
-
-    if queue:
-        ctx.record(TimelineEvent(
-            kind="upload_summary", count=stats["uploaded"],
-            duration_s=time.monotonic() - upload_t0,
-        ))
-
-    for title_no in touched_vod_nos:
-        if db.count_clipped_for_vod(title_no) == 0:
-            db.mark_vod(title_no, "done")
-    return stats
-
-
-def _reslice_clip(cfg: Config, title_no: str, meta, start_s: float, end_s: float) -> Path:
-    """러너가 휘발성이라 클립 파일이 사라졌을 때, DB의 start_s/end_s만으로 재생성한다."""
-    from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
-    from soopts.export.clips import cut_clip
-
-    m3u8s = resolve_m3u8_list(title_no, cfg.clip.quality)
-    m3u8, ls, le = map_to_part(start_s, end_s, meta.parts, m3u8s)
-    if m3u8 is None:
-        raise RuntimeError(f"재슬라이스 파트 매핑 실패: {title_no} {start_s}-{end_s}")
-
-    work = work_paths(cfg.work_root, title_no).ensure()
-    work.clips_dir.mkdir(parents=True, exist_ok=True)
-    raw = work.clips_dir / f"reslice_{int(start_s)}.mp4"
-    download_slice(m3u8, ls, le, raw)
-    out = clip_file_path(cfg.work_root, title_no, start_s)
-    cut_clip(cfg, str(raw), 0.0, le - ls, out)
-    raw.unlink(missing_ok=True)
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# sync
-# --------------------------------------------------------------------------- #
-def run_sync(cfg: Config) -> int:
-    from datetime import UTC, datetime
-
-    from soopts import db
-    from soopts.export.youtube import update_video_metadata
-
-    try:
-        rows = db.fetch_confirmed_pending_sync()
-    except Exception as e:  # noqa: BLE001
-        _notify_slack_failure("sync 대상 조회", e)
-        raise
-
-    n = 0
-    failures: list[str] = []
-
-    try:
-        deletion_result = _drain_deletion_queue(cfg)
-        log.info(
-            "삭제 큐 소진: %d건 성공, %d건 실패",
-            deletion_result["deleted"], deletion_result["failed"],
-        )
-        failures.extend(
-            f"{it['video_id']}(삭제): {it['error']}"
-            for it in deletion_result["items"] if not it["ok"]
-        )
-    except Exception as e:  # noqa: BLE001
-        # 메타데이터 동기화보다 우선순위가 낮은 부가 작업 — 실패해도 동기화는 계속 진행한다.
-        _notify_slack_failure("영상 삭제 큐 소진", e)
-
-    for perf in rows:
-        video_id = perf.get("youtube_video_id")
-        if not video_id:
-            continue
-        vod = perf.get("vods") or {}
-        title_no = vod.get("soop_title_no")
-        date = vod.get("broadcast_date") or ""
-        display_title = format_video_title(cfg, date, title_no, perf["start_s"], perf)
-        desc = format_video_description(cfg, date, title_no, perf["start_s"], perf) if title_no else None
-
-        try:
-            update_video_metadata(cfg, video_id, display_title, desc)
-            db.update_performance(perf["id"], synced_at=datetime.now(UTC).isoformat())
-            n += 1
-        except Exception as e:  # noqa: BLE001
-            log.error("동기화 실패 perf=%s: %s", perf.get("id"), e)
-            failures.append(f"{video_id}({display_title}): {e}")
-
-    if failures:
-        _notify_slack(
-            f"⚠️ soopts sync {len(failures)}건 실패(성공 {n}건)\n" + "\n".join(failures[:10])
-        )
-    return n
 
 
 # --------------------------------------------------------------------------- #
