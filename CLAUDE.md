@@ -99,6 +99,12 @@ Retrying `pending` bumps `retry_count` inside `select_pending` — `mark_vod` on
 `failed`, so without this a VOD that kills the runner every time would never reach `MAX_RETRIES`
 and would block the queue forever.
 
+Every row `select_pending` returns must carry the **same keys** (`_vod_row` enforces this).
+PostgREST builds the column list from the union of keys across the batch and writes an explicit
+NULL wherever a row lacks one — so mixing a retry row (rich, straight from `select *`) with a new
+row (sparse) made `retry_count` NULL on the new row and Postgres rejected the whole batch with
+`23502`. Never build the upsert dicts per-row-shape.
+
 ### Schema debt owned by the other repo
 
 `singgyul_sing_book` owns the schema, so these can only be cleaned up there — this repo just stops
