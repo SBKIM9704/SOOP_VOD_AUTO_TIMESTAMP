@@ -37,5 +37,5 @@ min_song_s = 45.0          # 구간 내 최장 음악 블록이 이보다 짧으
 
 [station]                  # 데일리 배치 대상 (soopts daily)
 bj_id = "singgyul"
-daily_vod_count = 1        # 하루 처리할 미처리 VOD 수. VOD 하나가 러너에서 3~4시간이라
-                           # 2개는 timeout-minutes(330)에 구조적으로 안 들어간다.
+daily_vod_count = 3        # 하루 처리할 미처리 VOD 수. 영상 생산 제거 후 곡당 약 48초라
+                           # VOD 하나가 8~10분, 3개면 timeout-minutes(120) 안에서 여유롭다.
