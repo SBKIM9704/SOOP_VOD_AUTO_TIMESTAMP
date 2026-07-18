@@ -154,7 +154,7 @@ identification entirely, so `lyrics_only` staying at 0 is expected for VODs with
 - `verify-env.yml` (manual): confirms SOOP's API/streams are reachable from a hosted-runner IP before
   relying on `daily.yml`. If it starts failing, only `runs-on` needs to change to a
   self-hosted runner — nothing else.
-- `daily.yml`: scheduled (04:00 KST) + `workflow_dispatch`. It pipes
+- `daily.yml`: scheduled every 6h (04/10/16/22 KST) + `workflow_dispatch`. It pipes
   `soopts ... | tee *.log` and relies
   on the exit code to detect failure — any `run:` step doing this **must** start with
   `set -o pipefail`, or a crash in `soopts` gets masked by `tee`'s always-zero exit status (this has
