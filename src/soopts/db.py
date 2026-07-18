@@ -43,46 +43,88 @@ def _now_iso() -> str:
 # --------------------------------------------------------------------------- #
 # vods
 # --------------------------------------------------------------------------- #
-def select_pending(
+def select_targets(
+    retryable: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
     existing_by_no: dict[str, dict[str, Any]],
     n: int,
 ) -> list[dict[str, Any]]:
-    """순수 함수: candidates(최신순)에서 신규 또는 재시도 가능한 건을 최대 n개 고른다.
+    """순수 함수: 우선순위 **재시도 > 신규 > 백필** 로 최대 n개를 고른다.
 
-    재시도 대상은 두 가지다.
+    - **retryable**: 재시도 대상 DB 행(failed/pending, retry_count < 상한). 호출부가 SOOP
+      목록과 무관하게 DB에서 직접 뽑아 넘긴다 — pending이 최신 목록 창 밖으로 밀려나도
+      재시도되도록. failed는 처리 중 예외로 `mark_vod`가 기록한 상태, pending은 처리를
+      시작만 하고 SIGKILL(타임아웃·취소·러너 리셋)로 끝내지 못한 상태다.
+    - **candidates**: SOOP 목록 최신순. 신규(창 상단)와 백필(그보다 과거)이 한 리스트에
+      섞여 있으며, 최신순 순회가 '신규 > 백필' 우선순위를 자동으로 만든다. 처리 완료분
+      (existing_by_no에 있고 재시도 대상이 아닌 것)은 건너뛰므로, 신규가 없으면 자연히
+      과거로 내려가며 백필한다.
 
-    - **failed**: 처리 중 예외가 나 `mark_vod`가 명시적으로 기록한 상태.
-    - **pending**: 처리를 시작만 하고 끝내지 못한 상태. `pick_unprocessed_vods`가 처리 전에
-      pending으로 올려두는데, 실행이 SIGKILL되면(타임아웃, 워크플로우 취소, 러너 리셋)
-      `mark_vod`가 실행되지 못해 그대로 남는다. 예전엔 이걸 건너뛰어서 **해당 VOD가 영원히
-      다시 잡히지 않았다** — 실제로 5.5시간 타임아웃으로 취소된 실행이 VOD 하나를 이 상태에
-      가둔 사례가 있다.
+    선택 시점에 보이는 pending은 반드시 죽은 실행이 남긴 것이다 — `concurrency: soopts-daily`
+    가 동시 실행을 막고, 한 실행 안에서 선택은 처리보다 먼저 한 번만 일어난다.
 
-    선택 시점에 보이는 pending은 반드시 죽은 실행이 남긴 것이다. daily 워크플로우가
-    `concurrency: soopts-daily`로 동시 실행을 막으므로 "지금 다른 실행이 처리 중인 행"일 수
-    없고, 같은 실행 안에서는 선택이 처리보다 먼저 한 번만 일어나기 때문이다.
-
-    pending을 재시도할 땐 retry_count를 여기서 직접 올린다. failed는 `mark_vod`가 이미
-    올려주지만 pending은 그 경로를 못 거쳤으므로, 올리지 않으면 매번 러너를 죽이는 VOD가
-    상한에 영영 닿지 못해 큐를 무한히 막는다.
+    pending 재시도 시 retry_count를 여기서 올린다. failed는 `mark_vod`가 이미 올려주지만
+    pending은 그 경로를 못 거쳤으므로, 올리지 않으면 매번 러너를 죽이는 VOD가 상한에 영영
+    닿지 못해 큐를 무한히 막는다.
     """
+    cand_by_no = {str(c["title_no"]): c for c in candidates}
     picked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    # 1. 재시도 — SOOP 창과 무관하게 DB에서 온다. 목록에 아직 있으면 메타데이터를 갱신한다.
+    for row in retryable:
+        if len(picked) >= n:
+            break
+        title_no = str(row["soop_title_no"])
+        retry_count = row.get("retry_count") or 0
+        if row.get("status") == "pending":
+            retry_count += 1
+        picked.append(_vod_row(title_no, cand_by_no.get(title_no, {}), row, retry_count))
+        seen.add(title_no)
+
+    # 2+3. 신규·백필 — 최신순 순회. DB에 이미 있는 건(완료분·위에서 처리한 재시도)은 건너뛴다.
     for c in candidates:
         if len(picked) >= n:
             break
         title_no = str(c["title_no"])
-        row = existing_by_no.get(title_no) or {}
-        status = row.get("status")
-        retry_count = row.get("retry_count") or 0
-        if row:
-            if status not in ("failed", "pending") or retry_count >= MAX_RETRIES:
-                continue
-            # failed는 mark_vod가 이미 올렸다. pending은 그 경로를 못 거쳤으니 여기서 올린다.
-            if status == "pending":
-                retry_count += 1
-        picked.append(_vod_row(title_no, c, row, retry_count))
+        if title_no in seen or title_no in existing_by_no:
+            continue
+        picked.append(_vod_row(title_no, c, {}, 0))
+        seen.add(title_no)
     return picked
+
+
+def fetch_retryable(n: int) -> list[dict[str, Any]]:
+    """재시도 가능한 vods 행(failed/pending, retry_count < 상한)을 최신 방송순 최대 n개."""
+    if n <= 0:
+        return []
+    return (
+        _client()
+        .table("vods")
+        .select("*")
+        .in_("status", ["failed", "pending"])
+        .lt("retry_count", MAX_RETRIES)
+        .order("broadcast_date", desc=True)
+        .limit(n)
+        .execute()
+        .data
+    )
+
+
+def fetch_existing(title_nos: list[str]) -> dict[str, dict[str, Any]]:
+    """주어진 title_no들의 기존 vods 행을 soop_title_no로 키잉해 반환."""
+    if not title_nos:
+        return {}
+    rows = _client().table("vods").select("*").in_("soop_title_no", title_nos).execute().data
+    return {row["soop_title_no"]: row for row in rows}
+
+
+def upsert_pending(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """선정된 대상 행을 status='pending'으로 upsert하고 그 행을 반환한다."""
+    if not targets:
+        return []
+    rows = [{**row, "status": "pending"} for row in targets]
+    return _client().table("vods").upsert(rows, on_conflict="soop_title_no").execute().data
 
 
 def _vod_row(
@@ -106,21 +148,6 @@ def _vod_row(
         "duration_s": candidate.get("duration_s") or existing.get("duration_s"),
         "retry_count": retry_count,
     }
-
-
-def pick_unprocessed_vods(candidates: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
-    """candidates 중 미처리분 최대 n개를 pending으로 upsert하고 그 vods 행을 반환한다."""
-    if not candidates or n <= 0:
-        return []
-    client = _client()
-    title_nos = [str(c["title_no"]) for c in candidates]
-    existing = client.table("vods").select("*").in_("soop_title_no", title_nos).execute().data
-    existing_by_no = {row["soop_title_no"]: row for row in existing}
-    picked = select_pending(candidates, existing_by_no, n)
-    if not picked:
-        return []
-    rows = [{**row, "status": "pending"} for row in picked]
-    return client.table("vods").upsert(rows, on_conflict="soop_title_no").execute().data
 
 
 def mark_vod(title_no: str, status: str, error: str | None = None) -> None:

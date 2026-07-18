@@ -318,13 +318,39 @@ def narrate_with_llm(deterministic_text: str, *, api_key: str | None = None) -> 
 # --------------------------------------------------------------------------- #
 # daily
 # --------------------------------------------------------------------------- #
+def _select_vods(cfg: Config, bj_id: str, count: int) -> list[dict[str, Any]]:
+    """처리할 VOD를 우선순위 재시도 > 신규 > 백필로 최대 count개 고른다.
+
+    재시도는 DB에서 바로 뽑고, 나머지는 SOOP 목록을 최신순으로 페이지를 넘겨 가며 채운다.
+    처리 완료분을 건너뛰므로 신규가 없으면 자연히 과거로 내려가 백필하고, 목록 마지막
+    페이지(SOOP 만료의 자연 바닥)에 닿으면 멈춘다. 과거가 없거나 최신만 남으면 그대로
+    수렴한다 — 별도 분기가 필요 없다.
+    """
+    from soopts import db
+    from soopts.collector.vod_list import iter_vod_pages
+
+    if count <= 0:
+        return []
+    retryable = db.fetch_retryable(count)
+    candidates: list[dict[str, Any]] = []
+    existing_by_no: dict[str, dict[str, Any]] = {}
+    targets = db.select_targets(retryable, candidates, existing_by_no, count)
+
+    if len(targets) < count:
+        for page in iter_vod_pages(cfg, bj_id):
+            candidates.extend(page)
+            existing_by_no.update(db.fetch_existing([str(c["title_no"]) for c in page]))
+            targets = db.select_targets(retryable, candidates, existing_by_no, count)
+            if len(targets) >= count:
+                break
+    return db.upsert_pending(targets)
+
+
 def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
     from soopts import db
-    from soopts.collector.vod_list import fetch_recent_vods
 
     try:
-        candidates = fetch_recent_vods(cfg, bj_id, count * 3)
-        picked = db.pick_unprocessed_vods(candidates, count)
+        picked = _select_vods(cfg, bj_id, count)
     except Exception as e:  # noqa: BLE001
         _notify_slack_failure("VOD 목록 조회", e)
         raise

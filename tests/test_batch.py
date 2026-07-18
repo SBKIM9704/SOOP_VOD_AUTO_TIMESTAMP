@@ -352,3 +352,80 @@ def test_format_summary_omits_metrics_when_nothing_processed():
     text = format_summary({"vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0})
     assert "가사확보" not in text
     assert "근거" not in text
+
+
+# --------------------------------------------------------------------------- #
+# _select_vods — 재시도 > 신규 > 백필 오케스트레이션 (페이징 포함)
+# --------------------------------------------------------------------------- #
+def _fake_db(monkeypatch, existing_rows, retryable=None):
+    """db의 I/O 함수만 스텁으로 바꾼다 — select_targets(순수 로직)는 실제 것을 쓴다.
+    _select_vods가 `from soopts import db`로 실제 모듈을 잡으므로 그 함수들을 직접 패치한다."""
+    from soopts import db
+
+    upserted = {}
+    monkeypatch.setattr(db, "fetch_retryable", lambda n: (retryable or [])[:n])
+    monkeypatch.setattr(db, "fetch_existing",
+                        lambda nos: {no: existing_rows[no] for no in nos if no in existing_rows})
+    monkeypatch.setattr(db, "upsert_pending",
+                        lambda targets: upserted.setdefault("rows", targets))
+    return upserted
+
+
+def _pages(*pages):
+    def _iter(cfg, bj_id):
+        yield from pages
+    return _iter
+
+
+def test_select_vods_backfills_across_pages(monkeypatch):
+    """1페이지가 전부 처리 완료면 2페이지(과거)로 내려가 백필한다."""
+    from soopts.collector import vod_list
+    monkeypatch.setattr(vod_list, "iter_vod_pages", _pages(
+        [{"title_no": "20"}, {"title_no": "19"}],   # 최신 페이지: 둘 다 완료
+        [{"title_no": "10"}, {"title_no": "9"}],    # 과거 페이지: 미처리
+    ))
+    up = _fake_db(monkeypatch, existing_rows={
+        "20": {"status": "done"}, "19": {"status": "analyzed"},
+    })
+    batch_module._select_vods(object(), "bj", 2)
+    assert [r["soop_title_no"] for r in up["rows"]] == ["10", "9"]
+
+
+def test_select_vods_stops_paging_once_filled(monkeypatch):
+    """목표를 채우면 더 과거 페이지를 조회하지 않는다."""
+    from soopts.collector import vod_list
+    visited = []
+
+    def _iter(cfg, bj_id):
+        for pg in ([{"title_no": "20"}], [{"title_no": "10"}]):
+            visited.append(pg[0]["title_no"])
+            yield pg
+
+    monkeypatch.setattr(vod_list, "iter_vod_pages", _iter)
+    _fake_db(monkeypatch, existing_rows={})
+    batch_module._select_vods(object(), "bj", 1)
+    assert visited == ["20"]   # 1페이지에서 채웠으므로 2페이지 미방문
+
+
+def test_select_vods_retry_skips_paging_when_full(monkeypatch):
+    """재시도만으로 count가 차면 SOOP 목록을 아예 조회하지 않는다."""
+    from soopts.collector import vod_list
+
+    def _boom(cfg, bj_id):
+        raise AssertionError("재시도로 찼는데 목록을 조회함")
+        yield
+
+    monkeypatch.setattr(vod_list, "iter_vod_pages", _boom)
+    up = _fake_db(monkeypatch, existing_rows={},
+                  retryable=[{"soop_title_no": "9", "status": "failed", "retry_count": 0}])
+    batch_module._select_vods(object(), "bj", 1)
+    assert [r["soop_title_no"] for r in up["rows"]] == ["9"]
+
+
+def test_select_vods_converges_when_no_past_left(monkeypatch):
+    """과거가 없으면(목록 소진) 채운 만큼만 반환하고 멈춘다."""
+    from soopts.collector import vod_list
+    monkeypatch.setattr(vod_list, "iter_vod_pages", _pages([{"title_no": "20"}]))
+    up = _fake_db(monkeypatch, existing_rows={"20": {"status": "done"}})
+    batch_module._select_vods(object(), "bj", 3)
+    assert up["rows"] == []
