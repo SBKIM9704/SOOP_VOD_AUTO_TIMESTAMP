@@ -98,7 +98,7 @@ soopts clips 197718401
 ## 데일리 자동 배치 (GitHub Actions)
 
 `soopts daily`는 스테이션 최신 VOD를 무인으로 처리하는 배치 커맨드로,
-[`daily.yml`](.github/workflows/daily.yml)이 매일 04:00 KST에 자동 실행한다.
+[`daily.yml`](.github/workflows/daily.yml)이 6시간마다(KST 04·10·16·22시) 자동 실행한다.
 
 ```
 GitHub Actions (public repo = 분 무제한 무료)
