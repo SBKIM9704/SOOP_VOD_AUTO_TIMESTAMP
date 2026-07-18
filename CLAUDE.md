@@ -48,9 +48,10 @@ in `soopts.toml` don't require repeating every field. `work_root` can also be ov
 ### Work directory as cache (`paths.py`)
 
 Every VOD gets `work/{vod_id}/` (`WorkPaths`): `meta.json`, `chat.jsonl`, `raw/` (chat XML cache),
-`audio_segmentation.json` (expensive STT segmentation cache), `songs.json`/`songs_{id}.txt`, `clips/`.
+`audio_segmentation.json` (expensive STT segmentation cache), `songs.json`/`songs_{id}.txt`, and
+`clips/` (downloaded region files — inputs to boundary-detection and STT, not media output).
 Steps check these files before re-fetching/re-computing; `--force` bypasses the cache. The batch
-pipeline uses the exact same layout, which is what makes clip-file resumability possible (see below).
+pipeline uses the exact same layout, but treats it as a pure cache — the truth is Supabase (see below).
 
 ### Lazy imports for heavy/optional dependencies
 
@@ -66,8 +67,9 @@ This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency
 and the read-only `songs` catalog) is owned by a separate private repo
 (`singgyul_sing_book`) — this codebase only consumes it and never creates migrations. `songs` rows are
 never created from this repo; unmatched songs always land as `needs_review` for a human to resolve in
-the separate review UI. `vods.status`/`performances.clip_status`/`performances.identify_status` are the
-actual state machine — treat them as the source of truth, not local files (see next point).
+the separate review UI. `vods.status` (per-VOD progress) and `performances.identify_status` (per-song
+review state) are the actual state machine — treat them as the source of truth, not local files
+(see next point).
 YouTube-era objects were dropped on 2026-07-18 (`performances.youtube_video_id`/`synced_at`/
 `clip_status`, the `youtube_deletion_queue` table) once both repos had stopped referencing them.
 `song_performance_counts` was recreated without its `youtube_video_id IS NOT NULL` filter — every
@@ -78,8 +80,8 @@ made sense (3 songs → 47).
 
 GitHub-hosted runners don't persist disk between workflow runs, so no pipeline stage may depend on
 files surviving between `daily` invocations. The truth is Supabase: `vods.status` for how far a VOD
-got, `performances.clip_status` plus `start_s`/`end_s` for each detected song. Local `work/` files are
-a cache that may vanish at any time. Don't reintroduce state that only lives in the runner's filesystem.
+got, and one `performances` row per detected song (`start_s`/`end_s`/`identify_status`). Local `work/`
+files are a cache that may vanish at any time. Don't reintroduce state that only lives on the runner's disk.
 
 The deliverable is the **timestamp**, not a media file. `song_link(cfg, title_no, start_s)` builds the
 SOOP deep link that viewers actually follow, computed from DB columns alone — nothing is uploaded
@@ -152,7 +154,7 @@ identification entirely, so `lyrics_only` staying at 0 is expected for VODs with
 - `verify-env.yml` (manual): confirms SOOP's API/streams are reachable from a hosted-runner IP before
   relying on `daily.yml`. If it starts failing, only `runs-on` needs to change to a
   self-hosted runner — nothing else.
-- `daily.yml`: scheduled + `workflow_dispatch` (schedule currently commented out). It pipes
+- `daily.yml`: scheduled (04:00 KST) + `workflow_dispatch`. It pipes
   `soopts ... | tee *.log` and relies
   on the exit code to detect failure — any `run:` step doing this **must** start with
   `set -o pipefail`, or a crash in `soopts` gets masked by `tee`'s always-zero exit status (this has
