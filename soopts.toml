@@ -27,12 +27,13 @@ groq_model = "whisper-large-v3-turbo"
 # language = "en"          # 노래 언어 강제 시 정확도 큼 (미지정=자동, en/ko 둘 다 시도)
 lyric_chars = 300          # 출력 가사 길이 컷
 
-[clip]                     # 노래 클립 추출 (soopts clips)
-quality = "hls-original"   # 1080p. hls-hd4k=720p, hls-hd=540p
+[clip]                     # 노래 구간 감지 (soopts clips)
+# 영상은 만들지 않는다. 받은 구간은 경계 탐지와 가사 전사의 입력으로만 쓰이고 둘 다
+# 오디오만 보므로, 오디오가 동일한 최저 rendition으로 받아 다운로드를 8배 줄인다.
+quality = "hls-hd"         # 540p. 오디오는 hls-original과 동일한 AAC
 dl_pad_before_s = 120.0    # 경계 탐지 여유 위해 후보 구간 넉넉히 받음
 dl_pad_after_s = 90.0
 min_song_s = 45.0          # 구간 내 최장 음악 블록이 이보다 짧으면 노래 아님(스킵)
-crf = 20                   # 재인코딩 화질(낮을수록 고화질)
 
 [station]                  # 데일리 배치 대상 (soopts daily)
 bj_id = "singgyul"

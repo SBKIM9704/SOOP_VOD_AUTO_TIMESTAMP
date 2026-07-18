@@ -21,7 +21,7 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-latest   # Phase 0 검증 실패 시 self-hosted로 교체 (나머지는 동일)
-    timeout-minutes: 330
+    timeout-minutes: 120   # 재인코딩 제거 후 VOD 1개 ≈ 20분 — 넉넉한 행 감지용 상한
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

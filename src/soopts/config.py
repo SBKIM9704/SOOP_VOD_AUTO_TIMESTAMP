@@ -62,12 +62,14 @@ class SttConfig:
 
 @dataclass
 class ClipConfig:
-    quality: str = "hls-original"    # yt-dlp 포맷 (1080p). hls-hd4k=720p, hls-hd=540p
+    # 영상을 만들지 않으므로 화질은 무의미하다 — 받은 구간은 경계 탐지(inaSpeechSegmenter)와
+    # 가사 전사(Whisper)의 입력으로만 쓰이고 둘 다 오디오만 본다. 세 rendition이 같은 AAC를
+    # 물고 있어(hls-hd 1000k / hls-hd4k 4000k / hls-original 8000k) 최저 화질로 받으면
+    # 결과는 같고 다운로드만 8배 줄어든다.
+    quality: str = "hls-hd"          # yt-dlp 포맷(540p). 오디오는 상위 rendition과 동일
     dl_pad_before_s: float = 120.0   # 경계 탐지 여유를 위해 후보 구간을 넉넉히 받음
     dl_pad_after_s: float = 90.0
     min_song_s: float = 45.0         # 구간 내 최장 음악 블록이 이보다 짧으면 노래 아님(스킵)
-    boundary_pad_s: float = 1.0      # 정밀 경계에서 앞뒤 살짝 여유
-    crf: int = 20                    # 재인코딩 화질(낮을수록 고화질). 클린 컷 위해 재인코딩
 
 
 @dataclass
