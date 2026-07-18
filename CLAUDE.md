@@ -68,10 +68,11 @@ and the read-only `songs` catalog) is owned by a separate private repo
 never created from this repo; unmatched songs always land as `needs_review` for a human to resolve in
 the separate review UI. `vods.status`/`performances.clip_status`/`performances.identify_status` are the
 actual state machine — treat them as the source of truth, not local files (see next point).
-The schema still carries YouTube-era columns (`performances.youtube_video_id`, the
-`youtube_deletion_queue` table). This repo no longer reads or writes them — the upload path was
-removed — but **do not drop them or clear existing values**: they are the only record of which
-already-uploaded video corresponds to which performance, and the other repo still owns the schema.
+YouTube-era objects were dropped on 2026-07-18 (`performances.youtube_video_id`/`synced_at`/
+`clip_status`, the `youtube_deletion_queue` table) once both repos had stopped referencing them.
+`song_performance_counts` was recreated without its `youtube_video_id IS NOT NULL` filter — every
+performance is now reachable via deep link, so the old "only count uploaded ones" condition no longer
+made sense (3 songs → 47).
 
 ### Volatile-runner design (`batch.py`)
 
@@ -102,6 +103,13 @@ A run killed mid-VOD (timeout, cancel, runner reset) leaves `vods.status = 'pend
 `mark_vod` never runs. `select_pending()` therefore treats **both** `failed` and `pending` as
 retryable. Any `pending` seen at selection time is necessarily stale: `concurrency: soopts-daily`
 forbids overlapping runs, and within one run selection happens once, before processing.
+Because retries are routine, **reprocessing must be idempotent**. `insert_performances` upserts on
+`(vod_id, start_s)` with `ignore_duplicates`, and `_process_vod` calls
+`clear_machine_performances()` first to drop the previous run's rows for that VOD. Rows with
+`identify_status = 'confirmed'` are spared — a human decided those and the machine cannot recreate
+them. Before this, every reprocess appended a fresh copy of each span (201142227 ended up with two
+sets of identical `start_s`/`end_s`).
+
 Retrying `pending` bumps `retry_count` inside `select_pending` — `mark_vod` only bumps it on
 `failed`, so without this a VOD that kills the runner every time would never reach `MAX_RETRIES`
 and would block the queue forever.
@@ -125,18 +133,6 @@ loses work — it just makes someone look.
 the specific blind spot from the incident: comment-timeline hints kept producing auto-matches while
 STT was dead, so the match rate looked fine. Note that when a hint exists the code skips lyric-based
 identification entirely, so `lyrics_only` staying at 0 is expected for VODs with a fan timeline.
-
-### Schema debt owned by the other repo
-
-`singgyul_sing_book` owns the schema, so these can only be cleaned up there — this repo just stops
-using them:
-- `performances.youtube_video_id`, `youtube_deletion_queue` — dead since the upload path was removed.
-  Keep the *data* (only record of past uploads); the columns can be dropped once nothing reads them.
-- `performances.clip_status` — dead. With the upload queue gone every row ended up `'clipped'`, so the
-  column carried no information; this repo no longer writes it (that also removed a per-song DB
-  round-trip). Review state lives in `identify_status`. Safe to drop **after** the admin UI stops
-  reading it — the drop order matters: code must stop writing a column before it is dropped, or
-  PostgREST fails every insert with `PGRST204` and the whole VOD is marked failed.
 
 ### GitHub Actions workflows
 
