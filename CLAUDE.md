@@ -26,13 +26,13 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
 ### Two entry points into the same lower-level modules
 
 - **Manual CLI pipeline** (`cli.py`): a human runs `collect` → `songs`/`clips` one VOD at a time,
-  reviewing/editing `clips.json` between steps.
+  reviewing/editing `clips.json` between steps. `clips.json` holds song spans + lyrics, not files.
 - **Batch pipeline** (`batch.py`, driven by `soopts daily`): the same detection/clip/
   identify building blocks (`analyzers/audio_analyzer.py`, `collector/media.py`, `export/clips.py`,
   `analyzers/stt.py`, `analyzers/identify.py`) are composed directly, with Supabase (`db.py`) standing
   in for the human review step. `batch.py` does not reuse `cli.py`'s `_produce_clips`/`_songs_slice`
   helpers (those are argparse/print-oriented for interactive review) — it re-implements the same
-  region → download → cut → transcribe flow against a `vod_row` from the DB instead of a CLI `args`
+  region → download → detect-boundary → transcribe flow against a `vod_row` from the DB instead of a CLI `args`
   namespace.
 - Shared low-level helpers that both entry points need (e.g. `collector/media.py`'s `map_to_part`,
   which maps a global time range onto the right HLS part + local offsets) live in the module layer,
@@ -84,9 +84,25 @@ The deliverable is the **timestamp**, not a media file. `song_link(cfg, title_no
 SOOP deep link that viewers actually follow, computed from DB columns alone — nothing is uploaded
 anywhere, so there is no per-song artifact to keep in sync or clean up.
 
+**No video is produced.** `detect_song_span()` returns boundary times, and STT extracts just that
+range from the downloaded region file (`_transcribe_best(..., start=, dur=)`). Re-encoding clips with
+ffmpeg used to be 76% of total runtime (6.6 min per song); removing it took a VOD from ~5.5h to ~20min.
+`cfg.clip.quality` is deliberately the *lowest* rendition (`hls-hd`, 540p): all three renditions carry
+the same AAC audio, and audio is all the segmenter and Whisper ever see, so the higher ones only cost
+download time. Don't raise it "for quality" — there is no video output to have quality.
+
 Known gap: a run killed mid-VOD (timeout, cancel) leaves `vods.status = 'pending'`, and
 `select_pending()` only retries `failed` rows — so that VOD is never picked up again. Fixing this
 needs a retry_count guard so a VOD that always times out can't loop forever.
+
+### Schema debt owned by the other repo
+
+`singgyul_sing_book` owns the schema, so these can only be cleaned up there — this repo just stops
+using them:
+- `performances.youtube_video_id`, `youtube_deletion_queue` — dead since the upload path was removed.
+  Keep the *data* (only record of past uploads); the columns can be dropped once nothing reads them.
+- `performances.clip_status` — the name now lies. There is no clip file; `'clipped'` means "song span
+  detected, awaiting review" and `'uploaded'` is never written. Renaming needs a coordinated migration.
 
 ### GitHub Actions workflows
 
