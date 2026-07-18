@@ -68,7 +68,7 @@ def cmd_clips(args) -> int:
 def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int:
     from soopts.analyzers.audio_analyzer import sticker_burst_regions
     from soopts.collector.media import download_slice, resolve_m3u8_list
-    from soopts.export.clips import make_clip, write_clips
+    from soopts.export.clips import detect_song_span, write_clips
     from soopts.models import read_chat_jsonl
     from soopts.output import fmt_hms
 
@@ -90,6 +90,7 @@ def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int
     parts = meta.parts if meta else []
     work.clips_dir.mkdir(parents=True, exist_ok=True)
     clips = []
+    sources: list[tuple[str, float, float]] = []   # 전사용 (구간파일, 로컬시작, 로컬끝)
     for s, e in regions:
         ds = max(0.0, s - cfg.clip.dl_pad_before_s)
         de = e + cfg.clip.dl_pad_after_s
@@ -99,27 +100,29 @@ def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int
         raw = work.clips_dir / f"region_{int(ds)}.mp4"
         if not raw.exists() or args.force:
             download_slice(m3u8, ls, le, raw)
-        clip = make_clip(cfg, vod_id, str(raw), ds, de, work.clips_dir, media_offset=ds)
-        if clip:
+        span = detect_song_span(cfg, str(raw), ds, de, media_offset=ds)
+        if span:
+            clip, local_start, local_end = span
             clips.append(clip)
+            sources.append((str(raw), local_start, local_end))
 
     if not clips:
-        print("추출된 노래 클립이 없습니다.")
+        print("감지된 노래 구간이 없습니다.")
         return 0
 
-    # 정밀 컷된 클립(노래만)이라 전사가 깨끗함 → 가사 채워 곡 식별/설명에 사용
+    # 노래 경계만 잘라 전사 → 가사를 채워 곡 식별에 사용
     if not args.no_stt:
         from soopts.analyzers.stt import _load_model, _transcribe_best
         model = _load_model(cfg)
-        for c in clips:
-            text, _lang = _transcribe_best(model, c.path, cfg)
+        for c, (src, ls_, le_) in zip(clips, sources, strict=True):
+            text, _lang = _transcribe_best(model, src, cfg, start=ls_, dur=le_ - ls_)
             c.lyrics = text[: cfg.stt.lyric_chars]
 
     # 검수 파일 저장 + 곡명 확인 안내
     write_clips(work.clips_dir, clips)
-    print(f"\n🎬 노래 클립 {len(clips)}개 추출 — 곡명 확인 단계:")
+    print(f"\n🎵 노래 구간 {len(clips)}개 감지 — 곡명 확인 단계:")
     for c in clips:
-        print(f"\n  [{fmt_hms(c.t)}~{fmt_hms(c.end)}] {c.duration}초  {Path(c.path).name}")
+        print(f"\n  [{fmt_hms(c.t)}~{fmt_hms(c.end)}] {c.duration}초")
         print(f"    가사: {c.lyrics[:70] or '(전사 없음)'}")
     print(f"\n다음: {work.clips_dir / 'clips.json'} 의 각 \"title\" 에 곡명을 채우세요.")
     return 0

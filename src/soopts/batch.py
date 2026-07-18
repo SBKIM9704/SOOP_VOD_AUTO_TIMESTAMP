@@ -210,7 +210,7 @@ def format_detailed_summary(cfg: Config, ctx: RunContext, stats: dict[str, Any])
             elif ev.kind == "region":
                 mark = "성공" if ev.ok else ("건너뜀" if ev.ok is None else "실패")
                 extra = (
-                    f" [클립 {fmt_duration_s(ev.clip_duration_s)} / "
+                    f" [경계 {fmt_duration_s(ev.clip_duration_s)} / "
                     f"STT {fmt_duration_s(ev.stt_duration_s or 0)}]"
                     if ev.clip_duration_s is not None
                     else ""
@@ -396,7 +396,7 @@ def _process_vod(
     from soopts.collector.chat import fetch_chat
     from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
     from soopts.collector.meta import fetch_meta
-    from soopts.export.clips import make_clip
+    from soopts.export.clips import detect_song_span
     from soopts.models import Song, read_chat_jsonl
     from soopts.output import fmt_hms
 
@@ -437,17 +437,21 @@ def _process_vod(
             raw = work.clips_dir / f"region_{int(ds)}.mp4"
             if not raw.exists():
                 download_slice(m3u8, ls, le, raw)
-            step = "클립 컷"
-            clip = make_clip(cfg, title_no, str(raw), ds, de, work.clips_dir, media_offset=ds)
-            if clip is None:
+            step = "경계 탐지"
+            span = detect_song_span(cfg, str(raw), ds, de, media_offset=ds)
+            if span is None:
                 continue
+            clip, local_start, local_end = span
             clip_dur = time.monotonic() - region_t0
 
             step = "STT 전사"
             stt_t0 = time.monotonic()
             if stt_model is None:
                 stt_model = _load_model(cfg)
-            text, _lang = _transcribe_best(stt_model, clip.path, cfg)
+            # 노래 구간만 잘라 전사한다 — raw는 앞뒤 패딩이 붙은 후보 구간 전체다.
+            text, _lang = _transcribe_best(
+                stt_model, str(raw), cfg, start=local_start, dur=local_end - local_start
+            )
             stt_dur = time.monotonic() - stt_t0
             lyrics = text[: cfg.stt.lyric_chars]
             rate = sticker_rate((clip.t, clip.end), stickers)

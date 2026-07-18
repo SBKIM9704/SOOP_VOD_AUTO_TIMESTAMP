@@ -49,7 +49,8 @@ def looks_like_song(text: str) -> bool:
 _GROQ_MAX_BYTES = 25 * 1024 * 1024  # Groq 오디오 업로드 한도
 
 # 16kHz 모노 WAV는 초당 32KB라 이 상한이면 20MB 미만 — 위 한도 안쪽이다.
-# 클립은 min_song_s~310초 범위라 실제로 잘릴 일은 없고, 비정상적으로 긴 입력만 막는다.
+# 노래는 min_song_s~310초 범위라 실제로 잘릴 일은 없고, 비정상적으로 긴 입력만 막는다.
+# 범위 지정 없이 호출됐을 때의 기본값이기도 하다(= 파일 전체로 간주).
 _SLICE_MAX_SECONDS = 600.0
 
 
@@ -72,7 +73,9 @@ def _extract_wav(audio_path: str, start: float, dur: float, out: Path) -> bool:
     return True
 
 
-def _ensure_uploadable(path: str, tmpdir: Path) -> str | None:
+def _ensure_uploadable(
+    path: str, tmpdir: Path, start: float, dur: float
+) -> str | None:
     """Groq에 올릴 수 있는 오디오 파일 경로를 보장한다(없으면 None).
 
     호출부가 1080p mp4 클립 경로를 그대로 넘기는 일이 실제로 있었다(batch.py의 슬라이스
@@ -84,18 +87,25 @@ def _ensure_uploadable(path: str, tmpdir: Path) -> str | None:
     여기서 다시 변환할 이유가 없다.
     """
     p = Path(path)
-    if p.suffix.lower() == ".wav" and p.exists() and p.stat().st_size <= _GROQ_MAX_BYTES:
+    whole_file = start == 0.0 and dur >= _SLICE_MAX_SECONDS
+    if whole_file and p.suffix.lower() == ".wav" and p.exists() and p.stat().st_size <= _GROQ_MAX_BYTES:
         return path
     out = tmpdir / "stt.wav"
-    return str(out) if _extract_wav(path, 0.0, _SLICE_MAX_SECONDS, out) else None
+    return str(out) if _extract_wav(path, start, dur, out) else None
 
 
-def _transcribe_best(client, path: str, cfg: Config) -> tuple[str, str]:
-    """Groq Whisper API로 후보 언어별 전사해 평균 logprob 높은 결과를 (가사, 언어)로 반환."""
+def _transcribe_best(
+    client, path: str, cfg: Config, *, start: float = 0.0, dur: float = _SLICE_MAX_SECONDS
+) -> tuple[str, str]:
+    """Groq Whisper API로 후보 언어별 전사해 평균 logprob 높은 결과를 (가사, 언어)로 반환.
+
+    start/dur를 주면 path에서 그 구간만 잘라 전사한다 — 배치는 후보 구간 전체를
+    받아두고 그 안의 노래 경계만 전사하므로, 파일을 따로 만들지 않고 여기서 잘라낸다.
+    """
     scfg = cfg.stt
     langs = [scfg.language] if scfg.language else ["en", "ko"]
     with tempfile.TemporaryDirectory() as td:
-        path = _ensure_uploadable(path, Path(td))
+        path = _ensure_uploadable(path, Path(td), start, dur)
         if path is None:
             return "", ""
         return _transcribe_langs(client, path, scfg, langs)
