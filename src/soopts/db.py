@@ -48,9 +48,24 @@ def select_pending(
     existing_by_no: dict[str, dict[str, Any]],
     n: int,
 ) -> list[dict[str, Any]]:
-    """순수 함수: candidates(최신순)에서 신규 또는 재시도 가능한 failed를 최대 n개 고른다.
+    """순수 함수: candidates(최신순)에서 신규 또는 재시도 가능한 건을 최대 n개 고른다.
 
-    이미 vods에 있고 failed가 아니거나 retry_count가 상한에 닿은 건은 건너뛴다.
+    재시도 대상은 두 가지다.
+
+    - **failed**: 처리 중 예외가 나 `mark_vod`가 명시적으로 기록한 상태.
+    - **pending**: 처리를 시작만 하고 끝내지 못한 상태. `pick_unprocessed_vods`가 처리 전에
+      pending으로 올려두는데, 실행이 SIGKILL되면(타임아웃, 워크플로우 취소, 러너 리셋)
+      `mark_vod`가 실행되지 못해 그대로 남는다. 예전엔 이걸 건너뛰어서 **해당 VOD가 영원히
+      다시 잡히지 않았다** — 실제로 5.5시간 타임아웃으로 취소된 실행이 VOD 하나를 이 상태에
+      가둔 사례가 있다.
+
+    선택 시점에 보이는 pending은 반드시 죽은 실행이 남긴 것이다. daily 워크플로우가
+    `concurrency: soopts-daily`로 동시 실행을 막으므로 "지금 다른 실행이 처리 중인 행"일 수
+    없고, 같은 실행 안에서는 선택이 처리보다 먼저 한 번만 일어나기 때문이다.
+
+    pending을 재시도할 땐 retry_count를 여기서 직접 올린다. failed는 `mark_vod`가 이미
+    올려주지만 pending은 그 경로를 못 거쳤으므로, 올리지 않으면 매번 러너를 죽이는 VOD가
+    상한에 영영 닿지 못해 큐를 무한히 막는다.
     """
     picked: list[dict[str, Any]] = []
     for c in candidates:
@@ -59,10 +74,14 @@ def select_pending(
         title_no = str(c["title_no"])
         row = existing_by_no.get(title_no)
         if row is not None:
-            if row.get("status") == "failed" and row.get("retry_count", 0) < MAX_RETRIES:
+            status = row.get("status")
+            retry_count = row.get("retry_count") or 0
+            if status in ("failed", "pending") and retry_count < MAX_RETRIES:
                 # id는 GENERATED ALWAYS AS IDENTITY라 upsert 페이로드에 넣으면
                 # PostgREST가 거부한다(실제로 재시도 케이스에서 발생 확인) — 제외.
                 retry_row = {k: v for k, v in row.items() if k != "id"}
+                if status == "pending":
+                    retry_row["retry_count"] = retry_count + 1
                 picked.append({**retry_row, "soop_title_no": title_no})
             continue
         picked.append({
