@@ -62,26 +62,14 @@ class SttConfig:
 
 @dataclass
 class ClipConfig:
-    quality: str = "hls-original"    # yt-dlp 포맷 (1080p). hls-hd4k=720p, hls-hd=540p
+    # 영상을 만들지 않으므로 화질은 무의미하다 — 받은 구간은 경계 탐지(inaSpeechSegmenter)와
+    # 가사 전사(Whisper)의 입력으로만 쓰이고 둘 다 오디오만 본다. 세 rendition이 같은 AAC를
+    # 물고 있어(hls-hd 1000k / hls-hd4k 4000k / hls-original 8000k) 최저 화질로 받으면
+    # 결과는 같고 다운로드만 8배 줄어든다.
+    quality: str = "hls-hd"          # yt-dlp 포맷(540p). 오디오는 상위 rendition과 동일
     dl_pad_before_s: float = 120.0   # 경계 탐지 여유를 위해 후보 구간을 넉넉히 받음
     dl_pad_after_s: float = 90.0
     min_song_s: float = 45.0         # 구간 내 최장 음악 블록이 이보다 짧으면 노래 아님(스킵)
-    boundary_pad_s: float = 1.0      # 정밀 경계에서 앞뒤 살짝 여유
-    crf: int = 20                    # 재인코딩 화질(낮을수록 고화질). 클린 컷 위해 재인코딩
-
-
-@dataclass
-class YouTubeConfig:
-    client_secret: str = "client_secret.json"  # Google Cloud OAuth 클라이언트(사용자 준비)
-    token_file: str = "~/.config/soopts/yt_token.json"  # 최초 동의 후 저장되는 토큰
-    privacy: str = "unlisted"        # unlisted=링크로 시청 가능
-    category_id: str = "10"          # 10 = Music
-    title_template: str = "{title} - {artist} | {bj} ({date})"
-    display_name: str = "띵귤"        # 제목/설명에 쓰는 스트리머 표기 — meta.bj_nick은 API마다
-                                      # "띵귤_"처럼 값이 흔들릴 수 있어 고정 문자열로 씀
-    made_for_kids: bool = False
-    daily_upload_limit: int = 5      # 쿼터: 업로드 1600유닛/건, 일일 10000유닛 → 여유는 sync용
-    daily_deletion_limit: int = 50   # 1회 실행당(daily/sync 둘 다) 삭제 큐 처리 상한
 
 
 @dataclass
@@ -105,7 +93,6 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     stt: SttConfig = field(default_factory=SttConfig)
     clip: ClipConfig = field(default_factory=ClipConfig)
-    youtube: YouTubeConfig = field(default_factory=YouTubeConfig)
     station: StationConfig = field(default_factory=StationConfig)
     comment: CommentConfig = field(default_factory=CommentConfig)
     work_root: Path = Path("work")
@@ -131,7 +118,6 @@ def load_config(path: Path | None = None, work_root: Path | None = None) -> Conf
         audio=_build_section(AudioConfig, data.get("audio", {})),
         stt=_build_section(SttConfig, data.get("stt", {})),
         clip=_build_section(ClipConfig, data.get("clip", {})),
-        youtube=_build_section(YouTubeConfig, data.get("youtube", {})),
         station=_build_section(StationConfig, data.get("station", {})),
         comment=_build_section(CommentConfig, data.get("comment", {})),
     )

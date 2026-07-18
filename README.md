@@ -1,14 +1,14 @@
 # soopts
 
 [![daily](https://github.com/SBKIM9704/SOOP_VOD_AUTO_TIMESTAMP/actions/workflows/daily.yml/badge.svg)](https://github.com/SBKIM9704/SOOP_VOD_AUTO_TIMESTAMP/actions/workflows/daily.yml)
-[![sync](https://github.com/SBKIM9704/SOOP_VOD_AUTO_TIMESTAMP/actions/workflows/sync.yml/badge.svg)](https://github.com/SBKIM9704/SOOP_VOD_AUTO_TIMESTAMP/actions/workflows/sync.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **SOOP(아프리카TV) VOD 다시보기에서 BJ가 부른 노래 구간을 자동으로 찾고, 가사 전사로 어떤 곡인지까지 식별하는 CLI.**
 
-채팅 스티커 반응과 오디오 음악 감지를 겹쳐서 BGM과 실제 노래를 구분하고, 정밀 경계로 클립까지 잘라
-유튜브에 올린다. 매일 새 VOD를 무인으로 처리하는 GitHub Actions 배치도 포함한다.
+채팅 스티커 반응과 오디오 음악 감지를 겹쳐서 BGM과 실제 노래를 구분하고, 정밀 경계를 찾아
+가사를 전사한다. 산출물은 **타임스탬프**이며, 시청은 SOOP 원본 다시보기 딥링크로 연결한다 —
+영상을 만들지도, 어디에 올리지도 않는다. 매일 새 VOD를 무인으로 처리하는 GitHub Actions 배치도 포함한다.
 
 ```
 [ 01:44:29 ] 🎤 곡명 미상
@@ -25,7 +25,7 @@
 - [작동 원리](#작동-원리)
 - [설치](#설치)
 - [사용법](#사용법)
-- [노래 클립 추출 & 유튜브 업로드](#노래-클립-추출--유튜브-업로드-)
+- [노래 구간 감지](#노래-구간-감지-)
 - [노래 감지 원리](#노래-감지-원리)
 - [데일리 자동 배치 (GitHub Actions)](#데일리-자동-배치-github-actions)
 - [캐시 / 재실행](#캐시--재실행)
@@ -51,8 +51,7 @@ uv venv && uv pip install -e ".[audio,stt,dev]"
 |---|---|
 | `audio` | inaSpeechSegmenter (노래 구간 감지) |
 | `stt` | Groq Whisper API (가사 전사, `GROQ_API_KEY` 필요) |
-| `youtube` | 유튜브 unlisted 업로드 |
-| `batch` | supabase/rapidfuzz/groq (`soopts daily`/`sync` 배치 전용) |
+| `batch` | supabase/rapidfuzz/groq (`soopts daily` 배치 전용) |
 | `dev` | pytest/ruff |
 
 시스템 의존성: `ffmpeg`, `yt-dlp` (오디오 추출·다운로드).
@@ -69,35 +68,22 @@ soopts fetch 197718401                 # work/197718401/audio.mp3
 # 3) 노래 감지 + 전사 + 타임라인
 soopts songs 197718401 --audio work/197718401/audio.mp3
 
-# 4) BJ 부른 노래만 1080p 클립 추출(정밀 경계) → 유튜브 unlisted 자동 업로드
-soopts clips 197718401            # 클립 추출만 (검수용)
-soopts clips 197718401 --upload   # 추출 + 유튜브 unlisted 업로드
+# 4) BJ 부른 노래만 1080p 클립 추출(정밀 경계) + 가사 전사
+soopts clips 197718401
 ```
 
-## 노래 클립 추출 & 유튜브 업로드 (🎬)
+## 노래 구간 감지 (🎵)
 
-`clips`는 **BJ가 부른 노래만** 1080p 클립으로 만들고, 선택적으로 유튜브에 unlisted 업로드한다:
+`clips`는 **BJ가 부른 노래만** 골라 시작·끝 시각을 찾고 가사를 전사한다:
 1. 스티커로 노래 위치 특정(채팅만, 전체 다운로드 없음)
-2. 후보 구간만 1080p 슬라이스 다운로드
-3. inaSpeechSegmenter로 **음악 경계 정밀 탐지**(구간 내 최장 음악 블록=노래) → 클린 컷 (실측 1~5초 오차)
-4. Groq Whisper API로 클립 가사 전사(설명란/식별용)
-5. `--upload` 시 유튜브 unlisted 업로드
+2. 후보 구간만 540p 슬라이스 다운로드 (오디오만 쓰므로 최저 화질로 충분 — 1080p 대비 8배 절감)
+3. inaSpeechSegmenter로 **음악 경계 정밀 탐지**(구간 내 최장 음악 블록=노래, 실측 1~5초 오차)
+4. Groq Whisper API로 그 경계 구간만 가사 전사(곡 식별용)
 
-> ⚠️ **저작권**: unlisted여도 유튜브 Content ID가 원곡을 감지해 클레임/차단할 수 있음.
-> 무엇을 올릴지는 사용자 판단·책임. `--upload` 없이 먼저 검수 권장.
-> talk 위주 방송은 스티커 구간이 길어 1080p 다운로드가 커질 수 있음(노래 위주 VOD 권장).
+**영상 파일을 만들지 않는다.** 다운로드한 구간은 경계 탐지와 전사의 입력일 뿐이고, 결과 공유는
+`?change_second=` 딥링크로 원본 다시보기의 해당 시각을 가리킨다.
 
-### 유튜브 업로드 최초 1회 설정 (OAuth)
-
-```
-설치:  uv pip install -e ".[youtube]"
-1) https://console.cloud.google.com → 새 프로젝트
-2) "YouTube Data API v3" 사용 설정(Enable)
-3) OAuth 동의 화면(External, 프로덕션 게시 권장 — 테스트 모드는 refresh token 7일 만료)
-4) 사용자 인증 정보 → OAuth 클라이언트 ID → "데스크톱 앱" → client_secret.json 다운로드
-5) soopts.toml [youtube] client_secret 에 그 파일 경로 지정
-```
-`--upload` 최초 실행 시 브라우저 동의 → 토큰 저장 → 이후 자동 업로드.
+> talk 위주 방송은 스티커 구간이 길어 다운로드가 커질 수 있음(노래 위주 VOD 권장).
 
 ## 노래 감지 원리
 
@@ -110,27 +96,25 @@ soopts clips 197718401 --upload   # 추출 + 유튜브 unlisted 업로드
 
 ## 데일리 자동 배치 (GitHub Actions)
 
-`soopts daily`/`soopts sync`는 스테이션 최신 VOD를 무인으로 처리하는 배치 커맨드다.
-[`daily.yml`](.github/workflows/daily.yml)(04:00 KST)·[`sync.yml`](.github/workflows/sync.yml)(05:00 KST)이 매일 자동 실행한다.
+`soopts daily`는 스테이션 최신 VOD를 무인으로 처리하는 배치 커맨드로,
+[`daily.yml`](.github/workflows/daily.yml)이 실행한다(현 시점 스케줄은 비활성, 수동 실행만).
 
 ```
 GitHub Actions (public repo = 분 무제한 무료)
   daily : VOD 목록 → 미처리 N개 → 감지/전사/식별 → DB 기록
-          → 1080p 정밀 클립 컷 → 업로드(일 daily_upload_limit 상한 큐)
-          → 삭제 큐 소진(daily_deletion_limit 상한)
-  sync  : 검수 확정 건 유튜브 제목/설명 갱신 → 삭제 큐 소진
+          → 노래 경계 정밀 탐지 (영상 산출물 없음)
         │
         ▼
      Supabase  ◄──── 프론트/검수 UI(별도 레포)가 상태 변경
 ```
 
 - 진실의 원천은 항상 Supabase(`vods`/`performances`)다. 러너는 휘발성이라 클립 파일이
-  실행 사이 사라질 수 있지만, 업로드 큐는 `clip_status='clipped'` + `start_s`/`end_s`만으로
-  같은 경로를 재구성해 소진한다(`src/soopts/batch.py`의 `clip_file_path`/`_reslice_clip`).
+  실행 사이 사라질 수 있지만, 어디까지 처리됐는지는 DB만 보면 알 수 있다.
 - 신곡을 `songs` 테이블에 자동 생성하지 않는다 — 미식별 곡은 항상 `needs_review`로 검수 대기.
-- 업로드 privacy는 항상 unlisted로 고정, 코드가 public 전환을 하지 않는다(사람 결정).
-- 검수 UI에서 구간을 수정하거나 performance를 삭제하면 `youtube_deletion_queue`에 요청이
-  쌓이고, daily/sync가 그때그때 소진해 이미 올라간 영상을 삭제한다.
+- 영상을 어디에도 업로드하지 않는다. 시청 경로는 `song_link()`가 만드는 SOOP 딥링크
+  (`?change_second=<노래 시작초>`)이며 DB 컬럼만으로 계산된다.
+- DB에는 유튜브 시절 컬럼(`performances.youtube_video_id`, `youtube_deletion_queue`)이 남아
+  있으나 이 저장소는 더 이상 읽거나 쓰지 않는다. 과거 업로드분의 유일한 기록이므로 지우지 말 것.
 
 ### 필요 GitHub Secrets
 
@@ -139,29 +123,20 @@ GitHub Actions (public repo = 분 무제한 무료)
 | `SUPABASE_URL` | Supabase 프로젝트 URL (경로 없이, 예: `https://xxxx.supabase.co`) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase 접속(RLS 우회) |
 | `GROQ_API_KEY` | 가사 전사(Whisper API) + 가사→곡명 추측 + 댓글 타임라인 추출(daily 전용, Groq 무료 티어 — 카드 불요) |
-| `YT_CLIENT_SECRET` | Google OAuth 클라이언트(client_secret.json 원문) |
-| `YT_TOKEN` | 최초 로컬 OAuth 동의로 생성된 yt_token.json 원문 |
 | `SLACK_WEBHOOK_URL` | (선택) daily 요약 알림 |
-
-최초 설정: 로컬에서 `soopts clips <vod> --upload` 또는 `soopts upload <파일>` 1회 실행 →
-브라우저 동의 → 생성된 `~/.config/soopts/yt_token.json` 내용을 `YT_TOKEN`에 등록.
 
 ### self-hosted runner 폴백
 
 GitHub 호스티드 러너(미국 Azure IP)에서 SOOP API/스트림이 막히면([`verify-env.yml`](.github/workflows/verify-env.yml)로 확인),
-`daily.yml`/`sync.yml`의 `runs-on: ubuntu-latest`만 self-hosted로 바꾸면 된다 — 나머지
+`daily.yml`의 `runs-on: ubuntu-latest`만 self-hosted로 바꾸면 된다 — 나머지
 워크플로우·코드는 동일. self-hosted 후보: 사용자 PC 또는 상시 구동 서버.
 
 ### 수동 실행 / 옵션
 
 ```bash
-soopts daily --count 1 --no-upload   # 감지·식별·클립까지만, 업로드 생략
+soopts daily --count 1               # 처리할 VOD 수 지정
 soopts daily --bj other_bj_id        # 다른 스테이션 대상
-soopts sync                          # 검수 확정 건 유튜브 메타데이터 갱신
 ```
-
-기존에 수동으로 올려둔 클립을 소급 등록하려면 [`scripts/backfill_existing_clips.py`](scripts/backfill_existing_clips.py)
-(1회성, 채널의 기존 업로드를 조회해 `needs_review`로 등록)를 실행한다.
 
 ## 캐시 / 재실행
 

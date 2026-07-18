@@ -137,23 +137,42 @@ def test_extract_wav_returns_true_on_success(tmp_path, monkeypatch):
     assert stt._extract_wav("in.mp4", 0.0, 10.0, out) is True
 
 
-def test_transcribe_slices_sends_extracted_wav_not_the_mp4(monkeypatch):
-    """슬라이스 mp4를 그대로 올리면 Groq가 413으로 거절한다 — WAV 경로가 가야 한다."""
+def test_transcribe_best_extracts_audio_from_video_clip(tmp_path, monkeypatch):
+    """1080p mp4를 그대로 올리면 Groq가 413으로 거절한다 — 추출된 WAV가 가야 한다."""
+    mp4 = tmp_path / "song_001883.mp4"
+    mp4.write_bytes(b"x" * (200 * 1024 * 1024))  # 실제 클립 크기대(수백 MB)
     sent: list[str] = []
-    monkeypatch.setattr(stt, "_load_model", lambda cfg: object())
-    monkeypatch.setattr(stt, "_extract_wav", lambda src, s, d, out: True)
-    monkeypatch.setattr(stt, "_transcribe_best",
-                        lambda model, path, cfg: (sent.append(path), ("가사", "ko"))[1])
-    song = _song()
-    stt.transcribe_slices(Config(), [(song, "work/1/clips/region_600.mp4")], drop_talk=False)
-    assert len(sent) == 1
-    assert sent[0].endswith("seg.wav")
+
+    def _fake_extract(src, start, dur, out):
+        sent.append(src)
+        out.write_bytes(b"wav-data")
+        return True
+
+    monkeypatch.setattr(stt, "_extract_wav", _fake_extract)
+    client = _FakeClient({"en": _segs("lyrics", -0.2), "ko": []})
+    monkeypatch.setattr(stt, "_transcribe_langs",
+                        lambda c, path, scfg, langs: (sent.append(path), ("가사", "ko"))[1])
+    text, lang = _transcribe_best(client, str(mp4), Config())
+    assert sent[0] == str(mp4)          # 추출 입력은 mp4
+    assert sent[1].endswith("stt.wav")  # Groq로 가는 건 WAV
+    assert text == "가사"
 
 
-def test_transcribe_slices_skips_song_when_extraction_fails(monkeypatch):
-    monkeypatch.setattr(stt, "_load_model", lambda cfg: object())
-    monkeypatch.setattr(stt, "_extract_wav", lambda src, s, d, out: False)
-    monkeypatch.setattr(stt, "_transcribe_best",
-                        lambda *a, **k: pytest.fail("추출 실패 시 전사를 시도하면 안 된다"))
-    song = _song()
-    assert stt.transcribe_slices(Config(), [(song, "x.mp4")], drop_talk=False) == []
+def test_transcribe_best_passes_through_small_wav(tmp_path, monkeypatch):
+    """transcribe_songs는 이미 구간 WAV를 넘기므로 재변환하지 않는다."""
+    wav = tmp_path / "seg.wav"
+    wav.write_bytes(b"fake-audio")
+    monkeypatch.setattr(stt, "_extract_wav",
+                        lambda *a, **k: pytest.fail("한도 안쪽 WAV는 재변환하면 안 된다"))
+    client = _FakeClient({"en": _segs("hello", -0.5), "ko": []})
+    text, _ = _transcribe_best(client, str(wav), Config())
+    assert text == "hello"
+
+
+def test_transcribe_best_returns_empty_when_extraction_fails(tmp_path, monkeypatch):
+    mp4 = tmp_path / "clip.mp4"
+    mp4.write_bytes(b"broken")
+    monkeypatch.setattr(stt, "_extract_wav", lambda *a, **k: False)
+    monkeypatch.setattr(stt, "_transcribe_langs",
+                        lambda *a, **k: pytest.fail("추출 실패 시 업로드하면 안 된다"))
+    assert _transcribe_best(_FakeClient({}), str(mp4), Config()) == ("", "")

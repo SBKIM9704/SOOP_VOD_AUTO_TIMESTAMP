@@ -1,4 +1,4 @@
-"""Supabase 연동 — soopts daily/sync 배치가 vods/performances 상태를 읽고 쓴다.
+"""Supabase 연동 — soopts daily 배치가 vods/performances 상태를 읽고 쓴다.
 
 스키마의 주인은 singgyul_sing_book 레포(supabase/migrations/)다. 이 모듈은 스키마를
 소비만 하고 여기서 만들지 않는다. songs 테이블은 읽기 전용으로만 다룬다 — 신곡 행을
@@ -89,21 +89,6 @@ def pick_unprocessed_vods(candidates: list[dict[str, Any]], n: int) -> list[dict
     return client.table("vods").upsert(rows, on_conflict="soop_title_no").execute().data
 
 
-def upsert_backfill_vod(soop_title_no: str, title: str, duration_s: int) -> dict[str, Any] | None:
-    """기존 유튜브 업로드용 더미 vods 행(scripts/backfill_existing_clips.py 전용)."""
-    rows = (
-        _client()
-        .table("vods")
-        .upsert(
-            {"soop_title_no": soop_title_no, "title": title, "status": "done", "duration_s": duration_s},
-            on_conflict="soop_title_no",
-        )
-        .execute()
-        .data
-    )
-    return rows[0] if rows else None
-
-
 def mark_vod(title_no: str, status: str, error: str | None = None) -> None:
     """vods.status 갱신. failed면 retry_count를 1 증가시킨다."""
     fields: dict[str, Any] = {"status": status, "error": error}
@@ -135,6 +120,12 @@ def insert_performances(
 
     identify_results를 생략하면 song_id=NULL, identify_status='needs_review'로 남는다.
     songs 테이블에 신곡 행을 만들지 않는다 — song_id는 기존 카탈로그 매칭 결과만 연결한다.
+
+    clip_status는 쓰지 않는다. 업로드 큐가 사라진 뒤로 이 컬럼은 전 행이 'clipped'인
+    상수가 되어 아무 정보도 담지 않는다(예전엔 'none'으로 넣고 곧바로 'clipped'로
+    UPDATE 했다). 컬럼 자체는 관리자 UI가 참조할 수 있어 DB에 남아 있지만, 여기서
+    쓰지 않으므로 나중에 DROP 해도 이 코드는 영향을 받지 않는다.
+    상태는 identify_status가 담는다 — 검수 흐름에서 실제로 쓰이는 건 그쪽이다.
     """
     if not songs:
         return []
@@ -151,112 +142,10 @@ def insert_performances(
             "match_confidence": r.match_confidence if r else None,
             "song_id": r.song_id if r else None,
             "identify_status": r.identify_status if r else "needs_review",
-            "clip_status": "none",
         }
         for s, r in zip(songs, results, strict=True)
     ]
     return _client().table("performances").insert(rows).execute().data
-
-
-def update_performance(perf_id: str, **fields: Any) -> None:
-    _client().table("performances").update(fields).eq("id", perf_id).execute()
-
-
-def fetch_upload_queue(limit: int) -> list[dict[str, Any]]:
-    """clip_status='clipped'이면서 노래로 확정(auto_matched/confirmed)된 건을 오래된 순으로
-    최대 limit개, songs(title,artist)/vods.soop_title_no를 join해 반환.
-
-    identify_status가 needs_review/rejected인 건(노래 아님/미확정)은 clip_status만으로
-    거르면 큐에 섞여 업로드돼버린다 — 실제로 발생해 잘못 업로드된 적이 있어 명시적으로 제외한다.
-    song_id IS NOT NULL도 명시적으로 건다 — auto_matched/confirmed면 song_id가 항상 있어야
-    맞지만, DB에 그걸 강제하는 제약조건이 없어 혹시라도 어긋나는 행이 있으면(둘 중 하나가
-    버그로 어긋난 경우) 업로드해버리기 전에 걸러내는 안전장치다. songs(title,artist)는
-    유튜브 제목/설명에 원곡 아티스트를 넣기 위해 join한다.
-
-    러너가 휘발성이라 로컬 clip 파일이 사라질 수 있다 — 재슬라이스에 필요한 start_s/end_s/
-    soop_title_no가 반환값에 이미 있으므로 파일 없이도 재생성 가능해야 한다.
-    """
-    return (
-        _client()
-        .table("performances")
-        .select("*, songs(title, artist), vods(soop_title_no)")
-        .eq("clip_status", "clipped")
-        .in_("identify_status", ["auto_matched", "confirmed"])
-        .not_.is_("song_id", "null")
-        .order("created_at")
-        .limit(limit)
-        .execute()
-        .data
-    )
-
-
-def fetch_confirmed_pending_sync() -> list[dict[str, Any]]:
-    """검수 확정(confirmed)됐지만 아직 유튜브에 반영 안 된(synced_at NULL) 건."""
-    return (
-        _client()
-        .table("performances")
-        .select("*, songs(title, original_title, artist), vods(soop_title_no, broadcast_date)")
-        .eq("identify_status", "confirmed")
-        .is_("synced_at", "null")
-        .execute()
-        .data
-    )
-
-
-def count_upload_queue() -> int:
-    """업로드 대상(clip_status='clipped' + identify_status auto_matched/confirmed +
-    song_id not null)으로 아직 업로드되지 않고 남은 전체 건수(요약 출력용).
-    fetch_upload_queue와 동일 조건이어야 "큐 잔여"가 실제로 다음 실행에서 드레인될
-    건수와 일치한다."""
-    resp = (
-        _client()
-        .table("performances")
-        .select("id", count="exact")
-        .eq("clip_status", "clipped")
-        .in_("identify_status", ["auto_matched", "confirmed"])
-        .not_.is_("song_id", "null")
-        .execute()
-    )
-    return resp.count or 0
-
-
-def fetch_deletion_queue(limit: int) -> list[dict[str, Any]]:
-    """youtube_deletion_queue에서 status='pending'인 요청을 오래된 순으로 최대 limit개.
-
-    singgyul_sing_book(Next.js 관리자 화면)이 구간 수정/performances 행 삭제 시 이 큐에
-    삭제 요청을 남긴다. performance_id는 참고용(행 삭제로 생긴 요청은 on delete set null로
-    null)이라 여기선 안 쓴다 — youtube_video_id만 있으면 처리 가능.
-    """
-    return (
-        _client()
-        .table("youtube_deletion_queue")
-        .select("*")
-        .eq("status", "pending")
-        .order("created_at")
-        .limit(limit)
-        .execute()
-        .data
-    )
-
-
-def mark_deletion(row_id: Any, status: str) -> None:
-    """youtube_deletion_queue 행의 처리 결과 기록(done/failed)."""
-    _client().table("youtube_deletion_queue").update(
-        {"status": status, "processed_at": _now_iso()}
-    ).eq("id", row_id).execute()
-
-
-def count_clipped_for_vod(title_no: str) -> int:
-    """해당 vod에 남은 clip_status='clipped' 건수 — 0이면 vod를 'done'으로 넘길 수 있다."""
-    resp = (
-        _client()
-        .table("performances")
-        .select("id, vods!inner(soop_title_no)", count="exact")
-        .eq("clip_status", "clipped")
-        .eq("vods.soop_title_no", title_no)
-        .execute()
-    )
-    return resp.count or 0
 
 
 # --------------------------------------------------------------------------- #

@@ -1,4 +1,6 @@
+from soopts import db
 from soopts.db import MAX_RETRIES, select_pending
+from soopts.models import Song
 
 
 def test_select_pending_picks_new_candidates():
@@ -50,3 +52,55 @@ def test_select_pending_respects_n_cap():
     candidates = [{"title_no": str(i)} for i in range(5)]
     picked = select_pending(candidates, existing_by_no={}, n=2)
     assert len(picked) == 2
+
+
+# --------------------------------------------------------------------------- #
+# insert_performances — 전송 컬럼 (스키마 정리와 맞물림)
+# --------------------------------------------------------------------------- #
+class _FakeTable:
+    def __init__(self, sink):
+        self.sink = sink
+
+    def insert(self, rows):
+        self.sink["rows"] = rows
+        return self
+
+    def execute(self):
+        return type("Resp", (), {"data": [{"id": "p-1"}]})()
+
+
+def _capture_insert(monkeypatch, song, result=None):
+    sink: dict = {}
+    monkeypatch.setattr(db, "_client",
+                        lambda: type("C", (), {"table": lambda self, n: _FakeTable(sink)})())
+    db.insert_performances("vod-1", [song], [result])
+    return sink["rows"][0]
+
+
+def _song():
+    return Song(t=3797, end=4021, duration=224, sticker_rate=1.8,
+                song_likely=True, lyrics="어제는 하늘이 슬퍼 보여서")
+
+
+def test_insert_performances_does_not_send_dropped_columns(monkeypatch):
+    """clip_status는 상수가 되어 쓰지 않는다 — 보내면 DROP COLUMN 후 insert가 깨진다."""
+    row = _capture_insert(monkeypatch, _song())
+    assert "clip_status" not in row
+    assert "youtube_video_id" not in row
+    assert "synced_at" not in row
+
+
+def test_insert_performances_keeps_all_song_data(monkeypatch):
+    """유튜브 정리로 노래 데이터가 유실되지 않아야 한다."""
+    row = _capture_insert(monkeypatch, _song())
+    assert row["start_s"] == 3797
+    assert row["end_s"] == 4021
+    assert row["lyrics_snippet"] == "어제는 하늘이 슬퍼 보여서"
+    assert row["sticker_rate"] == 1.8
+    assert row["song_likely"] is True
+
+
+def test_insert_performances_defaults_to_needs_review_without_match(monkeypatch):
+    row = _capture_insert(monkeypatch, _song(), result=None)
+    assert row["identify_status"] == "needs_review"
+    assert row["song_id"] is None

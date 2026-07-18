@@ -27,23 +27,15 @@ groq_model = "whisper-large-v3-turbo"
 # language = "en"          # 노래 언어 강제 시 정확도 큼 (미지정=자동, en/ko 둘 다 시도)
 lyric_chars = 300          # 출력 가사 길이 컷
 
-[clip]                     # 노래 클립 추출 (soopts clips)
-quality = "hls-original"   # 1080p. hls-hd4k=720p, hls-hd=540p
+[clip]                     # 노래 구간 감지 (soopts clips)
+# 영상은 만들지 않는다. 받은 구간은 경계 탐지와 가사 전사의 입력으로만 쓰이고 둘 다
+# 오디오만 보므로, 오디오가 동일한 최저 rendition으로 받아 다운로드를 8배 줄인다.
+quality = "hls-hd"         # 540p. 오디오는 hls-original과 동일한 AAC
 dl_pad_before_s = 120.0    # 경계 탐지 여유 위해 후보 구간 넉넉히 받음
 dl_pad_after_s = 90.0
 min_song_s = 45.0          # 구간 내 최장 음악 블록이 이보다 짧으면 노래 아님(스킵)
-crf = 20                   # 재인코딩 화질(낮을수록 고화질)
-
-[youtube]                  # 노래 클립 unlisted 자동 업로드 (soopts clips --upload)
-client_secret = "client_secret.json"          # Google Cloud OAuth 클라이언트(사용자 준비)
-token_file = "~/.config/soopts/yt_token.json" # 최초 동의 후 토큰 저장(이후 자동)
-privacy = "unlisted"       # unlisted=링크로만 시청 가능
-# 사용 가능 치환자: {title}(곡명/미상) {artist}(원곡 아티스트) {bj} {date}(방송일 YYYY-MM-DD) {hms}(시각) {vod_id}
-title_template = "{title} - {artist} | {bj} ({date})"
-display_name = "띵귤"      # 제목/설명에 쓰는 스트리머 표기(고정값 — meta.bj_nick 안 씀)
-daily_upload_limit = 50    # soopts daily 1회 실행당 업로드 상한 ("Video Uploads per day" 100건 중 여유있게)
-daily_deletion_limit = 50  # 1회 실행당(daily/sync 둘 다) 삭제 큐 처리 상한
 
 [station]                  # 데일리 배치 대상 (soopts daily)
 bj_id = "singgyul"
-daily_vod_count = 2        # 하루 처리할 미처리 VOD 수
+daily_vod_count = 1        # 하루 처리할 미처리 VOD 수. VOD 하나가 러너에서 3~4시간이라
+                           # 2개는 timeout-minutes(330)에 구조적으로 안 들어간다.

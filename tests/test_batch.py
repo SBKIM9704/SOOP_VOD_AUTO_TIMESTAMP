@@ -1,4 +1,3 @@
-from pathlib import Path
 
 import pytest
 
@@ -8,52 +7,25 @@ from soopts.batch import (
     RunContext,
     TimelineEvent,
     _narration_preserves_numbers,
-    clip_file_path,
     comment_candidates,
     fmt_duration_s,
     format_detailed_summary,
     format_region_failure_alert,
     format_summary,
-    format_upload_failure_alert,
-    format_video_description,
-    format_video_title,
     format_vod_result,
     narrate_with_llm,
     next_vod_status,
+    song_link,
     vod_link,
 )
 from soopts.config import Config
 
 
-def test_clip_file_path_deterministic_from_title_no_and_start_s():
-    # 러너가 휘발성이라 파일이 사라져도, title_no+start_s만으로 같은 경로를 재구성해야 한다.
-    p1 = clip_file_path(Path("work"), "12345", 90.0)
-    p2 = clip_file_path(Path("work"), "12345", 90.0)
-    assert p1 == p2 == Path("work/12345/clips/song_000090.mp4")
-
-
-def test_clip_file_path_truncates_fractional_seconds():
-    assert clip_file_path(Path("work"), "1", 90.9) == Path("work/1/clips/song_000090.mp4")
-
-
-def test_format_summary_without_upload_stage():
+def test_format_summary_basic_counts():
     text = format_summary({"vods": 1, "detected": 3, "auto_matched": 1, "needs_review": 2})
     assert text == "VOD 1건 / 감지 3곡 / 자동매칭 1 / 검수대기 2"
 
 
-def test_format_summary_with_upload_stage():
-    text = format_summary({
-        "vods": 2, "detected": 9, "auto_matched": 4, "needs_review": 5,
-        "uploaded": 5, "queue_remaining": 4,
-    })
-    assert text == "VOD 2건 / 감지 9곡 / 자동매칭 4 / 검수대기 5 / 업로드 5건 (큐 잔여 4)"
-
-
-def test_format_summary_with_deletion_stage():
-    text = format_summary({
-        "vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0, "deleted": 3,
-    })
-    assert text == "VOD 0건 / 감지 0곡 / 자동매칭 0 / 검수대기 0 / 삭제 3건"
 
 
 def test_next_vod_status_no_songs_detected_is_done():
@@ -69,6 +41,22 @@ def test_next_vod_status_songs_detected_stays_analyzed():
 def test_vod_link_fills_title_no_and_strips_second_param():
     cfg = Config()
     assert vod_link(cfg, "201651295") == "https://vod.sooplive.co.kr/player/201651295"
+
+
+def test_song_link_points_at_song_start_second():
+    """유튜브 업로드를 대체하는 시청 경로 — 원본 VOD의 노래 시작 시각으로 바로 이동."""
+    link = song_link(Config(), "201217563", 1883)
+    assert link == "https://vod.sooplive.co.kr/player/201217563?change_second=1883"
+
+
+def test_song_link_truncates_fractional_seconds():
+    assert song_link(Config(), "201217563", 1883.97).endswith("change_second=1883")
+
+
+def test_song_link_differs_from_plain_vod_link():
+    cfg = Config()
+    assert "change_second" not in vod_link(cfg, "1")
+    assert "change_second" in song_link(cfg, "1", 10)
 
 
 def test_format_vod_result_success_includes_hyperlink_and_counts():
@@ -129,13 +117,6 @@ def test_format_region_failure_alert_includes_context():
     assert "https://vod.sooplive.co.kr/player/201651295" in text
 
 
-def test_format_upload_failure_alert_includes_context():
-    cfg = Config()
-    text = format_upload_failure_alert(cfg, "201651295", 42, 90.0, 300.0, RuntimeError("업로드 실패"))
-    assert "201651295" in text
-    assert "perf=42" in text
-    assert "업로드 실패" in text
-
 
 def test_run_context_alert_stops_at_limit_and_counts_suppressed(monkeypatch):
     sent = []
@@ -167,9 +148,6 @@ def test_format_detailed_summary_includes_all_sections():
         kind="region", title_no="201651295", label="01:00:00~01:02:00", ok=None,
         detail="노래 아님(Groq) — 건너뜀", duration_s=8.0,
     ))
-    ctx.record(TimelineEvent(kind="upload_item", title_no="201651295", ok=True,
-                              detail="기다리다", duration_s=20.0))
-    ctx.record(TimelineEvent(kind="upload_summary", count=1, duration_s=20.0))
     ctx.alert_suppressed = 2
     stats = {"vods": 1, "detected": 1, "auto_matched": 1, "needs_review": 0,
               "not_song_skipped": 1}
@@ -184,27 +162,9 @@ def test_format_detailed_summary_includes_all_sections():
     assert "실패" in text
     assert "건너뜀" in text
     assert "IncompleteReadError" in text
-    assert "총 1건 성공" in text
     assert "추가 2건은 이 요약에만 반영" in text
     assert "'노래 아님'으로 판정해 검수 큐에 올리지 않고 건너뛴 구간: 1건" in text
 
-
-def test_format_detailed_summary_includes_deletion_section():
-    cfg = Config()
-    ctx = RunContext()
-    ctx.record(TimelineEvent(kind="deletion_item", ok=True, label="abc123"))
-    ctx.record(TimelineEvent(
-        kind="deletion_item", ok=False, label="def456", detail="HttpError: 403 quota",
-    ))
-    ctx.record(TimelineEvent(kind="deletion_summary", count=1))
-    stats = {"vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0, "deleted": 1}
-
-    text = format_detailed_summary(cfg, ctx, stats)
-
-    assert "▶ 영상 삭제" in text
-    assert "abc123: 성공" in text
-    assert "def456: 실패 — HttpError: 403 quota" in text
-    assert "총 1건 성공" in text
 
 
 def test_format_detailed_summary_no_footnotes_when_nothing_suppressed():
@@ -338,29 +298,5 @@ def test_comment_candidates_caps_correctly_even_when_list_order_is_not_chronolog
     assert by_title["이름에게"][1] == 7435 + 300.0  # 그 뒤엔 곡이 없으니 pad_after_s 그대로
 
 
-def test_format_video_title_uses_confirmed_song_artist():
-    cfg = Config()
-    perf = {"title_guess": "고양이", "songs": {"title": "고양이", "artist": "선우정아"}}
-    title = format_video_title(cfg, "2026-07-15", "201586597", 11049, perf)
-    assert title == "고양이 - 선우정아 | 띵귤 (2026-07-15)"
 
-
-def test_format_video_title_falls_back_without_song_join():
-    cfg = Config()
-    perf = {"title_guess": "고양이"}
-    title = format_video_title(cfg, "2026-07-15", "201586597", 11049, perf)
-    assert title == "고양이 - 아티스트 미상 | 띵귤 (2026-07-15)"
-
-
-def test_format_video_description_includes_title_artist_and_clickable_link():
-    cfg = Config()
-    perf = {
-        "title_guess": "고양이", "songs": {"title": "고양이", "artist": "선우정아"},
-        "lyrics_snippet": "멋진 너의 모습은",
-    }
-    desc = format_video_description(cfg, "2026-07-15", "201586597", 11049, perf)
-    assert desc.startswith("고양이 - 선우정아\n")
-    assert "띵귤 2026-07-15 다시보기" in desc
-    assert "원본 다시보기: https://vod.sooplive.co.kr/player/201586597?change_second=11049" in desc
-    assert "멋진 너의 모습은" in desc
 

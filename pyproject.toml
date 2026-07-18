@@ -19,11 +19,6 @@ dependencies = [
 # 무거운 ML 의존성은 선택 extras. 해당 analyzer의 메서드 내부에서만 import된다.
 audio = ["inaSpeechSegmenter"]   # 노래 구간 감지 + 경계 정밀 탐지
 stt = ["groq"]                   # 가사 전사(Groq Whisper API) → 곡 식별
-youtube = [                      # 노래 클립 unlisted 자동 업로드
-    "google-api-python-client",
-    "google-auth-oauthlib",
-    "google-auth",
-]
 batch = [                        # soopts daily/sync (GitHub Actions 배치)
     "supabase",
     "rapidfuzz",
