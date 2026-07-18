@@ -12,13 +12,54 @@ def test_select_pending_picks_new_candidates():
     assert [p["soop_title_no"] for p in picked] == ["1", "2"]
 
 
-def test_select_pending_skips_already_pending_or_done():
+def test_select_pending_skips_completed_vods():
     candidates = [{"title_no": "1", "title": "A"}, {"title_no": "2", "title": "B"}]
     existing = {
         "1": {"status": "done", "retry_count": 0},
-        "2": {"status": "pending", "retry_count": 0},
+        "2": {"status": "analyzed", "retry_count": 0},
     }
     assert select_pending(candidates, existing, n=2) == []
+
+
+# --------------------------------------------------------------------------- #
+# stale pending — 죽은 실행이 남긴 행을 다시 잡는다
+# --------------------------------------------------------------------------- #
+def test_select_pending_retries_stale_pending():
+    """타임아웃/취소로 처리 도중 죽으면 pending으로 남는데, 예전엔 영영 안 잡혔다."""
+    candidates = [{"title_no": "1", "title": "A"}]
+    existing = {"1": {"status": "pending", "retry_count": 0}}
+    picked = select_pending(candidates, existing, n=1)
+    assert len(picked) == 1
+    assert picked[0]["soop_title_no"] == "1"
+
+
+def test_select_pending_bumps_retry_count_for_stale_pending():
+    """mark_vod를 못 거쳤으므로 여기서 올리지 않으면 상한에 영영 안 닿는다."""
+    candidates = [{"title_no": "1", "title": "A"}]
+    existing = {"1": {"status": "pending", "retry_count": 1}}
+    picked = select_pending(candidates, existing, n=1)
+    assert picked[0]["retry_count"] == 2
+
+
+def test_select_pending_stops_retrying_stale_pending_at_limit():
+    """매번 러너를 죽이는 VOD가 큐를 무한히 막지 않아야 한다."""
+    candidates = [{"title_no": "1", "title": "A"}]
+    existing = {"1": {"status": "pending", "retry_count": MAX_RETRIES}}
+    assert select_pending(candidates, existing, n=1) == []
+
+
+def test_select_pending_does_not_bump_retry_count_for_failed():
+    """failed는 mark_vod가 이미 올렸으므로 여기서 또 올리면 이중 계산된다."""
+    candidates = [{"title_no": "1", "title": "A"}]
+    existing = {"1": {"status": "failed", "retry_count": 1}}
+    picked = select_pending(candidates, existing, n=1)
+    assert picked[0]["retry_count"] == 1
+
+
+def test_select_pending_treats_missing_retry_count_as_zero():
+    candidates = [{"title_no": "1", "title": "A"}]
+    picked = select_pending(candidates, {"1": {"status": "pending"}}, n=1)
+    assert picked[0]["retry_count"] == 1
 
 
 def test_select_pending_retries_failed_under_limit():

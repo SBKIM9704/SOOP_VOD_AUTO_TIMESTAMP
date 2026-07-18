@@ -91,9 +91,13 @@ ffmpeg used to be 76% of total runtime (6.6 min per song); removing it took a VO
 the same AAC audio, and audio is all the segmenter and Whisper ever see, so the higher ones only cost
 download time. Don't raise it "for quality" — there is no video output to have quality.
 
-Known gap: a run killed mid-VOD (timeout, cancel) leaves `vods.status = 'pending'`, and
-`select_pending()` only retries `failed` rows — so that VOD is never picked up again. Fixing this
-needs a retry_count guard so a VOD that always times out can't loop forever.
+A run killed mid-VOD (timeout, cancel, runner reset) leaves `vods.status = 'pending'` because
+`mark_vod` never runs. `select_pending()` therefore treats **both** `failed` and `pending` as
+retryable. Any `pending` seen at selection time is necessarily stale: `concurrency: soopts-daily`
+forbids overlapping runs, and within one run selection happens once, before processing.
+Retrying `pending` bumps `retry_count` inside `select_pending` — `mark_vod` only bumps it on
+`failed`, so without this a VOD that kills the runner every time would never reach `MAX_RETRIES`
+and would block the queue forever.
 
 ### Schema debt owned by the other repo
 
