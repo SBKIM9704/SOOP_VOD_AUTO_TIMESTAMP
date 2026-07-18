@@ -101,8 +101,11 @@ needs a retry_count guard so a VOD that always times out can't loop forever.
 using them:
 - `performances.youtube_video_id`, `youtube_deletion_queue` — dead since the upload path was removed.
   Keep the *data* (only record of past uploads); the columns can be dropped once nothing reads them.
-- `performances.clip_status` — the name now lies. There is no clip file; `'clipped'` means "song span
-  detected, awaiting review" and `'uploaded'` is never written. Renaming needs a coordinated migration.
+- `performances.clip_status` — dead. With the upload queue gone every row ended up `'clipped'`, so the
+  column carried no information; this repo no longer writes it (that also removed a per-song DB
+  round-trip). Review state lives in `identify_status`. Safe to drop **after** the admin UI stops
+  reading it — the drop order matters: code must stop writing a column before it is dropped, or
+  PostgREST fails every insert with `PGRST204` and the whole VOD is marked failed.
 
 ### GitHub Actions workflows
 

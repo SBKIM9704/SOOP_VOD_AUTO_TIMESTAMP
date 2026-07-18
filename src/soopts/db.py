@@ -1,4 +1,4 @@
-"""Supabase 연동 — soopts daily/sync 배치가 vods/performances 상태를 읽고 쓴다.
+"""Supabase 연동 — soopts daily 배치가 vods/performances 상태를 읽고 쓴다.
 
 스키마의 주인은 singgyul_sing_book 레포(supabase/migrations/)다. 이 모듈은 스키마를
 소비만 하고 여기서 만들지 않는다. songs 테이블은 읽기 전용으로만 다룬다 — 신곡 행을
@@ -89,21 +89,6 @@ def pick_unprocessed_vods(candidates: list[dict[str, Any]], n: int) -> list[dict
     return client.table("vods").upsert(rows, on_conflict="soop_title_no").execute().data
 
 
-def upsert_backfill_vod(soop_title_no: str, title: str, duration_s: int) -> dict[str, Any] | None:
-    """기존 유튜브 업로드용 더미 vods 행(scripts/backfill_existing_clips.py 전용)."""
-    rows = (
-        _client()
-        .table("vods")
-        .upsert(
-            {"soop_title_no": soop_title_no, "title": title, "status": "done", "duration_s": duration_s},
-            on_conflict="soop_title_no",
-        )
-        .execute()
-        .data
-    )
-    return rows[0] if rows else None
-
-
 def mark_vod(title_no: str, status: str, error: str | None = None) -> None:
     """vods.status 갱신. failed면 retry_count를 1 증가시킨다."""
     fields: dict[str, Any] = {"status": status, "error": error}
@@ -135,6 +120,12 @@ def insert_performances(
 
     identify_results를 생략하면 song_id=NULL, identify_status='needs_review'로 남는다.
     songs 테이블에 신곡 행을 만들지 않는다 — song_id는 기존 카탈로그 매칭 결과만 연결한다.
+
+    clip_status는 쓰지 않는다. 업로드 큐가 사라진 뒤로 이 컬럼은 전 행이 'clipped'인
+    상수가 되어 아무 정보도 담지 않는다(예전엔 'none'으로 넣고 곧바로 'clipped'로
+    UPDATE 했다). 컬럼 자체는 관리자 UI가 참조할 수 있어 DB에 남아 있지만, 여기서
+    쓰지 않으므로 나중에 DROP 해도 이 코드는 영향을 받지 않는다.
+    상태는 identify_status가 담는다 — 검수 흐름에서 실제로 쓰이는 건 그쪽이다.
     """
     if not songs:
         return []
@@ -151,15 +142,10 @@ def insert_performances(
             "match_confidence": r.match_confidence if r else None,
             "song_id": r.song_id if r else None,
             "identify_status": r.identify_status if r else "needs_review",
-            "clip_status": "none",
         }
         for s, r in zip(songs, results, strict=True)
     ]
     return _client().table("performances").insert(rows).execute().data
-
-
-def update_performance(perf_id: str, **fields: Any) -> None:
-    _client().table("performances").update(fields).eq("id", perf_id).execute()
 
 
 # --------------------------------------------------------------------------- #
