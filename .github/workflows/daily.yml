@@ -3,8 +3,10 @@ name: daily
 # 스테이션 최신 VOD 무인 배치: 감지·식별·1080p 클립·업로드.
 # 휘발성 러너 전제 — 큐의 진실은 Supabase(DB)에 있고, 클립 파일은 언제든 재생성 가능하다.
 on:
-  schedule:
-    - cron: "0 19 * * *"   # 19:00 UTC = 04:00 KST
+  # 2026-07-18 일시 중단: 업로드 대상 Google 계정(SBKIM9704) 전체 정지 — 이의신청 결과가
+  # 나올 때까지 무인 실행을 막는다. 계정 복구 후 아래 schedule 주석을 되돌릴 것.
+  # schedule:
+  #   - cron: "0 19 * * *"   # 19:00 UTC = 04:00 KST
   workflow_dispatch:
     inputs:
       count:
