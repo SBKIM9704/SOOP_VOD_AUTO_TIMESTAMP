@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # install (editable, with dev tools)
-uv venv && uv pip install -e ".[audio,stt,youtube,batch,dev]"
+uv venv && uv pip install -e ".[audio,stt,batch,dev]"
 
 # lint + test (the CI gate)
 ruff check src tests && pytest
@@ -25,9 +25,9 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
 
 ### Two entry points into the same lower-level modules
 
-- **Manual CLI pipeline** (`cli.py`): a human runs `collect` → `songs`/`clips` → `clips --upload`
-  one VOD at a time, reviewing/editing `clips.json` between steps before anything goes to YouTube.
-- **Batch pipeline** (`batch.py`, driven by `soopts daily`/`soopts sync`): the same detection/clip/
+- **Manual CLI pipeline** (`cli.py`): a human runs `collect` → `songs`/`clips` one VOD at a time,
+  reviewing/editing `clips.json` between steps.
+- **Batch pipeline** (`batch.py`, driven by `soopts daily`): the same detection/clip/
   identify building blocks (`analyzers/audio_analyzer.py`, `collector/media.py`, `export/clips.py`,
   `analyzers/stt.py`, `analyzers/identify.py`) are composed directly, with Supabase (`db.py`) standing
   in for the human review step. `batch.py` does not reuse `cli.py`'s `_produce_clips`/`_songs_slice`
@@ -41,7 +41,7 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
 ### Config system (`config.py`)
 
 One dataclass per concern (`Endpoints`, `CollectorConfig`, `AudioConfig`, `SttConfig`, `ClipConfig`,
-`YouTubeConfig`, `StationConfig`), assembled into `Config`. `load_config()` reads `soopts.toml` and
+`StationConfig`, `CommentConfig`), assembled into `Config`. `load_config()` reads `soopts.toml` and
 merges only the keys present per section (`_build_section` drops unknown keys) — so partial overrides
 in `soopts.toml` don't require repeating every field. `work_root` can also be overridden via CLI flag.
 
@@ -54,40 +54,47 @@ pipeline uses the exact same layout, which is what makes clip-file resumability 
 
 ### Lazy imports for heavy/optional dependencies
 
-`inaSpeechSegmenter`, the `google-api-python-client` stack, `supabase`, `groq`,
-and `rapidfuzz` are **only imported inside the functions that use them**, never at module top level.
+`inaSpeechSegmenter`, `supabase`, `groq`, and `rapidfuzz` are **only imported inside the functions
+that use them**, never at module top level.
 This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency extras (`audio`, `stt`,
-`youtube`, `batch`) actually be optional — a plain `pip install soopts` with no extras can still run
+`batch`) actually be optional — a plain `pip install soopts` with no extras can still run
 `collect`. Preserve this pattern when adding new functionality that touches one of these libraries.
 
 ### The Supabase boundary (`db.py`)
 
 `db.py` is the *only* module that talks to Supabase. The schema (`vods`, `performances`, `song_aliases`,
-`youtube_deletion_queue`, and the read-only `songs` catalog) is owned by a separate private repo
+and the read-only `songs` catalog) is owned by a separate private repo
 (`singgyul_sing_book`) — this codebase only consumes it and never creates migrations. `songs` rows are
 never created from this repo; unmatched songs always land as `needs_review` for a human to resolve in
 the separate review UI. `vods.status`/`performances.clip_status`/`performances.identify_status` are the
 actual state machine — treat them as the source of truth, not local files (see next point).
-`youtube_deletion_queue` is how the admin UI (region edits / performance deletes) asks this repo to
-delete an already-uploaded video; `_drain_deletion_queue()` in `batch.py` drains it from both `daily`
-and `sync` (independent of `performance_id`, which is nullable and unused for processing).
+The schema still carries YouTube-era columns (`performances.youtube_video_id`, the
+`youtube_deletion_queue` table). This repo no longer reads or writes them — the upload path was
+removed — but **do not drop them or clear existing values**: they are the only record of which
+already-uploaded video corresponds to which performance, and the other repo still owns the schema.
 
 ### Volatile-runner design (`batch.py`)
 
-GitHub-hosted runners don't persist disk between workflow runs. The upload queue therefore cannot
-depend on files surviving between `daily` invocations — its truth is `performances.clip_status` plus
-`start_s`/`end_s` in Supabase. `clip_file_path(work_root, title_no, start_s)` is a pure function that
-reconstructs the expected clip path deterministically from those DB columns; if the file is missing
-(runner reset since it was cut), `_reslice_clip()` re-downloads just that segment and re-cuts it rather
-than re-running full detection. Don't reintroduce any state that only lives in the runner's filesystem
-into the upload-queue logic.
+GitHub-hosted runners don't persist disk between workflow runs, so no pipeline stage may depend on
+files surviving between `daily` invocations. The truth is Supabase: `vods.status` for how far a VOD
+got, `performances.clip_status` plus `start_s`/`end_s` for each detected song. Local `work/` files are
+a cache that may vanish at any time. Don't reintroduce state that only lives in the runner's filesystem.
+
+The deliverable is the **timestamp**, not a media file. `song_link(cfg, title_no, start_s)` builds the
+SOOP deep link that viewers actually follow, computed from DB columns alone — nothing is uploaded
+anywhere, so there is no per-song artifact to keep in sync or clean up.
+
+Known gap: a run killed mid-VOD (timeout, cancel) leaves `vods.status = 'pending'`, and
+`select_pending()` only retries `failed` rows — so that VOD is never picked up again. Fixing this
+needs a retry_count guard so a VOD that always times out can't loop forever.
 
 ### GitHub Actions workflows
 
 - `verify-env.yml` (manual): confirms SOOP's API/streams are reachable from a hosted-runner IP before
-  relying on `daily.yml`/`sync.yml`. If it starts failing, only `runs-on` needs to change to a
+  relying on `daily.yml`. If it starts failing, only `runs-on` needs to change to a
   self-hosted runner — nothing else.
-- `daily.yml` / `sync.yml`: scheduled + `workflow_dispatch`. Both pipe `soopts ... | tee *.log` and rely
+- `daily.yml`: scheduled + `workflow_dispatch` (schedule currently commented out). It pipes
+  `soopts ... | tee *.log` and relies
   on the exit code to detect failure — any `run:` step doing this **must** start with
   `set -o pipefail`, or a crash in `soopts` gets masked by `tee`'s always-zero exit status (this has
   bitten this repo once already).
@@ -95,7 +102,7 @@ into the upload-queue logic.
 ### Testing philosophy
 
 Tests exercise pure functions only — no network, no DB, no ML model loading. One file per module
-under test (`tests/test_<module>.py`). Functions that call out to Groq/Supabase/YouTube are kept
+under test (`tests/test_<module>.py`). Functions that call out to Groq/Supabase are kept
 thin and tested by isolating the pure logic around them (e.g. `test_db.py` tests `select_pending`'s
 row-filtering logic directly, without touching Supabase; `test_stt.py` passes a fake client object
 into `_transcribe_best` to test the language-selection logic without a real API call). Fixtures
