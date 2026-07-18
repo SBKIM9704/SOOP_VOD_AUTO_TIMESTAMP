@@ -80,7 +80,8 @@ def test_select_pending_retry_row_excludes_identity_id_column():
     assert len(picked) == 1
     assert "id" not in picked[0]
     assert picked[0]["soop_title_no"] == "1"
-    assert picked[0]["title"] == "옛 제목"
+    # 제목은 방금 SOOP에서 받아온 후보 값을 쓴다(재시도 시 메타데이터 갱신)
+    assert picked[0]["title"] == "A"
 
 
 def test_select_pending_stops_retrying_at_limit():
@@ -145,3 +146,48 @@ def test_insert_performances_defaults_to_needs_review_without_match(monkeypatch)
     row = _capture_insert(monkeypatch, _song(), result=None)
     assert row["identify_status"] == "needs_review"
     assert row["song_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# upsert 배치 — 신규·재시도 행의 키 집합이 같아야 한다
+# --------------------------------------------------------------------------- #
+def test_select_pending_rows_share_identical_key_set():
+    """PostgREST는 키 합집합으로 컬럼을 만들고 빠진 값을 NULL로 채운다 — 키가 다르면
+    한쪽에만 있는 컬럼이 다른 행에서 NULL이 되어 NOT NULL 제약을 깬다.
+    실제로 재시도 행과 신규 행이 섞이며 retry_count NULL로 배치 전체가 거부됐다(23502)."""
+    candidates = [
+        {"title_no": "1", "title": "재시도", "broadcast_date": "2026-07-16", "duration_s": 100},
+        {"title_no": "2", "title": "신규", "broadcast_date": "2026-07-17", "duration_s": 200},
+    ]
+    existing = {"1": {"id": 7, "status": "pending", "retry_count": 0,
+                      "created_at": "2026-07-16T00:00:00Z", "error": None,
+                      "processed_at": None, "title": "옛 제목"}}
+    picked = select_pending(candidates, existing, n=2)
+    assert len(picked) == 2
+    assert {frozenset(r) for r in picked} == {frozenset(picked[0])}, "행마다 키 집합이 다름"
+
+
+def test_select_pending_never_sends_db_managed_columns():
+    """created_at/processed_at/error는 DB와 mark_vod가 관리한다 — 되쓰면 NULL로 덮인다."""
+    candidates = [{"title_no": "1", "title": "A"}]
+    existing = {"1": {"id": 7, "status": "failed", "retry_count": 1,
+                      "created_at": "2026-07-16T00:00:00Z", "error": "옛 오류",
+                      "processed_at": "2026-07-16T01:00:00Z"}}
+    row = select_pending(candidates, existing, n=1)[0]
+    for col in ("id", "created_at", "processed_at", "error", "status"):
+        assert col not in row, f"{col}이 페이로드에 포함됨"
+
+
+def test_select_pending_retry_row_always_has_retry_count():
+    """신규 행도 retry_count를 가져야 배치가 균일해진다."""
+    picked = select_pending([{"title_no": "9", "title": "신규"}], {}, n=1)
+    assert picked[0]["retry_count"] == 0
+
+
+def test_select_pending_retry_prefers_fresh_candidate_metadata():
+    candidates = [{"title_no": "1", "title": "새 제목", "duration_s": 999}]
+    existing = {"1": {"status": "pending", "retry_count": 0,
+                      "title": "옛 제목", "duration_s": 100}}
+    row = select_pending(candidates, existing, n=1)[0]
+    assert row["title"] == "새 제목"
+    assert row["duration_s"] == 999

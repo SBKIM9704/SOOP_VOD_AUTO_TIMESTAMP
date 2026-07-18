@@ -72,25 +72,40 @@ def select_pending(
         if len(picked) >= n:
             break
         title_no = str(c["title_no"])
-        row = existing_by_no.get(title_no)
-        if row is not None:
-            status = row.get("status")
-            retry_count = row.get("retry_count") or 0
-            if status in ("failed", "pending") and retry_count < MAX_RETRIES:
-                # id는 GENERATED ALWAYS AS IDENTITY라 upsert 페이로드에 넣으면
-                # PostgREST가 거부한다(실제로 재시도 케이스에서 발생 확인) — 제외.
-                retry_row = {k: v for k, v in row.items() if k != "id"}
-                if status == "pending":
-                    retry_row["retry_count"] = retry_count + 1
-                picked.append({**retry_row, "soop_title_no": title_no})
-            continue
-        picked.append({
-            "soop_title_no": title_no,
-            "title": c.get("title", ""),
-            "broadcast_date": c.get("broadcast_date"),
-            "duration_s": c.get("duration_s"),
-        })
+        row = existing_by_no.get(title_no) or {}
+        status = row.get("status")
+        retry_count = row.get("retry_count") or 0
+        if row:
+            if status not in ("failed", "pending") or retry_count >= MAX_RETRIES:
+                continue
+            # failed는 mark_vod가 이미 올렸다. pending은 그 경로를 못 거쳤으니 여기서 올린다.
+            if status == "pending":
+                retry_count += 1
+        picked.append(_vod_row(title_no, c, row, retry_count))
     return picked
+
+
+def _vod_row(
+    title_no: str, candidate: dict[str, Any], existing: dict[str, Any], retry_count: int
+) -> dict[str, Any]:
+    """upsert에 넣을 vods 행. 신규·재시도가 **똑같은 키 집합**을 갖는 게 핵심이다.
+
+    PostgREST는 배치의 키 합집합으로 컬럼 목록을 만들고 빠진 값을 NULL로 채운다. 그래서
+    키가 다른 행이 한 배치에 섞이면, 어떤 행에만 있는 컬럼이 나머지 행에서 명시적 NULL이
+    되어 NOT NULL 제약을 깬다 — 실제로 재시도 행과 신규 행이 함께 올라가면서
+    `null value in column "retry_count" violates not-null constraint`로 배치 전체가
+    거부됐다. 행마다 dict를 다르게 만들지 말 것.
+
+    id도 넣지 않는다 — GENERATED ALWAYS AS IDENTITY라 PostgREST가 거부한다.
+    created_at/processed_at/error는 DB와 mark_vod가 관리하므로 여기서 되쓰지 않는다.
+    """
+    return {
+        "soop_title_no": title_no,
+        "title": candidate.get("title") or existing.get("title") or "",
+        "broadcast_date": candidate.get("broadcast_date") or existing.get("broadcast_date"),
+        "duration_s": candidate.get("duration_s") or existing.get("duration_s"),
+        "retry_count": retry_count,
+    }
 
 
 def pick_unprocessed_vods(candidates: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
