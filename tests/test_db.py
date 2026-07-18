@@ -1,99 +1,97 @@
 from soopts import db
-from soopts.db import MAX_RETRIES, select_pending
+from soopts.db import select_targets
 from soopts.models import Song
 
 
-def test_select_pending_picks_new_candidates():
+# --------------------------------------------------------------------------- #
+# select_targets — 우선순위 재시도 > 신규 > 백필
+# --------------------------------------------------------------------------- #
+def test_select_targets_picks_new_candidates_newest_first():
     candidates = [
-        {"title_no": "1", "title": "A", "broadcast_date": "2026-07-16", "duration_s": 100},
-        {"title_no": "2", "title": "B", "broadcast_date": "2026-07-15", "duration_s": 200},
+        {"title_no": "2", "title": "B", "broadcast_date": "2026-07-16", "duration_s": 200},
+        {"title_no": "1", "title": "A", "broadcast_date": "2026-07-15", "duration_s": 100},
     ]
-    picked = select_pending(candidates, existing_by_no={}, n=2)
-    assert [p["soop_title_no"] for p in picked] == ["1", "2"]
+    picked = select_targets([], candidates, existing_by_no={}, n=2)
+    assert [p["soop_title_no"] for p in picked] == ["2", "1"]
 
 
-def test_select_pending_skips_completed_vods():
+def test_select_targets_skips_completed_vods():
     candidates = [{"title_no": "1", "title": "A"}, {"title_no": "2", "title": "B"}]
     existing = {
         "1": {"status": "done", "retry_count": 0},
         "2": {"status": "analyzed", "retry_count": 0},
     }
-    assert select_pending(candidates, existing, n=2) == []
+    assert select_targets([], candidates, existing, n=2) == []
+
+
+def test_select_targets_backfills_past_when_newest_all_done():
+    """신규(2)가 완료됐으면 과거(1)로 내려가 백필한다 — 최신순 순회가 신규>백필을 만든다."""
+    candidates = [{"title_no": "2", "title": "신규"}, {"title_no": "1", "title": "과거"}]
+    existing = {"2": {"status": "done", "retry_count": 0}}
+    picked = select_targets([], candidates, existing, n=1)
+    assert [p["soop_title_no"] for p in picked] == ["1"]
+
+
+def test_select_targets_retry_takes_priority_over_new():
+    """재시도 > 신규: 슬롯이 하나면 재시도가 먼저 차지한다."""
+    retryable = [{"soop_title_no": "9", "status": "failed", "retry_count": 0, "title": "재시도"}]
+    candidates = [{"title_no": "10", "title": "신규"}]
+    picked = select_targets(retryable, candidates, existing_by_no={}, n=1)
+    assert [p["soop_title_no"] for p in picked] == ["9"]
+
+
+def test_select_targets_retry_then_fills_with_new():
+    retryable = [{"soop_title_no": "9", "status": "failed", "retry_count": 1, "title": "재시도"}]
+    candidates = [{"title_no": "10", "title": "신규"}]
+    picked = select_targets(retryable, candidates, existing_by_no={}, n=2)
+    assert [p["soop_title_no"] for p in picked] == ["9", "10"]
 
 
 # --------------------------------------------------------------------------- #
-# stale pending — 죽은 실행이 남긴 행을 다시 잡는다
+# 재시도 — retry_count 처리
 # --------------------------------------------------------------------------- #
-def test_select_pending_retries_stale_pending():
-    """타임아웃/취소로 처리 도중 죽으면 pending으로 남는데, 예전엔 영영 안 잡혔다."""
-    candidates = [{"title_no": "1", "title": "A"}]
-    existing = {"1": {"status": "pending", "retry_count": 0}}
-    picked = select_pending(candidates, existing, n=1)
-    assert len(picked) == 1
-    assert picked[0]["soop_title_no"] == "1"
-
-
-def test_select_pending_bumps_retry_count_for_stale_pending():
-    """mark_vod를 못 거쳤으므로 여기서 올리지 않으면 상한에 영영 안 닿는다."""
-    candidates = [{"title_no": "1", "title": "A"}]
-    existing = {"1": {"status": "pending", "retry_count": 1}}
-    picked = select_pending(candidates, existing, n=1)
+def test_select_targets_bumps_retry_count_for_stale_pending():
+    """pending은 mark_vod 경로를 못 거쳤으므로 여기서 올리지 않으면 상한에 영영 안 닿는다."""
+    retryable = [{"soop_title_no": "1", "status": "pending", "retry_count": 1}]
+    picked = select_targets(retryable, [], existing_by_no={}, n=1)
     assert picked[0]["retry_count"] == 2
 
 
-def test_select_pending_stops_retrying_stale_pending_at_limit():
-    """매번 러너를 죽이는 VOD가 큐를 무한히 막지 않아야 한다."""
-    candidates = [{"title_no": "1", "title": "A"}]
-    existing = {"1": {"status": "pending", "retry_count": MAX_RETRIES}}
-    assert select_pending(candidates, existing, n=1) == []
-
-
-def test_select_pending_does_not_bump_retry_count_for_failed():
+def test_select_targets_does_not_bump_retry_count_for_failed():
     """failed는 mark_vod가 이미 올렸으므로 여기서 또 올리면 이중 계산된다."""
-    candidates = [{"title_no": "1", "title": "A"}]
-    existing = {"1": {"status": "failed", "retry_count": 1}}
-    picked = select_pending(candidates, existing, n=1)
+    retryable = [{"soop_title_no": "1", "status": "failed", "retry_count": 1}]
+    picked = select_targets(retryable, [], existing_by_no={}, n=1)
     assert picked[0]["retry_count"] == 1
 
 
-def test_select_pending_treats_missing_retry_count_as_zero():
-    candidates = [{"title_no": "1", "title": "A"}]
-    picked = select_pending(candidates, {"1": {"status": "pending"}}, n=1)
+def test_select_targets_treats_missing_retry_count_as_zero():
+    retryable = [{"soop_title_no": "1", "status": "pending"}]
+    picked = select_targets(retryable, [], existing_by_no={}, n=1)
     assert picked[0]["retry_count"] == 1
 
 
-def test_select_pending_retries_failed_under_limit():
-    candidates = [{"title_no": "1", "title": "A"}]
-    existing = {"1": {"status": "failed", "retry_count": MAX_RETRIES - 1}}
-    picked = select_pending(candidates, existing, n=1)
-    assert len(picked) == 1
-    assert picked[0]["soop_title_no"] == "1"
-
-
-def test_select_pending_retry_row_excludes_identity_id_column():
-    # 실제 장애 재현: existing_by_no의 row는 SELECT *라 id(GENERATED ALWAYS)를 포함한다.
-    # 그대로 upsert 페이로드에 넣으면 PostgREST가 'cannot insert a non-DEFAULT value
-    # into column "id"'로 거부한다 — 재시도 페이로드에서 id는 반드시 빠져야 한다.
-    candidates = [{"title_no": "1", "title": "A"}]
-    existing = {"1": {"id": 42, "status": "failed", "retry_count": 0, "title": "옛 제목"}}
-    picked = select_pending(candidates, existing, n=1)
-    assert len(picked) == 1
+def test_select_targets_retry_excludes_identity_id_column():
+    # DB 행은 SELECT *라 id(GENERATED ALWAYS)를 포함한다. upsert 페이로드에 그대로 넣으면
+    # PostgREST가 거부하므로 재시도 페이로드에서 id는 반드시 빠져야 한다.
+    retryable = [{"id": 42, "soop_title_no": "1", "status": "failed",
+                  "retry_count": 0, "title": "옛 제목"}]
+    picked = select_targets(retryable, [], existing_by_no={}, n=1)
     assert "id" not in picked[0]
-    assert picked[0]["soop_title_no"] == "1"
-    # 제목은 방금 SOOP에서 받아온 후보 값을 쓴다(재시도 시 메타데이터 갱신)
-    assert picked[0]["title"] == "A"
+    assert picked[0]["title"] == "옛 제목"   # 목록에 없으면 DB 메타데이터 유지
 
 
-def test_select_pending_stops_retrying_at_limit():
-    candidates = [{"title_no": "1", "title": "A"}]
-    existing = {"1": {"status": "failed", "retry_count": MAX_RETRIES}}
-    assert select_pending(candidates, existing, n=1) == []
+def test_select_targets_retry_refreshes_metadata_when_in_candidates():
+    """재시도 VOD가 목록에도 있으면 방금 받아온 제목으로 갱신한다."""
+    retryable = [{"soop_title_no": "1", "status": "failed", "retry_count": 0, "title": "옛 제목"}]
+    candidates = [{"title_no": "1", "title": "새 제목"}]
+    picked = select_targets(retryable, candidates, existing_by_no={"1": retryable[0]}, n=1)
+    assert len(picked) == 1   # 재시도로 한 번만
+    assert picked[0]["title"] == "새 제목"
 
 
-def test_select_pending_respects_n_cap():
+def test_select_targets_respects_n_cap():
     candidates = [{"title_no": str(i)} for i in range(5)]
-    picked = select_pending(candidates, existing_by_no={}, n=2)
-    assert len(picked) == 2
+    assert len(select_targets([], candidates, existing_by_no={}, n=2)) == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -151,46 +149,33 @@ def test_insert_performances_defaults_to_needs_review_without_match(monkeypatch)
 # --------------------------------------------------------------------------- #
 # upsert 배치 — 신규·재시도 행의 키 집합이 같아야 한다
 # --------------------------------------------------------------------------- #
-def test_select_pending_rows_share_identical_key_set():
+def test_select_targets_rows_share_identical_key_set():
     """PostgREST는 키 합집합으로 컬럼을 만들고 빠진 값을 NULL로 채운다 — 키가 다르면
     한쪽에만 있는 컬럼이 다른 행에서 NULL이 되어 NOT NULL 제약을 깬다.
     실제로 재시도 행과 신규 행이 섞이며 retry_count NULL로 배치 전체가 거부됐다(23502)."""
-    candidates = [
-        {"title_no": "1", "title": "재시도", "broadcast_date": "2026-07-16", "duration_s": 100},
-        {"title_no": "2", "title": "신규", "broadcast_date": "2026-07-17", "duration_s": 200},
-    ]
-    existing = {"1": {"id": 7, "status": "pending", "retry_count": 0,
-                      "created_at": "2026-07-16T00:00:00Z", "error": None,
-                      "processed_at": None, "title": "옛 제목"}}
-    picked = select_pending(candidates, existing, n=2)
+    retryable = [{"id": 7, "soop_title_no": "1", "status": "pending", "retry_count": 0,
+                  "created_at": "2026-07-16T00:00:00Z", "error": None,
+                  "processed_at": None, "title": "재시도"}]
+    candidates = [{"title_no": "2", "title": "신규", "broadcast_date": "2026-07-17", "duration_s": 200}]
+    picked = select_targets(retryable, candidates, existing_by_no={}, n=2)
     assert len(picked) == 2
     assert {frozenset(r) for r in picked} == {frozenset(picked[0])}, "행마다 키 집합이 다름"
 
 
-def test_select_pending_never_sends_db_managed_columns():
+def test_select_targets_never_sends_db_managed_columns():
     """created_at/processed_at/error는 DB와 mark_vod가 관리한다 — 되쓰면 NULL로 덮인다."""
-    candidates = [{"title_no": "1", "title": "A"}]
-    existing = {"1": {"id": 7, "status": "failed", "retry_count": 1,
-                      "created_at": "2026-07-16T00:00:00Z", "error": "옛 오류",
-                      "processed_at": "2026-07-16T01:00:00Z"}}
-    row = select_pending(candidates, existing, n=1)[0]
+    retryable = [{"id": 7, "soop_title_no": "1", "status": "failed", "retry_count": 1,
+                  "created_at": "2026-07-16T00:00:00Z", "error": "옛 오류",
+                  "processed_at": "2026-07-16T01:00:00Z", "title": "A"}]
+    row = select_targets(retryable, [], existing_by_no={}, n=1)[0]
     for col in ("id", "created_at", "processed_at", "error", "status"):
         assert col not in row, f"{col}이 페이로드에 포함됨"
 
 
-def test_select_pending_retry_row_always_has_retry_count():
-    """신규 행도 retry_count를 가져야 배치가 균일해진다."""
-    picked = select_pending([{"title_no": "9", "title": "신규"}], {}, n=1)
+def test_select_targets_new_row_always_has_retry_count():
+    """신규 행도 retry_count를 가져야 재시도 행과 배치가 균일해진다."""
+    picked = select_targets([], [{"title_no": "9", "title": "신규"}], existing_by_no={}, n=1)
     assert picked[0]["retry_count"] == 0
-
-
-def test_select_pending_retry_prefers_fresh_candidate_metadata():
-    candidates = [{"title_no": "1", "title": "새 제목", "duration_s": 999}]
-    existing = {"1": {"status": "pending", "retry_count": 0,
-                      "title": "옛 제목", "duration_s": 100}}
-    row = select_pending(candidates, existing, n=1)[0]
-    assert row["title"] == "새 제목"
-    assert row["duration_s"] == 999
 
 
 # --------------------------------------------------------------------------- #

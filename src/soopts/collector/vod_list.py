@@ -12,6 +12,7 @@ chapi.sooplive.co.kr의 비공식 목록 API. 요청 URL과 응답 스키마는 
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 
 import requests
 
@@ -43,12 +44,16 @@ def extract_page(data: dict) -> tuple[list[dict], int, int]:
     return candidates, meta.get("current_page", 1), meta.get("last_page", 1)
 
 
-def fetch_recent_vods(cfg: Config, bj_id: str, count: int) -> list[dict]:
-    """최신 VOD 최대 count개를 최신순으로 반환한다. 필요하면 다음 페이지까지 조회한다."""
-    out: list[dict] = []
+def iter_vod_pages(cfg: Config, bj_id: str) -> Iterator[list[dict]]:
+    """VOD 목록을 페이지 단위로 최신순으로 yield한다. 마지막 페이지에서 멈춘다.
+
+    백필이 얼마나 과거로 내려갈지 미리 알 수 없어(처리 완료분을 건너뛰므로) 호출부가
+    필요한 만큼만 소비하도록 제너레이터로 준다 — 목표 개수를 채우면 순회를 멈추면 된다.
+    마지막 페이지가 SOOP 만료의 자연 바닥선이다: 더 내려갈 과거가 없으면 순회가 끝난다.
+    """
     page = 1
     headers = {"User-Agent": cfg.collector.user_agent}
-    while len(out) < count:
+    while True:
         resp = requests.get(
             _LIST_URL.format(bj_id=bj_id),
             params={"page": page},
@@ -57,11 +62,19 @@ def fetch_recent_vods(cfg: Config, bj_id: str, count: int) -> list[dict]:
         )
         resp.raise_for_status()
         candidates, current_page, last_page = extract_page(resp.json())
-        if not candidates:
-            break
-        out.extend(candidates[: count - len(out)])
-        if current_page >= last_page:
+        if candidates:
+            yield candidates
+        if not candidates or current_page >= last_page:
             break
         page += 1
         time.sleep(cfg.collector.request_delay_s)
+
+
+def fetch_recent_vods(cfg: Config, bj_id: str, count: int) -> list[dict]:
+    """최신 VOD 최대 count개를 최신순으로 반환한다. 필요하면 다음 페이지까지 조회한다."""
+    out: list[dict] = []
+    for candidates in iter_vod_pages(cfg, bj_id):
+        out.extend(candidates[: count - len(out)])
+        if len(out) >= count:
+            break
     return out

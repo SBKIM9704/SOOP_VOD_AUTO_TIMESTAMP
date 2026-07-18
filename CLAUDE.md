@@ -100,7 +100,7 @@ everything first, so memory stays bounded at `workers` segments. Measured agains
 11.8s → 5.6s for a 300s region, byte-identical output.
 
 A run killed mid-VOD (timeout, cancel, runner reset) leaves `vods.status = 'pending'` because
-`mark_vod` never runs. `select_pending()` therefore treats **both** `failed` and `pending` as
+`mark_vod` never runs. `select_targets()` therefore treats **both** `failed` and `pending` as
 retryable. Any `pending` seen at selection time is necessarily stale: `concurrency: soopts-daily`
 forbids overlapping runs, and within one run selection happens once, before processing.
 Because retries are routine, **reprocessing must be idempotent**. `insert_performances` upserts on
@@ -110,15 +110,28 @@ Because retries are routine, **reprocessing must be idempotent**. `insert_perfor
 them. Before this, every reprocess appended a fresh copy of each span (201142227 ended up with two
 sets of identical `start_s`/`end_s`).
 
-Retrying `pending` bumps `retry_count` inside `select_pending` — `mark_vod` only bumps it on
+Retrying `pending` bumps `retry_count` inside `select_targets` — `mark_vod` only bumps it on
 `failed`, so without this a VOD that kills the runner every time would never reach `MAX_RETRIES`
 and would block the queue forever.
 
-Every row `select_pending` returns must carry the **same keys** (`_vod_row` enforces this).
+Every row `select_targets` returns must carry the **same keys** (`_vod_row` enforces this).
 PostgREST builds the column list from the union of keys across the batch and writes an explicit
 NULL wherever a row lacks one — so mixing a retry row (rich, straight from `select *`) with a new
 row (sparse) made `retry_count` NULL on the new row and Postgres rejected the whole batch with
 `23502`. Never build the upsert dicts per-row-shape.
+
+### VOD selection (`_select_vods` in `batch.py`, `select_targets` in `db.py`)
+
+Priority is **retry > new > backfill**, with no floor — SOOP list expiry is the natural bottom.
+
+`fetch_retryable()` pulls `failed`/`pending` rows (under `MAX_RETRIES`) straight from the DB, so a
+`pending` that scrolled out of the recent-list window still gets retried — the old fixed
+`count * 3` window silently stranded them. New and backfill both come from paging the SOOP list
+newest-first via `iter_vod_pages()`: `_select_vods` keeps paging and skipping already-processed VODs
+until it has `count` targets or the list runs out, so when the newest are all done it walks backward
+into history automatically. No separate "new vs backfill" branch — newest-first traversal makes that
+ordering fall out. `select_targets` is the pure core (retry list + candidate list → picks); the impure
+paging loop lives in `batch.py` to keep `db.py` Supabase-only and `vod_list.py` SOOP-only.
 
 ### Quality gate (`quality_warning`)
 
@@ -149,7 +162,7 @@ identification entirely, so `lyrics_only` staying at 0 is expected for VODs with
 
 Tests exercise pure functions only — no network, no DB, no ML model loading. One file per module
 under test (`tests/test_<module>.py`). Functions that call out to Groq/Supabase are kept
-thin and tested by isolating the pure logic around them (e.g. `test_db.py` tests `select_pending`'s
+thin and tested by isolating the pure logic around them (e.g. `test_db.py` tests `select_targets`'s
 row-filtering logic directly, without touching Supabase; `test_stt.py` passes a fake client object
 into `_transcribe_best` to test the language-selection logic without a real API call). Fixtures
 under `tests/fixtures/` that capture real SOOP API/chat responses are anonymized (no real viewer
