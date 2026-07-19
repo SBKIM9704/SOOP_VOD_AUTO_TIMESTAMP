@@ -37,6 +37,12 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
 - Shared low-level helpers that both entry points need (e.g. `collector/media.py`'s `map_to_part`,
   which maps a global time range onto the right HLS part + local offsets) live in the module layer,
   not in `cli.py`, specifically so `batch.py` can call them without importing the CLI.
+- **Local escape hatch** (`soopts process <id>` → `batch.process_single_vod`): runs the *batch*
+  pipeline for one VOD and **writes to the DB** (unlike `songs`/`clips`, which only write local files
+  for interactive review). It exists for VODs the hosted runner can't finish — chiefly a
+  no-timeline VOD longer than `station.sweep_max_duration_s`, which `daily` fails fast on (see
+  Volatile-runner design). It runs `_process_vod` with `allow_sweep=True, enforce_guard=False`, so
+  there's no per-run sweep budget and no length guard — the operator's PC has no job timeout.
 
 ### Config system (`config.py`)
 
@@ -121,6 +127,42 @@ PostgREST builds the column list from the union of keys across the batch and wri
 NULL wherever a row lacks one — so mixing a retry row (rich, straight from `select *`) with a new
 row (sparse) made `retry_count` NULL on the new row and Postgres rejected the whole batch with
 `23502`. Never build the upsert dicts per-row-shape.
+
+### Candidate detection & per-region failure (`_find_candidates`, `_process_vod`)
+
+Two ways to enumerate a VOD's songs, chosen per VOD:
+- **`comment_timeline`**: fans leave unofficial per-song timestamps in comments. Each becomes a
+  padded candidate region; `detect_song_span` refines the exact boundary and STT reads just that
+  range. Fast (only candidate regions are downloaded) and carries an artist/title hint, so identify
+  skips the Groq lyric guess.
+- **`full_sweep`** (no timeline): download the whole VOD **part by part** and run
+  `inaSpeechSegmenter` over each part to enumerate *every* music block (`_run_full_sweep`). This
+  replaced a sticker-burst heuristic that collapsed a burst into a single "longest music block" and
+  missed every other song in it — no-timeline VODs were ending up almost entirely skipped as "not a
+  song". Accurate but slow (full download + full segmentation), so it's budgeted (below).
+
+**Partial failure is retryable, not silently lost.** A region that throws is skipped, but
+`retry_reason` makes `_process_vod` raise if *any* region errored — not only when *all* did. The old
+"raise only if nothing succeeded" left a VOD `analyzed` with one span permanently missing (a download
+`IncompleteRead` on one region among many). Reprocessing is idempotent (see `clear_machine_performances`),
+so re-running the whole VOD costs work but loses nothing; `MAX_RETRIES` bounds it. Playlist reads
+(`_parse_playlist`) go through the same retry+backoff as segment fetches (`_read_url`) — an
+`IncompleteRead` on the m3u8 itself was escaping raw and surfacing as a "download-step" failure.
+
+**Sweep budgeting.** `station.sweep_limit` (default 1) caps how many *new* full_sweeps run per
+`daily` invocation so several slow sweeps can't pile into one run (worst during no-timeline backfill).
+Retries always run (priority retry > new) but still consume the budget. A new sweep over budget is
+*deferred*: `_process_vod` returns `{"deferred": True}` before any download and the loop calls
+`db.delete_vod` to drop the freshly-upserted `pending` row — leaving it as an unprocessed candidate
+for next run instead of a `pending` that would burn `retry_count` every selection.
+
+**Length guard + local escape hatch.** A no-timeline VOD longer than
+`station.sweep_max_duration_s` (default 6h) can't finish segmenting inside the hosted runner's hard
+6h job cap, so `daily` fails it fast (seconds, before download) with a message pointing at
+`soopts process <id>` rather than timing out three times. That command
+(`batch.process_single_vod`) runs the same pipeline locally with the guard and budget off — the
+only supported path for such VODs. Raising `sweep_limit`/`sweep_max_duration_s` means bumping
+`daily.yml`'s `timeout-minutes` too (≤360 on hosted runners).
 
 ### VOD selection (`_select_vods` in `batch.py`, `select_targets` in `db.py`)
 
