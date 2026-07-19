@@ -16,7 +16,11 @@ from soopts.batch import (
     narrate_with_llm,
     next_vod_status,
     quality_warning,
+    retry_reason,
     song_link,
+    sweep_allowed,
+    sweep_part_range,
+    sweep_too_long_reason,
     vod_link,
 )
 from soopts.config import Config
@@ -27,6 +31,96 @@ def test_format_summary_basic_counts():
     assert text == "VOD 1건 / 감지 3곡 / 자동매칭 1 / 검수대기 2"
 
 
+
+
+class _FakePart:
+    def __init__(self, offset_s, duration):
+        self.offset_s = offset_s
+        self.duration = duration
+
+
+def test_sweep_part_range_uses_meta_offsets():
+    parts = [_FakePart(0, 3600), _FakePart(3600, 1800)]
+    assert sweep_part_range(0, parts, 5400) == (0.0, 3600.0)
+    assert sweep_part_range(1, parts, 5400) == (3600.0, 1800.0)
+
+
+def test_sweep_part_range_skips_part_without_meta_offset():
+    """m3u8 수 > 메타 파트 수면 오프셋을 모른다 — 0으로 추정하면 그 파트의 곡이 전부
+    틀린 전역 시각으로 DB에 들어가 딥링크가 엉뚱한 데를 가리킨다. 건너뛰는 게 맞다."""
+    parts = [_FakePart(0, 3600)]
+    assert sweep_part_range(1, parts, 3600) is None
+
+
+def test_sweep_part_range_unknown_duration_downloads_whole_playlist():
+    """메타 파싱 실패로 파트가 없고 total_duration=0이면 끝을 아주 크게 잡아야 한다.
+    0을 그대로 쓰면 download_slice가 첫 세그먼트 하나만 골라 6초만 훑고 조용히 끝난다."""
+    offset, end_s = sweep_part_range(0, [], 0)
+    assert offset == 0.0
+    assert end_s > 24 * 3600  # 어떤 실제 VOD보다 길어야 전부 받는다
+
+
+def test_sweep_part_range_single_part_uses_total_duration():
+    assert sweep_part_range(0, [], 7200) == (0.0, 7200.0)
+
+
+def test_sweep_allowed_new_gated_by_budget():
+    # 신규 sweep은 예산 안에서만 허용.
+    assert sweep_allowed(is_new=True, sweep_used=0, sweep_limit=1) is True
+    assert sweep_allowed(is_new=True, sweep_used=1, sweep_limit=1) is False
+
+
+def test_sweep_allowed_retry_always_runs():
+    # 재시도 sweep은 우선순위상 예산과 무관하게 항상 허용.
+    assert sweep_allowed(is_new=False, sweep_used=5, sweep_limit=1) is True
+
+
+def test_sweep_allowed_zero_limit_blocks_new():
+    assert sweep_allowed(is_new=True, sweep_used=0, sweep_limit=0) is False
+    assert sweep_allowed(is_new=False, sweep_used=0, sweep_limit=0) is True
+
+
+def test_sweep_too_long_error_is_runtime_error():
+    """영구 실패 전용 예외지만, 따로 잡지 않는 경로에선 기존 RuntimeError처럼 다뤄져야 한다."""
+    assert issubclass(batch_module.SweepTooLongError, RuntimeError)
+
+
+def test_sweep_too_long_reason_over_limit():
+    reason = sweep_too_long_reason(9 * 3600, 6 * 3600)
+    assert reason is not None
+    assert "sweep 상한" in reason
+    assert "9시간" in reason
+
+
+def test_sweep_too_long_reason_within_limit_is_none():
+    assert sweep_too_long_reason(5 * 3600, 6 * 3600) is None
+    assert sweep_too_long_reason(6 * 3600, 6 * 3600) is None  # 경계는 통과
+
+
+def test_sweep_too_long_reason_disabled_with_zero():
+    # 0이면 가드 비활성 — 아무리 길어도 None.
+    assert sweep_too_long_reason(100 * 3600, 0) is None
+
+
+def test_retry_reason_none_when_no_region_errors():
+    # 실패 구간이 없으면 재시도 사유가 없다 — 정상 종결(analyzed/done).
+    assert retry_reason(5, []) is None
+    assert retry_reason(0, []) is None
+
+
+def test_retry_reason_all_failed():
+    reason = retry_reason(0, ["04:54:08~04:59:18: IncompleteRead(64525 bytes read)"])
+    assert reason is not None
+    assert "전부 실패" in reason
+    assert "IncompleteRead" in reason
+
+
+def test_retry_reason_partial_failure_still_retries():
+    # 일부만 실패해도 그 구간이 영영 유실되지 않도록 재시도 대상이 된다(예전엔 전부 실패해야만 던졌다).
+    reason = retry_reason(19, ["06:16:36~06:21:46: IncompleteRead(49897 bytes read)"])
+    assert reason is not None
+    assert "19곡 성공" in reason
+    assert "1개 구간 실패" in reason
 
 
 def test_next_vod_status_no_songs_detected_is_done():
