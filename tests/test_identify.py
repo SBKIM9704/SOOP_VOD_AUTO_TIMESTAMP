@@ -3,11 +3,14 @@ import pytest
 import soopts.analyzers.identify as identify_module
 from soopts.analyzers.identify import (
     ARTIST_STRONG,
+    CATALOG_PROMPT_MAX,
     MATCH_THRESHOLD,
     CatalogEntry,
     LyricsGuess,
     ScoredEntry,
     _build_disambiguation_shortlist,
+    _catalog_prompt_block,
+    _reasoning_kwargs,
     disambiguate_with_llm,
     guess_from_lyrics,
     identify_song,
@@ -246,3 +249,200 @@ def test_identify_song_resolves_via_catalog_when_song_with_title(monkeypatch):
     result = identify_song("가사...", True, catalog)
     assert result.song_id == "picked"
     assert result.identify_status == "auto_matched"
+
+
+def test_reasoning_kwargs_gpt_oss_gets_low():
+    assert _reasoning_kwargs("openai/gpt-oss-120b") == {"reasoning_effort": "low"}
+
+
+def test_reasoning_kwargs_qwen_gets_none_not_low():
+    # qwen은 "low"를 400으로 거절한다(`must be one of `none` or `default``). 이 분기가
+    # 없으면 SOOPTS_IDENTIFY_MODEL을 바꾼 순간 전 구간이 조용히 실패한다.
+    assert _reasoning_kwargs("qwen/qwen3.6-27b") == {"reasoning_effort": "none"}
+
+
+def test_reasoning_kwargs_unknown_model_omits_param():
+    assert _reasoning_kwargs("meta-llama/llama-4") == {}
+
+
+def test_catalog_prompt_block_lists_titles_and_artists():
+    block = _catalog_prompt_block([
+        CatalogEntry(song_id="a", title="밤편지", artist="아이유"),
+        CatalogEntry(song_id="b", title="아티스트없는곡"),
+    ])
+    assert "- 밤편지 / 아이유" in block
+    assert "- 아티스트없는곡" in block
+
+
+def test_catalog_prompt_block_includes_original_title():
+    # _score_catalog는 original_title로도 채점한다 — 프롬프트에 title만 넣으면 원제가
+    # 영문인 곡에서 LLM이 알아볼 단서를 못 받는다.
+    block = _catalog_prompt_block([
+        CatalogEntry(song_id="a", title="보헤미안 랩소디",
+                     original_title="Bohemian Rhapsody", artist="Queen"),
+    ])
+    assert "- 보헤미안 랩소디 (Bohemian Rhapsody) / Queen" in block
+
+
+def test_catalog_prompt_block_skips_redundant_original_title():
+    block = _catalog_prompt_block([
+        CatalogEntry(song_id="a", title="밤편지", original_title="밤편지"),
+    ])
+    assert block.count("밤편지") == 1
+
+
+class _ModelGoneClient:
+    """첫 모델엔 404를 던지고 두 번째 모델에만 응답하는 fake — 폴백 경로 검증용."""
+
+    def __init__(self, dead_model: str, content: str):
+        self.dead_model = dead_model
+        self.content = content
+        self.models_tried: list[str] = []
+
+    @property
+    def chat(self):
+        client = self
+
+        class _Completions:
+            def create(self, **kwargs):
+                model = kwargs["model"]
+                client.models_tried.append(model)
+                if model == client.dead_model:
+                    raise RuntimeError("404 model_not_found: decommissioned")
+                return _FakeGroqResponse(client.content)
+
+        return type("Chat", (), {"completions": _Completions()})()
+
+
+def test_create_completion_falls_back_when_model_gone(monkeypatch):
+    # preview 모델이 내려가도 파이프라인은 계속 돌아야 한다 — 폴백이 없으면 모든 VOD가
+    # failed로 MAX_RETRIES를 태우고 큐가 밀린다.
+    monkeypatch.setattr(identify_module, "GROQ_MODEL", "qwen/qwen3.6-27b")
+    client = _ModelGoneClient("qwen/qwen3.6-27b", '{"is_song": false}')
+    identify_module._create_completion(client, max_tokens=10, messages=[])
+    assert client.models_tried == ["qwen/qwen3.6-27b", identify_module.FALLBACK_MODEL]
+
+
+def test_create_completion_uses_fallback_reasoning_effort(monkeypatch):
+    # 폴백 모델은 reasoning_effort 요구값이 다르다 — 원래 모델 값을 그대로 물려주면
+    # 폴백까지 400으로 죽어 그물이 찢어진다.
+    monkeypatch.setattr(identify_module, "GROQ_MODEL", "qwen/qwen3.6-27b")
+    seen: list[dict] = []
+
+    class _Client:
+        @property
+        def chat(self):
+            class _Completions:
+                def create(self, **kwargs):
+                    seen.append(kwargs)
+                    if kwargs["model"] == "qwen/qwen3.6-27b":
+                        raise RuntimeError("404 model_not_found")
+                    return _FakeGroqResponse('{"is_song": false}')
+
+            return type("Chat", (), {"completions": _Completions()})()
+
+    identify_module._create_completion(_Client(), max_tokens=10, messages=[])
+    assert seen[0]["reasoning_effort"] == "none"
+    assert seen[1]["reasoning_effort"] == "low"
+
+
+def test_create_completion_does_not_fall_back_on_transient_error(monkeypatch):
+    # 아무 에러에나 폴백하면 429일 때 매 호출이 두 번 나가고 진짜 장애가 숨는다.
+    monkeypatch.setattr(identify_module, "GROQ_MODEL", "qwen/qwen3.6-27b")
+
+    class _RateLimited:
+        @property
+        def chat(self):
+            class _Completions:
+                def create(self, **kwargs):
+                    raise RuntimeError("429 rate_limit_exceeded")
+
+            return type("Chat", (), {"completions": _Completions()})()
+
+    with pytest.raises(RuntimeError, match="429"):
+        identify_module._create_completion(_RateLimited(), max_tokens=10, messages=[])
+
+
+def test_default_model_is_not_gpt_oss():
+    # A/B에서 gpt-oss는 카탈로그를 줘도 못 찾았다. 기본값이 되돌아가면 카탈로그 주입
+    # 자체가 무의미해지므로 고정한다.
+    assert not identify_module.GROQ_MODEL.startswith("openai/gpt-oss")
+    # 기본 모델과 _reasoning_kwargs가 어긋나면 전 구간이 400으로 조용히 죽는다.
+    assert _reasoning_kwargs(identify_module.GROQ_MODEL) != {"reasoning_effort": "low"}
+
+
+def test_catalog_prompt_block_empty_without_catalog():
+    assert _catalog_prompt_block(None) == ""
+    assert _catalog_prompt_block([]) == ""
+
+
+def test_catalog_prompt_block_omitted_entirely_when_over_cap():
+    # 앞에서 잘라내면 하필 정답이 잘려나가도 조용히 오답이 되므로 통째로 생략한다.
+    big = [CatalogEntry(song_id=str(i), title=f"곡{i}") for i in range(CATALOG_PROMPT_MAX + 1)]
+    assert _catalog_prompt_block(big) == ""
+
+
+class _CapturingGroqClient(_FakeGroqClient):
+    """create()에 넘어간 kwargs를 보관해 프롬프트 내용을 검증할 수 있게 한다."""
+
+    def __init__(self, content: str, *, api_key=None):
+        super().__init__(content, api_key=api_key)
+        self.calls: list[dict] = []
+
+    @property
+    def chat(self):
+        client = self
+
+        class _Completions:
+            def create(self, **kwargs):
+                client.calls.append(kwargs)
+                return _FakeGroqResponse(client._content)
+
+        return type("Chat", (), {"completions": _Completions()})()
+
+
+def test_guess_from_lyrics_puts_catalog_into_prompt(monkeypatch):
+    pytest.importorskip("groq")
+    holder: dict[str, _CapturingGroqClient] = {}
+
+    def _make(api_key=None):
+        holder["client"] = _CapturingGroqClient(
+            '{"is_song": true, "title": "밤편지", "artist": "아이유"}'
+        )
+        return holder["client"]
+
+    monkeypatch.setattr("groq.Groq", _make)
+    guess_from_lyrics(
+        "이 정도면 30자는 충분히 넘긴 실제 가사 텍스트입니다 그렇죠",
+        catalog=[CatalogEntry(song_id="a", title="밤편지", artist="아이유")],
+    )
+    prompt = holder["client"].calls[0]["messages"][0]["content"]
+    assert "밤편지" in prompt
+
+
+def test_guess_from_lyrics_without_catalog_has_no_catalog_block(monkeypatch):
+    pytest.importorskip("groq")
+    holder: dict[str, _CapturingGroqClient] = {}
+
+    def _make(api_key=None):
+        holder["client"] = _CapturingGroqClient('{"is_song": false}')
+        return holder["client"]
+
+    monkeypatch.setattr("groq.Groq", _make)
+    guess_from_lyrics("이 정도면 30자는 충분히 넘긴 실제 가사 텍스트입니다 그렇죠")
+    prompt = holder["client"].calls[0]["messages"][0]["content"]
+    assert "부른 적 있는 곡 목록" not in prompt
+
+
+def test_identify_song_threads_catalog_into_guess(monkeypatch):
+    # 카탈로그가 rapidfuzz에만 가고 LLM에는 안 가던 것이 원래 문제였다 — 회귀 방지.
+    seen: dict[str, object] = {}
+
+    def _fake_guess(lyrics, *, catalog=None, api_key=None):
+        seen["catalog"] = catalog
+        return LyricsGuess(is_song=True, title="밤편지", artist="아이유")
+
+    monkeypatch.setattr(identify_module, "guess_from_lyrics", _fake_guess)
+    catalog = [CatalogEntry(song_id="a", title="밤편지", artist="아이유")]
+    identify_song("가사 " * 20, True, catalog)
+    assert seen["catalog"] is catalog
