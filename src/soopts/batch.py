@@ -28,6 +28,26 @@ log = get_logger("batch")
 # 상세 리포트의 각주로만 남긴다(한 배치가 통째로 무너져도 메시지가 폭주하지 않도록).
 REALTIME_ALERT_LIMIT = 3
 
+# STT로 전사할 노래 구간의 최대 길이(초). 16kHz 모노 WAV는 초당 32KB라 이 상한이면 Groq
+# 업로드 한도(25MB) 안쪽이다. 무-타임라인 sweep은 연속 메들리를 한 음악 블록으로 병합해
+# 10분 넘는 구간을 만들 수 있는데, 그대로 올리면 413으로 거절돼 VOD 전체가 재시도를
+# 헛돈다. 가사는 어차피 앞부분만으로 곡을 식별하므로(lyric_chars로 잘림) 상한을 둬도 무해하다.
+STT_MAX_SECONDS = 540.0
+
+# 파트 길이를 모를 때 download_slice에 넘길 '끝' 값. 실제 VOD 길이보다 훨씬 커서 결국
+# 플레이리스트의 마지막 세그먼트까지 전부 받게 된다(download_slice는 있는 세그먼트로 클램프).
+_SWEEP_UNKNOWN_PART_END_S = 1e9
+
+
+class SweepTooLongError(RuntimeError):
+    """무-타임라인 VOD가 러너에서 sweep하기엔 너무 길다 — 재시도해도 결과가 같은 영구 실패.
+
+    일반 구간 실패(네트워크 등)와 달리 다시 돌려도 같은 길이라 결과가 바뀌지 않으므로,
+    호출부가 retry_count를 곧바로 상한으로 올려 큐에서 제외한다. 그러지 않으면 매 런
+    우선순위 슬롯을 차지하며 3번 헛돈다(daily_vod_count=1이면 런 3개가 통째로 낭비된다).
+    RuntimeError를 상속하므로 이 예외를 따로 잡지 않는 경로에서는 기존과 똑같이 다뤄진다.
+    """
+
 
 # --------------------------------------------------------------------------- #
 # 순수 함수 (테스트 대상)
@@ -118,6 +138,74 @@ def next_vod_status(detected: int) -> str:
     """VOD 처리 직후 상태. 감지된 노래가 없으면 검수·업로드할 게 없으니 바로 종결(done),
     있으면 업로드 큐 소진까지 거쳐야 하니 analyzed로 남긴다."""
     return "done" if detected == 0 else "analyzed"
+
+
+def sweep_part_range(
+    idx: int, parts: list, total_duration_s: float
+) -> tuple[float, float] | None:
+    """full_sweep에서 파트 idx의 (전역 오프셋, 다운로드 끝 시각). 오프셋 불명이면 None(=건너뜀).
+
+    - 메타에 파트가 있으면 그 파트의 offset_s/duration을 쓴다.
+    - m3u8 수가 메타 파트 수보다 많아 해당 파트 정보가 없으면 **None**을 준다. 오프셋을 0으로
+      추정하면 그 파트의 곡이 전부 틀린 전역 시각으로 DB에 들어가 딥링크가 엉뚱한 데를
+      가리킨다 — 잘못된 타임스탬프보다 건너뛰고 재시도로 남기는 편이 낫다.
+    - 파트 정보가 아예 없으면(단일 파트/메타 파싱 실패) 오프셋 0에 전체 길이를 쓴다.
+    - 길이를 모르면(메타 파싱 실패 시 total_duration=0) 끝을 아주 크게 잡는다. 0을 그대로
+      넘기면 download_slice의 `s <= end_s` 조건에 첫 세그먼트 하나만 걸려, 예외 없이 6초만
+      훑고 "노래 0곡"으로 끝난다(조용한 데이터 손실).
+    """
+    if parts:
+        if idx >= len(parts):
+            return None
+        offset, pdur = float(parts[idx].offset_s), float(parts[idx].duration)
+    else:
+        offset, pdur = 0.0, float(total_duration_s or 0.0)
+    return offset, (pdur if pdur > 0 else _SWEEP_UNKNOWN_PART_END_S)
+
+
+def sweep_allowed(is_new: bool, sweep_used: int, sweep_limit: int) -> bool:
+    """이번 VOD의 full_sweep(무-타임라인 전체 오디오 처리)을 이번 런에서 실행해도 되는지.
+
+    재시도(is_new=False)는 우선순위상 항상 실행한다 — 이미 큐에 커밋된 작업이고 수도 최대
+    count개다. 신규는 이번 런의 sweep 예산(sweep_limit) 안에서만 실행하고, 초과분은 미룬다.
+    sweep은 전체 다운로드+전체 세그멘테이션이라 길어서, 여러 개가 한 런에 몰리면 러너
+    타임아웃 위험이 커진다(무-타임라인 옛 VOD를 백필할 때 특히).
+    """
+    return (not is_new) or (sweep_used < sweep_limit)
+
+
+def sweep_too_long_reason(total_duration_s: float, max_s: float) -> str | None:
+    """VOD가 sweep 상한보다 길면 실패 사유를, 아니면 None을 반환한다(max_s=0이면 가드 끔).
+
+    무-타임라인 VOD는 전체 세그멘테이션을 하는데, 병적으로 긴 VOD(예: 9시간+)는 어떤
+    러너 timeout 안에도 못 끝나 3번(MAX_RETRIES) 헛 타임아웃하며 큐를 막는다. 다운로드
+    전에 길이만 보고 빠르게 실패시켜 사람에게 알리고 — 시청 경로는 어차피 SOOP 딥링크라,
+    이런 VOD는 timeout 없는 수동 CLI로 처리하면 된다.
+    """
+    if max_s and total_duration_s > max_s:
+        return (
+            f"VOD 길이 {fmt_duration_s(total_duration_s)}가 sweep 상한 "
+            f"{fmt_duration_s(max_s)} 초과 — 러너 sweep 불가(수동 CLI로 처리)"
+        )
+    return None
+
+
+def retry_reason(detected: int, region_errors: list[str]) -> str | None:
+    """구간 실패가 하나라도 있으면 VOD를 재시도 상태로 되돌릴 사유를, 없으면 None을 반환한다.
+
+    예전엔 **전부 실패**했을 때만 예외를 던져 재시도로 넘겼다. 그래서 20곡 중 19곡이
+    성공하고 1곡이 다운로드 실패로 빠지면 VOD는 그대로 analyzed로 종결됐고, 그 1곡은
+    영영 사라졌다(201142227 04:54:08 구간 등 — VOD는 '완료'로 찍혔는데 곡만 유실).
+    재처리는 clear_machine_performances가 confirmed만 남기고 나머지를 다시 만드니
+    손실 없이 멱등하다 — 따라서 실패가 하나라도 남으면 재시도시키는 편이 안전하다.
+    재시도 횟수는 MAX_RETRIES가 상한을 둬, 영영 못 받는 구간이 큐를 막지는 않는다.
+    """
+    if not region_errors:
+        return None
+    example = region_errors[0]
+    if detected == 0:
+        return f"후보 전부 실패 (예: {example})"
+    return f"{detected}곡 성공했으나 {len(region_errors)}개 구간 실패 — 재시도 필요 (예: {example})"
 
 
 def quality_warning(cfg: Config, stats: dict[str, Any]) -> str | None:
@@ -261,6 +349,11 @@ def format_detailed_summary(cfg: Config, ctx: RunContext, stats: dict[str, Any])
             f"\n※ Groq가 '노래 아님'으로 판정해 검수 큐에 올리지 않고 건너뛴 구간: "
             f"{stats['not_song_skipped']}건"
         )
+    if stats.get("sweep_deferred"):
+        lines.append(
+            f"\n※ 이번 런 sweep 예산 초과로 다음 런에 미룬 무-타임라인 VOD: "
+            f"{stats['sweep_deferred']}건"
+        )
     return "\n".join(lines)
 
 
@@ -360,10 +453,21 @@ def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
         "vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0,
         "stt_attempted": 0, "stt_ok": 0, "hint_available": 0, "lyrics_only": 0,
     }
+    sweep_used = 0
     for vod_row in picked:
         title_no = vod_row["soop_title_no"]
+        is_new = (vod_row.get("retry_count") or 0) == 0
+        allow_sweep = sweep_allowed(is_new, sweep_used, cfg.station.sweep_limit)
         try:
-            vod_stats = _process_vod(cfg, vod_row, bj_id, ctx)
+            vod_stats = _process_vod(cfg, vod_row, bj_id, ctx, allow_sweep=allow_sweep)
+            if vod_stats.get("deferred"):
+                # 이번 런 sweep 예산 초과로 미룬 신규 무-타임라인 VOD — pending 행을 지워
+                # 다음 런에 신규로 다시 잡히게 한다(retry_count를 태우지 않는다).
+                db.delete_vod(title_no)
+                stats["sweep_deferred"] = stats.get("sweep_deferred", 0) + 1
+                continue
+            if vod_stats.get("mode") == "full_sweep":
+                sweep_used += 1
             stats["detected"] += vod_stats["detected"]
             stats["auto_matched"] += vod_stats["auto_matched"]
             stats["needs_review"] += vod_stats["needs_review"]
@@ -375,6 +479,11 @@ def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
                 )
             db.mark_vod(title_no, next_vod_status(vod_stats["detected"]))
             _notify_slack(format_vod_result(cfg, title_no, vod_stats))
+        except SweepTooLongError as e:
+            # 재시도해도 같은 결과 — 큐에서 즉시 빼 매 런 슬롯을 낭비하지 않게 한다.
+            log.error("VOD %s sweep 불가(영구): %s", title_no, e)
+            db.mark_vod_unretryable(title_no, str(e)[:500])
+            _notify_slack(format_vod_result(cfg, title_no, {"error": str(e)[:500]}))
         except Exception as e:  # noqa: BLE001
             log.error("VOD %s 처리 실패: %s", title_no, e)
             db.mark_vod(title_no, "failed", error=str(e)[:500])
@@ -394,15 +503,72 @@ def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
     return {**stats, "text": deterministic}
 
 
+def process_single_vod(cfg: Config, *, title_no: str, bj_id: str) -> dict[str, Any]:
+    """단일 VOD를 배치 파이프라인으로 처리해 DB(performances/vods)에 기록한다 — 로컬 수동 실행용.
+
+    daily의 러너 전용 제약을 우회한다: sweep 예산과 길이 가드를 끄고(allow_sweep=True,
+    enforce_guard=False) timeout 없는 PC에서 끝까지 돌린다. 댓글 타임라인 없는 초장시간
+    VOD처럼 GitHub 러너로는 못 돌리는 걸 처리하는 탈출구다. 산출물·상태는 daily와 똑같이
+    Supabase에 남으므로 시청 딥링크가 동일하게 생성된다(수동 CLI의 songs/clips가 로컬
+    파일만 남기는 것과 달리, 이 경로는 DB에 기록한다).
+    """
+    from soopts import db
+    from soopts.collector.meta import fetch_meta
+
+    work = work_paths(cfg.work_root, title_no).ensure()
+    existing = db.fetch_existing([title_no]).get(title_no)
+    if existing:
+        vod_row = existing  # 가드로 failed 처리된 초장시간 VOD는 보통 이미 행이 있다
+    else:
+        meta = fetch_meta(cfg, title_no, work)
+        vod_row = db.upsert_pending([{
+            "soop_title_no": title_no,
+            "title": meta.title,
+            "broadcast_date": None,
+            "duration_s": meta.total_duration,
+            "retry_count": 0,
+        }])[0]
+
+    ctx = RunContext()
+    stats: dict[str, Any] = {
+        "vods": 1, "detected": 0, "auto_matched": 0, "needs_review": 0,
+        "stt_attempted": 0, "stt_ok": 0, "hint_available": 0, "lyrics_only": 0,
+    }
+    try:
+        vod_stats = _process_vod(
+            cfg, vod_row, bj_id, ctx, allow_sweep=True, enforce_guard=False
+        )
+        for k in ("detected", "auto_matched", "needs_review",
+                  "stt_attempted", "stt_ok", "hint_available", "lyrics_only"):
+            stats[k] += vod_stats.get(k, 0)
+        if vod_stats.get("not_song_skipped"):
+            stats["not_song_skipped"] = vod_stats["not_song_skipped"]
+        db.mark_vod(title_no, next_vod_status(vod_stats["detected"]))
+        _notify_slack(format_vod_result(cfg, title_no, vod_stats))
+    except Exception as e:  # noqa: BLE001
+        log.error("VOD %s 처리 실패: %s", title_no, e)
+        db.mark_vod(title_no, "failed", error=str(e)[:500])
+        _notify_slack(format_vod_result(cfg, title_no, {"error": str(e)[:500]}))
+
+    deterministic = format_detailed_summary(cfg, ctx, stats)
+    log.info("process 완료: %s", deterministic)
+    return {**stats, "text": deterministic}
+
+
 def _find_candidates(
-    cfg: Config, bj_id: str, title_no: str, stickers: list[float], meta
+    cfg: Config, bj_id: str, title_no: str
 ) -> tuple[list[tuple], str, str]:
-    """(candidates, mode, detail) — 댓글 타임라인이 있으면 그걸 우선 쓰고, 없으면 스티커 감지로 폴백.
+    """(candidates, mode, detail) — 댓글 타임라인이 있으면 그걸 우선 쓰고, 없으면 전체 오디오 sweep으로 폴백.
 
     댓글 타임라인은 팬이 자원해서 남긴 비공식 타임스탬프라 정확한 노래 길이를 모르니
     ds/de를 넉넉히 잡아 뒤에서 inaSpeechSegmenter가 정밀 경계를 찾게 한다. hint가 있으면
     이미 아티스트/제목이 확정된 것이므로 이후 identify 단계에서 Claude 가사 추측을 건너뛴다.
-    mode는 "comment_timeline"|"sticker_burst", detail은 어느 쪽을 왜 썼는지(상세 리포트용).
+
+    타임라인이 없으면 mode="full_sweep"로 신호만 보내고 후보는 비운다 — 후보 열거는
+    _run_full_sweep이 전체 오디오를 파트별로 받아 음악 세그멘테이션으로 직접 한다. 예전엔
+    여기서 스티커 버스트로 후보를 만들었으나, 스티커가 잡담/리액션에도 흩뿌려지면 11~25분짜리
+    거대 구간으로 뭉쳐지고 그 안에서 최장 음악블록 1개만 잡혀 곡을 통째로 놓쳤다(무-타임라인
+    VOD가 거의 전부 '노래 아님'으로 스킵되던 원인). mode는 "comment_timeline"|"full_sweep".
     """
     from soopts.analyzers.comment_timeline import extract_song_timeline
     from soopts.collector.comments import fetch_comments
@@ -412,7 +578,7 @@ def _find_candidates(
         comments = fetch_comments(cfg, bj_id, title_no)
         timeline = extract_song_timeline(comments)
     except Exception as ex:  # noqa: BLE001
-        log.warning("VOD %s 댓글 조회/추출 실패 — 스티커 감지로 폴백: %s", title_no, ex)
+        log.warning("VOD %s 댓글 조회/추출 실패 — 전체 오디오 sweep으로 폴백: %s", title_no, ex)
         timeline = []
         comment_failed = ex
 
@@ -422,45 +588,216 @@ def _find_candidates(
         candidates = comment_candidates(timeline, c.pad_before_s, c.pad_after_s)
         return candidates, "comment_timeline", f"댓글 타임라인 (노래 {len(timeline)}곡 파싱됨)"
 
-    from soopts.analyzers.audio_analyzer import sticker_burst_regions
+    detail = (
+        f"댓글 조회/추출 실패({comment_failed}) — 전체 오디오 음악 sweep"
+        if comment_failed is not None
+        else "댓글에 노래 타임라인 없음 — 전체 오디오 음악 sweep"
+    )
+    return [], "full_sweep", detail
+
+
+def _process_region(
+    cfg: Config,
+    vod_row: dict[str, Any],
+    title_no: str,
+    *,
+    song,
+    hint,
+    media_path: str,
+    local_start: float,
+    local_end: float,
+    stt_model,
+    catalog,
+    stats: dict[str, Any],
+    ctx: RunContext,
+    region_t0: float,
+    clip_dur: float | None,
+    label: str,
+) -> None:
+    """구간 하나의 공통 tail: STT 전사 → 곡 식별 → DB 기록 → stats/이벤트 갱신.
+
+    댓글 타임라인 경로와 전체 sweep 경로가 이 함수를 공유한다. media_path의
+    [local_start, local_end] 만 잘라 전사한다(파트 전체/후보 구간 전체가 넘어와도 노래
+    구간만 본다). 예외는 잡지 않는다 — 호출부가 region_errors에 기록하고 재시도로 넘긴다.
+    """
+    from soopts import db
+    from soopts.analyzers.identify import identify_song, resolve_song_match
+    from soopts.analyzers.stt import _transcribe_best
+
+    stt_t0 = time.monotonic()
+    transcribe_span_s = min(local_end - local_start, STT_MAX_SECONDS)  # 전사할 오디오 길이
+    text, _lang = _transcribe_best(
+        stt_model, media_path, cfg, start=local_start, dur=transcribe_span_s
+    )
+    stt_dur = time.monotonic() - stt_t0  # 전사에 걸린 실제 시간(리포트용)
+    song.lyrics = text[: cfg.stt.lyric_chars]
+    # 전사 성공률은 조용한 장애를 잡는 유일한 신호다 — Groq가 413으로 전량 거절하던
+    # 시절에도 실행은 계속 "성공"으로 끝났고 곡만 검수 큐에 쌓였다.
+    stats["stt_attempted"] += 1
+    if song.lyrics.strip():
+        stats["stt_ok"] += 1
+
+    stats["hint_available" if hint is not None else "lyrics_only"] += 1
+    if hint is not None:
+        # 댓글에 이미 아티스트/제목이 있으니 Claude 가사 추측을 건너뛰고 바로 매칭한다.
+        result = resolve_song_match(hint.title, hint.artist or "", song.lyrics, True, catalog)
+    elif song.lyrics:
+        result = identify_song(song.lyrics, song.song_likely, catalog)
+        if result is None:
+            # Groq가 확정적으로 "노래 아님"으로 판단 — DB 기록 없이 완전히 건너뛴다
+            # (신곡/새 status를 만들지 않는다).
+            log.info("VOD %s 구간 %s — Groq 판정: 노래 아님, 건너뜀", title_no, label)
+            stats["not_song_skipped"] = stats.get("not_song_skipped", 0) + 1
+            ctx.record(TimelineEvent(
+                kind="region", title_no=title_no, label=label, ok=None,
+                detail="노래 아님(Groq) — 건너뜀",
+                duration_s=time.monotonic() - region_t0,
+                clip_duration_s=clip_dur, stt_duration_s=stt_dur,
+            ))
+            return
+    else:
+        result = None
+
+    db.insert_performances(vod_row["id"], [song], [result])
+    stats["detected"] += 1
+    if result and result.identify_status == "auto_matched":
+        stats["auto_matched"] += 1
+    else:
+        stats["needs_review"] += 1
+    ctx.record(TimelineEvent(
+        kind="region", title_no=title_no, label=label, ok=True,
+        detail=(result.title_guess if result else None),
+        duration_s=time.monotonic() - region_t0,
+        clip_duration_s=clip_dur, stt_duration_s=stt_dur,
+    ))
+
+
+def _run_full_sweep(
+    cfg: Config,
+    vod_row: dict[str, Any],
+    title_no: str,
+    meta,
+    m3u8s: list[str],
+    parts: list,
+    work,
+    stickers: list[float],
+    stt_model,
+    catalog,
+    stats: dict[str, Any],
+    ctx: RunContext,
+) -> None:
+    """무-타임라인 폴백: 전체 오디오를 파트별로 받아 inaSpeechSegmenter로 노래를 전부 열거한다.
+
+    댓글 힌트가 없으니 재현율을 위해 파트 전체를 최저 화질(오디오만 쓰므로 무방)로 받아
+    음악 구간을 하나도 빠뜨리지 않고 뽑는다 — 스티커 버스트로 대략 위치만 잡고 그 안에서
+    최장 음악블록 1개만 취하던 예전 방식은 한 버스트에 여러 곡이 있으면 나머지를 통째로
+    놓쳤다(무-타임라인 VOD가 거의 전부 '노래 아님'으로 스킵되던 원인). 느리지만
+    (전체 다운로드+전체 세그멘테이션) 무-타임라인 VOD는 드물고 여기선 정확도가 우선이다.
+
+    파트 하나의 다운로드/세그멘테이션 실패는 그 파트만 건너뛰되 region_errors에 남긴다 —
+    그 파트의 곡을 통째로 잃으므로 VOD를 재시도 대상으로 만들어야 한다.
+    """
+    from soopts.analyzers.audio_analyzer import (
+        _segment,
+        merge_intervals,
+        music_intervals,
+        sticker_rate,
+    )
+    from soopts.collector.media import download_slice
+    from soopts.models import Song
+    from soopts.output import fmt_hms
 
     a = cfg.audio
-    regions = sticker_burst_regions(
-        stickers, bucket_s=a.sticker_bucket_s, window_buckets=a.sticker_window_buckets,
-        min_per_window=a.sticker_min_per_window, pad_before_s=a.sticker_pad_before_s,
-        pad_after_s=a.sticker_pad_after_s, skip_opening_s=a.skip_opening_s,
-        total_s=meta.total_duration,
-    )
-    log.info("VOD %s 노래 후보 %d구간(스티커 감지)", title_no, len(regions))
-    candidates = [
-        (max(0.0, s - cfg.clip.dl_pad_before_s), e + cfg.clip.dl_pad_after_s, None)
-        for s, e in regions
-    ]
-    detail = (
-        f"댓글 조회/추출 실패({comment_failed}) — 스티커 감지 {len(regions)}구간"
-        if comment_failed is not None
-        else f"댓글에 노래 타임라인 없음 — 스티커 감지 {len(regions)}구간"
-    )
-    return candidates, "sticker_burst", detail
+    if parts and len(m3u8s) != len(parts):
+        log.warning(
+            "VOD %s m3u8 파트 수(%d) != 메타 파트 수(%d) — 오프셋 매핑 불가한 파트는 건너뛴다",
+            title_no, len(m3u8s), len(parts),
+        )
+    for idx, m3u8 in enumerate(m3u8s):
+        part_label = f"파트{idx}"
+        part_range = sweep_part_range(idx, parts, meta.total_duration)
+        if part_range is None:
+            log.warning("VOD %s %s 메타 오프셋 없음 — 건너뜀", title_no, part_label)
+            stats["region_errors"].append(f"{part_label}: 메타 파트 정보 없음(오프셋 불명)")
+            continue
+        offset, end_s = part_range
+        media = work.clips_dir / f"part_{idx}.mp4"
+        part_t0 = time.monotonic()
+        try:
+            if not media.exists():
+                download_slice(m3u8, 0.0, end_s, media, workers=cfg.collector.segment_workers)
+            seg = _segment(str(media), a.vad_engine)
+        except Exception as ex:  # noqa: BLE001
+            log.warning("VOD %s %s 다운로드/세그멘테이션 실패: %s", title_no, part_label, ex)
+            stats["region_errors"].append(f"{part_label}: {ex}")
+            ctx.record(TimelineEvent(
+                kind="region", title_no=title_no, label=part_label, ok=False,
+                detail=f"전체 sweep: {type(ex).__name__}: {ex}",
+                duration_s=time.monotonic() - part_t0,
+            ))
+            ctx.alert(format_region_failure_alert(cfg, title_no, part_label, "전체 sweep", ex))
+            continue
+
+        intervals = merge_intervals(music_intervals(seg), a.merge_gap_s, a.min_music_s)
+        log.info("VOD %s %s 음악 구간 %d개", title_no, part_label, len(intervals))
+        for ls, le in intervals:
+            g_start, g_end = offset + ls, offset + le
+            if g_start < a.skip_opening_s or (le - ls) < cfg.clip.min_song_s:
+                continue
+            label = f"{fmt_hms(int(g_start))}~{fmt_hms(int(g_end))}"
+            region_t0 = time.monotonic()
+            try:
+                rate = sticker_rate((g_start, g_end), stickers)
+                song = Song(
+                    t=int(g_start), end=int(g_end), duration=int(le - ls),
+                    sticker_rate=round(rate, 1),
+                    song_likely=rate >= a.sticker_rate_strong,
+                    lyrics="",
+                )
+                _process_region(
+                    cfg, vod_row, title_no, song=song, hint=None,
+                    media_path=str(media), local_start=ls, local_end=le,
+                    stt_model=stt_model, catalog=catalog, stats=stats, ctx=ctx,
+                    region_t0=region_t0, clip_dur=None, label=label,
+                )
+            except Exception as ex:  # noqa: BLE001
+                log.warning("VOD %s 구간 %s 실패: %s", title_no, label, ex)
+                stats["region_errors"].append(f"{label}: {ex}")
+                ctx.record(TimelineEvent(
+                    kind="region", title_no=title_no, label=label, ok=False,
+                    detail=f"STT/식별: {type(ex).__name__}: {ex}",
+                    duration_s=time.monotonic() - region_t0,
+                ))
+                ctx.alert(format_region_failure_alert(cfg, title_no, label, "STT/식별", ex))
 
 
 def _process_vod(
-    cfg: Config, vod_row: dict[str, Any], bj_id: str, ctx: RunContext
+    cfg: Config, vod_row: dict[str, Any], bj_id: str, ctx: RunContext,
+    *, allow_sweep: bool = True, enforce_guard: bool = True,
 ) -> dict[str, Any]:
-    """collect → 노래 구간 후보(댓글 타임라인 우선, 없으면 스티커 감지) → 구간별로 하나씩
-    (1080p 정밀 클립+STT+식별+DB 기록).
+    """collect → 노래 구간 후보 → 구간별로 STT+식별+DB 기록.
+
+    후보 감지는 두 갈래다: 댓글 타임라인이 있으면 그 시각별로 후보 구간을 받아
+    detect_song_span으로 경계를 다듬고(comment_timeline), 없으면 전체 오디오를 파트별로
+    받아 음악 세그멘테이션으로 곡을 전부 열거한다(full_sweep, _run_full_sweep).
+
+    allow_sweep=False면 full_sweep으로 판명된 VOD를 처리하지 않고 곧바로
+    {"deferred": True}로 되돌린다(무거운 다운로드 전에) — 이번 런의 sweep 예산을 넘긴 경우다.
+    호출부가 pending 행을 지워 다음 런에 미룬다. 반환 stats["mode"]로 어느 갈래였는지 알린다.
+
+    enforce_guard=False면 sweep 길이 가드를 끈다 — timeout 없는 로컬 수동 실행
+    (process_single_vod)에서 초장시간 무-타임라인 VOD를 끝까지 처리하기 위한 탈출구다.
 
     구간 하나의 실패는 그 구간만 건너뛰고 나머지는 계속 진행한다(이전엔 VOD 전체를
-    실패 처리해 이미 성공한 구간까지 버렸다 — VOD 201651295에서 실제로 이렇게 30분
-    분량 작업이 통째로 날아간 사례가 있어 구간 단위로 바꿨다). 다만 후보 구간이
-    있었는데 전부 실패하면(예: 네트워크 장애) 재시도 대상이 되도록 예외를 던진다 —
-    그렇지 않으면 next_vod_status가 이걸 "노래 없음"과 구분 못 하고 done으로
-    잘못 종결시킨다. ctx에는 실시간 실패 알림 예산과 크로놀로지컬 이벤트를 기록한다.
+    실패 처리해 이미 성공한 구간까지 버렸다). 다만 실패가 하나라도 남으면 — 전부 실패든
+    일부 실패든 — 재시도 대상이 되도록 예외를 던진다(retry_reason). 예전엔 전부 실패했을
+    때만 던져, 일부만 실패하면 그 구간이 영영 유실됐다. 재처리는 멱등하므로(성공분은
+    clear_machine_performances가 지우고 다시 만든다) 재시도에 손실이 없다.
+    ctx에는 실시간 실패 알림 예산과 크로놀로지컬 이벤트를 기록한다.
     """
     from soopts import db
     from soopts.analyzers.audio_analyzer import sticker_rate
-    from soopts.analyzers.identify import identify_song, resolve_song_match
-    from soopts.analyzers.stt import _load_model, _transcribe_best
+    from soopts.analyzers.stt import _load_model
     from soopts.collector.chat import fetch_chat
     from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
     from soopts.collector.meta import fetch_meta
@@ -471,6 +808,34 @@ def _process_vod(
     title_no = vod_row["soop_title_no"]
     work = work_paths(cfg.work_root, title_no).ensure()
     meta = fetch_meta(cfg, title_no, work)
+
+    # 감지 갈래(댓글 타임라인 vs 전체 sweep)를 먼저 정한다 — sweep 예산 초과 시 무거운
+    # 다운로드/세그멘테이션 전에 미루기 위해, 채팅 수집·기계행 정리보다 앞서 판정한다.
+    detect_t0 = time.monotonic()
+    candidates, mode, detail = _find_candidates(cfg, bj_id, title_no)
+    if mode == "full_sweep":
+        # 예산보다 먼저 길이 가드를 본다 — 초장시간 VOD는 미뤄봐야 다음 런에도 못 하므로
+        # (defer→재선정 무한루프) 바로 실패시켜 사람에게 넘긴다. 로컬 수동 실행은
+        # enforce_guard=False로 이 가드를 끄고 끝까지 처리한다.
+        too_long = (
+            sweep_too_long_reason(
+                float(meta.total_duration or 0.0), cfg.station.sweep_max_duration_s
+            )
+            if enforce_guard
+            else None
+        )
+        if too_long:
+            raise SweepTooLongError(
+                f"{too_long} — 로컬에서 `soopts process {title_no}` 로 처리하세요"
+            )
+        if not allow_sweep:
+            log.info("VOD %s 무-타임라인이나 이번 런 sweep 예산 초과 — 다음 런으로 미룸", title_no)
+            return {"deferred": True, "mode": mode}
+    ctx.record(TimelineEvent(
+        kind="detection", title_no=title_no, detail=detail,
+        duration_s=time.monotonic() - detect_t0,
+    ))
+
     fetch_chat(cfg, title_no, meta, work)
 
     # 재처리면 이전 실행이 남긴 기계 생성 행을 먼저 치운다(사람 확정분은 유지).
@@ -479,124 +844,73 @@ def _process_vod(
         log.info("VOD %s 재처리 — 기존 기계 생성 %d건 정리", title_no, cleared)
 
     stickers = [float(m.t) for m in read_chat_jsonl(work.chat) if m.kind == "ogq"]
-    detect_t0 = time.monotonic()
-    candidates, mode, detail = _find_candidates(cfg, bj_id, title_no, stickers, meta)
-    ctx.record(TimelineEvent(
-        kind="detection", title_no=title_no, detail=detail,
-        duration_s=time.monotonic() - detect_t0,
-    ))
     stats: dict[str, Any] = {
         "detected": 0, "auto_matched": 0, "needs_review": 0, "region_errors": [],
         "stt_attempted": 0, "stt_ok": 0, "hint_available": 0, "lyrics_only": 0,
+        "mode": mode,
     }
-    if not candidates:
-        return stats
 
     m3u8s = resolve_m3u8_list(title_no, cfg.clip.quality)
     parts = meta.parts
     work.clips_dir.mkdir(parents=True, exist_ok=True)
     catalog = db.load_song_catalog()
-    stt_model = None
+    stt_model = _load_model(cfg)
 
-    for ds, de, hint in candidates:
-        label = f"{fmt_hms(int(ds))}~{fmt_hms(int(de))}"
-        region_t0 = time.monotonic()
-        step = "구간 매핑"
-        clip_dur: float | None = None
-        stt_dur: float | None = None
-        try:
-            m3u8, ls, le = map_to_part(ds, de, parts, m3u8s)
-            if m3u8 is None:
-                log.warning("VOD %s 구간 %s 파트 매핑 실패 — 건너뜀", title_no, label)
-                continue
-            step = "다운로드"
-            raw = work.clips_dir / f"region_{int(ds)}.mp4"
-            if not raw.exists():
-                download_slice(m3u8, ls, le, raw, workers=cfg.collector.segment_workers)
-            step = "경계 탐지"
-            span = detect_song_span(cfg, str(raw), ds, de, media_offset=ds)
-            if span is None:
-                continue
-            clip, local_start, local_end = span
-            clip_dur = time.monotonic() - region_t0
-
-            step = "STT 전사"
-            stt_t0 = time.monotonic()
-            if stt_model is None:
-                stt_model = _load_model(cfg)
-            # 노래 구간만 잘라 전사한다 — raw는 앞뒤 패딩이 붙은 후보 구간 전체다.
-            text, _lang = _transcribe_best(
-                stt_model, str(raw), cfg, start=local_start, dur=local_end - local_start
-            )
-            stt_dur = time.monotonic() - stt_t0
-            lyrics = text[: cfg.stt.lyric_chars]
-            # 전사 성공률은 조용한 장애를 잡는 유일한 신호다 — Groq가 413으로 전량
-            # 거절하던 시절에도 실행은 계속 "성공"으로 끝났고 곡만 검수 큐에 쌓였다.
-            stats["stt_attempted"] += 1
-            if lyrics.strip():
-                stats["stt_ok"] += 1
-            rate = sticker_rate((clip.t, clip.end), stickers)
-            song = Song(
-                t=clip.t, end=clip.end, duration=clip.duration,
-                sticker_rate=round(rate, 1),
-                song_likely=(hint is not None) or (rate >= cfg.audio.sticker_rate_strong),
-                lyrics=lyrics,
-            )
-
-            step = "곡 식별"
-            stats["hint_available" if hint is not None else "lyrics_only"] += 1
-            if hint is not None:
-                # 댓글에 이미 아티스트/제목이 있으니 Claude 가사 추측을 건너뛰고 바로 매칭한다.
-                result = resolve_song_match(
-                    hint.title, hint.artist or "", song.lyrics, True, catalog
-                )
-            elif song.lyrics:
-                result = identify_song(song.lyrics, song.song_likely, catalog)
-                if result is None:
-                    # Groq가 확정적으로 "노래 아님"으로 판단 — DB 기록 없이 완전히 건너뛴다
-                    # (clip is None과 같은 선상 — 신곡/새 status를 만들지 않는다).
-                    log.info("VOD %s 구간 %s — Groq 판정: 노래 아님, 건너뜀", title_no, label)
-                    stats["not_song_skipped"] = stats.get("not_song_skipped", 0) + 1
-                    ctx.record(TimelineEvent(
-                        kind="region", title_no=title_no, label=label, ok=None,
-                        detail="노래 아님(Groq) — 건너뜀",
-                        duration_s=time.monotonic() - region_t0,
-                        clip_duration_s=clip_dur, stt_duration_s=stt_dur,
-                    ))
-                    continue
-            else:
-                result = None
-
-            step = "DB 기록"
-            db.insert_performances(vod_row["id"], [song], [result])
-
-            stats["detected"] += 1
-            if result and result.identify_status == "auto_matched":
-                stats["auto_matched"] += 1
-            else:
-                stats["needs_review"] += 1
-            ctx.record(TimelineEvent(
-                kind="region", title_no=title_no, label=label, ok=True,
-                detail=(result.title_guess if result else None),
-                duration_s=time.monotonic() - region_t0,
-                clip_duration_s=clip_dur, stt_duration_s=stt_dur,
-            ))
-        except Exception as ex:  # noqa: BLE001
-            log.warning("VOD %s 구간 %s [%s] 실패: %s", title_no, label, step, ex)
-            stats["region_errors"].append(f"{label}: {ex}")
-            ctx.record(TimelineEvent(
-                kind="region", title_no=title_no, label=label, ok=False,
-                detail=f"{step}: {type(ex).__name__}: {ex}",
-                duration_s=time.monotonic() - region_t0,
-                clip_duration_s=clip_dur, stt_duration_s=stt_dur,
-            ))
-            ctx.alert(format_region_failure_alert(cfg, title_no, label, step, ex))
-            continue
-
-    if stats["detected"] == 0 and stats["region_errors"]:
-        raise RuntimeError(
-            f"후보 {len(candidates)}구간 전부 실패 (예: {stats['region_errors'][0]})"
+    if mode == "full_sweep":
+        _run_full_sweep(
+            cfg, vod_row, title_no, meta, m3u8s, parts, work,
+            stickers, stt_model, catalog, stats, ctx,
         )
+    else:
+        for ds, de, hint in candidates:
+            label = f"{fmt_hms(int(ds))}~{fmt_hms(int(de))}"
+            region_t0 = time.monotonic()
+            step = "구간 매핑"
+            clip_dur: float | None = None
+            try:
+                m3u8, ls, le = map_to_part(ds, de, parts, m3u8s)
+                if m3u8 is None:
+                    log.warning("VOD %s 구간 %s 파트 매핑 실패 — 건너뜀", title_no, label)
+                    continue
+                step = "다운로드"
+                raw = work.clips_dir / f"region_{int(ds)}.mp4"
+                if not raw.exists():
+                    download_slice(m3u8, ls, le, raw, workers=cfg.collector.segment_workers)
+                step = "경계 탐지"
+                span = detect_song_span(cfg, str(raw), ds, de, media_offset=ds)
+                if span is None:
+                    continue
+                clip, local_start, local_end = span
+                clip_dur = time.monotonic() - region_t0
+                rate = sticker_rate((clip.t, clip.end), stickers)
+                song = Song(
+                    t=clip.t, end=clip.end, duration=clip.duration,
+                    sticker_rate=round(rate, 1),
+                    song_likely=(hint is not None) or (rate >= cfg.audio.sticker_rate_strong),
+                    lyrics="",
+                )
+                step = "STT/식별"
+                _process_region(
+                    cfg, vod_row, title_no, song=song, hint=hint,
+                    media_path=str(raw), local_start=local_start, local_end=local_end,
+                    stt_model=stt_model, catalog=catalog, stats=stats, ctx=ctx,
+                    region_t0=region_t0, clip_dur=clip_dur, label=label,
+                )
+            except Exception as ex:  # noqa: BLE001
+                log.warning("VOD %s 구간 %s [%s] 실패: %s", title_no, label, step, ex)
+                stats["region_errors"].append(f"{label}: {ex}")
+                ctx.record(TimelineEvent(
+                    kind="region", title_no=title_no, label=label, ok=False,
+                    detail=f"{step}: {type(ex).__name__}: {ex}",
+                    duration_s=time.monotonic() - region_t0,
+                    clip_duration_s=clip_dur,
+                ))
+                ctx.alert(format_region_failure_alert(cfg, title_no, label, step, ex))
+                continue
+
+    reason = retry_reason(stats["detected"], stats["region_errors"])
+    if reason:
+        raise RuntimeError(reason)
     return stats
 
 

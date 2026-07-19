@@ -145,6 +145,28 @@ def cmd_daily(args) -> int:
     return 0
 
 
+def cmd_process(args) -> int:
+    """단일 VOD를 배치 파이프라인으로 로컬 처리 후 DB 기록 — daily의 러너 제약 우회.
+
+    댓글 타임라인 없는 초장시간 VOD는 daily의 sweep 길이 가드에 걸려 러너에서 실패
+    처리된다(어떤 timeout에도 세그멘테이션이 안 끝나므로). 그런 VOD를 timeout 없는 PC에서
+    이 명령으로 끝까지 처리한다. daily와 동일하게 Supabase에 기록해 딥링크가 생성된다.
+    필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GROQ_API_KEY (SLACK_WEBHOOK_URL 선택).
+    """
+    cfg = load_config(
+        Path(args.config) if args.config else None,
+        work_root=Path(args.work_root) if args.work_root else None,
+    )
+    from soopts import batch
+
+    vod_id = extract_vod_id(args.vod)
+    result = batch.process_single_vod(
+        cfg, title_no=vod_id, bj_id=args.bj or cfg.station.bj_id
+    )
+    print(result["text"])
+    return 0
+
+
 def cmd_fetch(args) -> int:
     cfg, vod_id, work = _ctx(args)
     from soopts.collector.media import download_audio_full
@@ -275,6 +297,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_daily)
 
 
+
+    sp = sub.add_parser(
+        "process",
+        help="단일 VOD를 배치 파이프라인으로 로컬 처리 + DB 기록 "
+             "(러너 못 돌리는 초장시간 무-타임라인 VOD용)",
+    )
+    add_vod(sp)
+    sp.add_argument("--bj", help="스테이션 bj_id(기본: soopts.toml [station] bj_id)")
+    sp.set_defaults(func=cmd_process)
 
     sp = sub.add_parser("fetch", help="yt-dlp로 전체 오디오 다운로드")
     add_vod(sp)

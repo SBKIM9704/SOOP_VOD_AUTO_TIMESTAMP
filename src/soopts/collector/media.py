@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 import subprocess
+import time
 import urllib.request
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -102,6 +103,34 @@ def _norm_url(url_or_id: str) -> str:
 
 _FETCH_RETRIES = 3
 _MIN_SEGMENT_BYTES = 512  # 이보다 작으면 명백히 잘린/빈 응답 — 재시도 대상
+_RETRY_BACKOFF_S = 0.5  # 재시도 사이 지수 백오프의 기준값(0.5→1.0→…) — 순간 장애에 여유를 준다
+
+
+def _read_url(url: str, *, timeout: float, min_bytes: int) -> bytes:
+    """URL 하나를 재시도+지수 백오프로 받는다. 세그먼트/플레이리스트 공용 관문.
+
+    실측 사례: 서버가 Content-Length 없이 응답하면 연결이 일찍 끊겨도 urllib이 예외 없이
+    짧은 데이터를 그대로 반환해, 오디오가 티 안 나게 깨진 채로 넘어간 적이 있다(같은 VOD의
+    다른 구간에서는 반대로 IncompleteRead가 터졌다 — 서버 응답 형태가 요청마다 다를 수
+    있다는 뜻). 그래서 예외뿐 아니라 비정상적으로 작은 응답(min_bytes 미만)도 재시도한다.
+
+    플레이리스트(m3u8) 읽기도 이 함수를 거친다 — 긴 멀티파트 VOD의 큰 플레이리스트가
+    IncompleteRead로 잘려 재시도 없이 그대로 예외를 뱉던 게 '다운로드 단계 실패'의 원인이었다.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _FETCH_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                data = r.read()
+            if len(data) < min_bytes:
+                raise RuntimeError(f"응답이 비정상적으로 작음({len(data)}B): {url}")
+            return data
+        except Exception as ex:  # noqa: BLE001
+            last_exc = ex
+            log.warning("요청 실패(%d/%d) — 재시도: %s (%s)", attempt, _FETCH_RETRIES, url, ex)
+            if attempt < _FETCH_RETRIES:
+                time.sleep(_RETRY_BACKOFF_S * (2 ** (attempt - 1)))
+    raise RuntimeError(f"요청 반복 실패: {url}") from last_exc
 
 
 def _write_segments(fh, urls: list[str], workers: int) -> None:
@@ -132,30 +161,13 @@ def _write_segments(fh, urls: list[str], workers: int) -> None:
 
 
 def _fetch(url: str) -> bytes:
-    """세그먼트 하나를 받는다 — 실측 사례: 서버가 Content-Length 없이 응답하면 연결이
-    일찍 끊겨도 urllib이 예외 없이 짧은 데이터를 그대로 반환해, 오디오가 티 안 나게
-    깨진 채로 넘어간 적이 있다(같은 VOD의 다른 구간에서는 반대로 IncompleteRead가
-    터졌었다 — 서버 응답 형태가 세그먼트마다 다를 수 있다는 뜻). 그래서 예외뿐 아니라
-    비정상적으로 작은 응답도 재시도 대상으로 잡는다.
-    """
-    last_exc: Exception | None = None
-    for attempt in range(1, _FETCH_RETRIES + 1):
-        try:
-            with urllib.request.urlopen(url, timeout=30) as r:
-                data = r.read()
-            if len(data) < _MIN_SEGMENT_BYTES:
-                raise RuntimeError(f"세그먼트 응답이 비정상적으로 작음({len(data)}B): {url}")
-            return data
-        except Exception as ex:  # noqa: BLE001
-            last_exc = ex
-            log.warning("세그먼트 요청 실패(%d/%d) — 재시도: %s (%s)", attempt, _FETCH_RETRIES, url, ex)
-    raise RuntimeError(f"세그먼트 요청 반복 실패: {url}") from last_exc
+    """세그먼트 하나를 받는다(재시도+백오프는 _read_url이 담당)."""
+    return _read_url(url, timeout=30, min_bytes=_MIN_SEGMENT_BYTES)
 
 
 def _parse_playlist(m3u8_url: str) -> tuple[str, str, list[float], list[str]]:
     """m3u8 → (base_url, init_uri, 세그먼트별 누적시작초, 세그먼트 URI)."""
-    with urllib.request.urlopen(m3u8_url, timeout=15) as r:
-        text = r.read().decode("utf-8", "replace")
+    text = _read_url(m3u8_url, timeout=15, min_bytes=1).decode("utf-8", "replace")
     base = m3u8_url.rsplit("/", 1)[0]
     init_uri = ""
     starts: list[float] = []

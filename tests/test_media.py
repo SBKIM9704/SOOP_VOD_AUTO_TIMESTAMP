@@ -62,12 +62,47 @@ def test_fetch_retries_on_short_response_without_exception(monkeypatch):
 
 
 def test_fetch_raises_after_exhausting_retries(monkeypatch):
+    monkeypatch.setattr(media_module.time, "sleep", lambda *_: None)
+
     def fake_urlopen(url, timeout=30):
         raise ConnectionResetError("dead")
 
     monkeypatch.setattr(media_module.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(RuntimeError):
         _fetch("http://example.com/seg.m4s")
+
+
+# --------------------------------------------------------------------------- #
+# _parse_playlist — 플레이리스트 읽기도 재시도해야 한다(IncompleteRead가 재시도 없이
+# 그대로 새던 게 '다운로드 단계 실패'의 원인이었다).
+# --------------------------------------------------------------------------- #
+_PLAYLIST = (
+    "#EXTM3U\n"
+    '#EXT-X-MAP:URI="init.mp4"\n'
+    "#EXTINF:6.0,\nseg-0.m4s\n"
+    "#EXTINF:6.0,\nseg-1.m4s\n"
+)
+
+
+def test_parse_playlist_retries_on_incomplete_read(monkeypatch):
+    from http.client import IncompleteRead
+
+    monkeypatch.setattr(media_module.time, "sleep", lambda *_: None)
+    attempts = {"n": 0}
+
+    def fake_urlopen(url, timeout=15):
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            raise IncompleteRead(b"\x00" * 64525)
+        return _FakeResponse(_PLAYLIST.encode())
+
+    monkeypatch.setattr(media_module.urllib.request, "urlopen", fake_urlopen)
+    base, init_uri, starts, seg_uris = media._parse_playlist("http://x/y/index.m3u8")
+    assert attempts["n"] == 2
+    assert base == "http://x/y"
+    assert init_uri == "init.mp4"
+    assert seg_uris == ["seg-0.m4s", "seg-1.m4s"]
+    assert starts == [0.0, 6.0]
 
 
 # --------------------------------------------------------------------------- #
