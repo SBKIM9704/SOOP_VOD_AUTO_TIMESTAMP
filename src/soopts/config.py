@@ -26,6 +26,10 @@ class Endpoints:
 @dataclass
 class CollectorConfig:
     request_delay_s: float = 0.3
+    # HLS 세그먼트 동시 요청 수. 구간 하나가 50여 개 세그먼트라 순차로 받으면 요청당
+    # 왕복 지연이 그대로 쌓인다(실측: 화질 8배↓에도 다운로드는 2배만 줄었다).
+    # 영상 플레이어의 프리페치와 비슷한 수준으로만 올린다.
+    segment_workers: int = 4
     chunk_step_s: int = 300
     timeout_s: float = 15.0
     max_retries: int = 3
@@ -58,35 +62,37 @@ class SttConfig:
     groq_model: str = "whisper-large-v3-turbo"  # Groq 호스팅 Whisper API(가사 전사)
     language: str | None = None      # None=자동(en/ko 둘 다 시도). 노래는 강제가 정확도 큼
     lyric_chars: int = 300           # 출력 가사 길이 컷
+    # 전사 성공률이 이 값 미만이면 실행을 실패로 처리한다. 노래는 반주에 묻혀 원래 일부는
+    # 빈 결과가 나오므로 100%를 기대하면 안 되지만, 대량 실패(API 한도 초과·인증 만료 등)는
+    # 반드시 잡아야 한다 — 실제로 413으로 전량 실패하는 동안 몇 달간 아무도 몰랐다.
+    min_success_rate: float = 0.5
 
 
 @dataclass
 class ClipConfig:
-    quality: str = "hls-original"    # yt-dlp 포맷 (1080p). hls-hd4k=720p, hls-hd=540p
+    # 영상을 만들지 않으므로 화질은 무의미하다 — 받은 구간은 경계 탐지(inaSpeechSegmenter)와
+    # 가사 전사(Whisper)의 입력으로만 쓰이고 둘 다 오디오만 본다. 세 rendition이 같은 AAC를
+    # 물고 있어(hls-hd 1000k / hls-hd4k 4000k / hls-original 8000k) 최저 화질로 받으면
+    # 결과는 같고 다운로드만 8배 줄어든다.
+    quality: str = "hls-hd"          # yt-dlp 포맷(540p). 오디오는 상위 rendition과 동일
     dl_pad_before_s: float = 120.0   # 경계 탐지 여유를 위해 후보 구간을 넉넉히 받음
     dl_pad_after_s: float = 90.0
     min_song_s: float = 45.0         # 구간 내 최장 음악 블록이 이보다 짧으면 노래 아님(스킵)
-    boundary_pad_s: float = 1.0      # 정밀 경계에서 앞뒤 살짝 여유
-    crf: int = 20                    # 재인코딩 화질(낮을수록 고화질). 클린 컷 위해 재인코딩
-
-
-@dataclass
-class YouTubeConfig:
-    client_secret: str = "client_secret.json"  # Google Cloud OAuth 클라이언트(사용자 준비)
-    token_file: str = "~/.config/soopts/yt_token.json"  # 최초 동의 후 저장되는 토큰
-    privacy: str = "unlisted"        # unlisted=링크로 시청 가능
-    category_id: str = "10"          # 10 = Music
-    title_template: str = "{title} - {artist} | {bj} ({date})"
-    display_name: str = "띵귤"        # 제목/설명에 쓰는 스트리머 표기 — meta.bj_nick은 API마다
-                                      # "띵귤_"처럼 값이 흔들릴 수 있어 고정 문자열로 씀
-    made_for_kids: bool = False
-    daily_upload_limit: int = 5      # 쿼터: 업로드 1600유닛/건, 일일 10000유닛 → 여유는 sync용
 
 
 @dataclass
 class StationConfig:
     bj_id: str = "singgyul"          # 데일리 배치 대상 스테이션
     daily_vod_count: int = 2         # 하루 처리할 미처리 VOD 수
+    # 무-타임라인 VOD는 전체 오디오를 받아 세그멘테이션하는 full_sweep로 처리한다 — 정확하지만
+    # 전체 다운로드+전체 세그멘테이션이라 길다(9시간 VOD면 러너 타임아웃 위험). 한 런에서
+    # 실행할 신규 sweep 수를 이 값으로 제한한다(재시도 sweep은 우선순위상 항상 실행). 초과분은
+    # 갓 만든 pending 행을 지워 다음 런에 신규로 다시 잡히게 미룬다.
+    sweep_limit: int = 1
+    # 이 길이를 넘는 무-타임라인 VOD는 sweep을 시도조차 않고 실패 처리한다 — 세그멘테이션이
+    # 어떤 timeout에도 안 끝나 3번 헛 타임아웃하는 대신, 몇 초 만에 실패로 사람에게 알려
+    # 수동 CLI로 넘긴다. 0이면 가드 비활성. daily.yml timeout-minutes와 함께 정해야 한다.
+    sweep_max_duration_s: float = 21600.0  # 6시간
 
 
 @dataclass
@@ -104,7 +110,6 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     stt: SttConfig = field(default_factory=SttConfig)
     clip: ClipConfig = field(default_factory=ClipConfig)
-    youtube: YouTubeConfig = field(default_factory=YouTubeConfig)
     station: StationConfig = field(default_factory=StationConfig)
     comment: CommentConfig = field(default_factory=CommentConfig)
     work_root: Path = Path("work")
@@ -130,7 +135,6 @@ def load_config(path: Path | None = None, work_root: Path | None = None) -> Conf
         audio=_build_section(AudioConfig, data.get("audio", {})),
         stt=_build_section(SttConfig, data.get("stt", {})),
         clip=_build_section(ClipConfig, data.get("clip", {})),
-        youtube=_build_section(YouTubeConfig, data.get("youtube", {})),
         station=_build_section(StationConfig, data.get("station", {})),
         comment=_build_section(CommentConfig, data.get("comment", {})),
     )

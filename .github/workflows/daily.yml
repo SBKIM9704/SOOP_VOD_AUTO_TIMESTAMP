@@ -1,21 +1,21 @@
 name: daily
 
-# 스테이션 최신 VOD 무인 배치: 감지·식별·1080p 클립·업로드.
-# 휘발성 러너 전제 — 큐의 진실은 Supabase(DB)에 있고, 클립 파일은 언제든 재생성 가능하다.
+# 스테이션 최신 VOD 무인 배치: 감지·식별 → 노래 구간(타임스탬프) DB 기록.
+# 휘발성 러너 전제 — 상태의 진실은 Supabase(DB)에 있고, 받아둔 구간 파일은 재생성 가능하다.
+# 산출물은 타임스탬프이며 영상은 만들지도 업로드하지도 않는다(시청은 SOOP 원본 딥링크).
 on:
   schedule:
-    - cron: "0 19 * * *"   # 19:00 UTC = 04:00 KST
+    # 6시간마다(하루 4번), 런당 VOD 1개(soopts.toml daily_vod_count). 4슬롯/일이라 신규
+    # 유입(1~1.5개/일)을 커버하고 남는 슬롯이 백필을 소진한다. 런이 길어져도 concurrency가
+    # 겹침을 막는다(다음 런은 대기). 백필이 밀리면 count를 올리기보다 이 주기를 좁히는 편이
+    # "런당 1개" 격리를 유지한다.
+    - cron: "0 1,7,13,19 * * *"   # 01/07/13/19 UTC = 10/16/22/04 KST
   workflow_dispatch:
     inputs:
       count:
         description: "처리할 미처리 VOD 수 (기본: soopts.toml [station] daily_vod_count)"
         required: false
         type: string
-      no_upload:
-        description: "업로드/삭제 큐 소진 생략 (감지·식별·클립까지만)"
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
   group: soopts-daily
@@ -24,7 +24,12 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-latest   # Phase 0 검증 실패 시 self-hosted로 교체 (나머지는 동일)
-    timeout-minutes: 330
+    # 한 런은 VOD 1개만 처리하므로(daily_vod_count=1) 소요는 "그 VOD 하나"로 고정된다.
+    # 댓글 타임라인 VOD면 5~30분이지만, 무-타임라인이면 전체 오디오를 받아 세그멘테이션하는
+    # full_sweep이라 수십 분~1시간+ 걸린다. 레포가 public이라 러너는 무료이므로 넉넉히 잡는다.
+    # 이 상한을 넘길 만큼 긴 VOD는 sweep_max_duration_s 가드가 사전 차단한다(호스티드
+    # 러너는 timeout 설정과 무관하게 job당 6시간이 하드 상한).
+    timeout-minutes: 240
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -47,17 +52,8 @@ jobs:
           path: ~/.keras/inaSpeechSegmenter
           key: soopts-models-${{ runner.os }}-v1
 
-      - name: Install soopts (+audio,stt,youtube,batch)
-        run: pip install -e ".[audio,stt,youtube,batch]" yt-dlp
-
-      - name: 유튜브 OAuth 자격 복원
-        run: |
-          echo "$YT_CLIENT_SECRET" > client_secret.json
-          mkdir -p ~/.config/soopts
-          echo "$YT_TOKEN" > ~/.config/soopts/yt_token.json
-        env:
-          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-          YT_TOKEN: ${{ secrets.YT_TOKEN }}
+      - name: Install soopts (+audio,stt,batch)
+        run: pip install -e ".[audio,stt,batch]" yt-dlp
 
       - name: soopts daily
         id: daily
@@ -66,7 +62,6 @@ jobs:
           set -o pipefail
           ARGS=()
           if [ -n "${{ inputs.count }}" ]; then ARGS+=(--count "${{ inputs.count }}"); fi
-          if [ "${{ inputs.no_upload }}" = "true" ]; then ARGS+=(--no-upload); fi
           soopts -v daily "${ARGS[@]}" 2>&1 | tee daily.log
 
       - name: 요약

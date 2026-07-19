@@ -46,18 +46,72 @@ def looks_like_song(text: str) -> bool:
     return (talk_ratio < 0.12 and q_ratio < 0.1) or rep >= 0.45
 
 
-def _extract_wav(audio_path: str, start: float, dur: float, out: Path) -> None:
-    subprocess.run(
+_GROQ_MAX_BYTES = 25 * 1024 * 1024  # Groq 오디오 업로드 한도
+
+# 16kHz 모노 WAV는 초당 32KB라 이 상한이면 20MB 미만 — 위 한도 안쪽이다.
+# 노래는 min_song_s~310초 범위라 실제로 잘릴 일은 없고, 비정상적으로 긴 입력만 막는다.
+# 범위 지정 없이 호출됐을 때의 기본값이기도 하다(= 파일 전체로 간주).
+_SLICE_MAX_SECONDS = 600.0
+
+
+def _extract_wav(audio_path: str, start: float, dur: float, out: Path) -> bool:
+    """구간을 16kHz 모노 WAV로 추출. 성공 여부를 반환한다.
+
+    실패를 무시하면 직전 곡의 WAV가 out에 그대로 남아 있어 다음 곡의 가사로 잘못
+    붙는다(곡은 다른데 가사는 이전 곡 것) — 호출부가 반드시 확인해야 한다.
+    """
+    out.unlink(missing_ok=True)
+    proc = subprocess.run(
         ["ffmpeg", "-nostdin", "-y", "-ss", str(start), "-t", str(dur),
          "-i", audio_path, "-ac", "1", "-ar", "16000", str(out)],
         capture_output=True,
     )
+    if proc.returncode != 0 or not out.exists():
+        log.warning("WAV 추출 실패(%s): %s", audio_path,
+                    proc.stderr.decode("utf8", "replace").strip()[-200:])
+        return False
+    return True
 
 
-def _transcribe_best(client, path: str, cfg: Config) -> tuple[str, str]:
-    """Groq Whisper API로 후보 언어별 전사해 평균 logprob 높은 결과를 (가사, 언어)로 반환."""
+def _ensure_uploadable(
+    path: str, tmpdir: Path, start: float, dur: float
+) -> str | None:
+    """Groq에 올릴 수 있는 오디오 파일 경로를 보장한다(없으면 None).
+
+    호출부가 1080p mp4 클립 경로를 그대로 넘기는 일이 실제로 있었다(batch.py의 슬라이스
+    경로). 수백 MB를 그대로 올리면 Groq가 413으로 전량 거절하는데, 실패해도 WARNING만
+    남고 needs_review로 흘러가 몇 달간 아무도 눈치채지 못했다. 그래서 호출부를 믿지 않고
+    Groq로 나가는 유일한 관문인 여기서 불변식을 세운다.
+
+    이미 한도 안쪽의 WAV면 그대로 쓴다 — transcribe_songs는 구간을 잘라 WAV를 넘기므로
+    여기서 다시 변환할 이유가 없다.
+    """
+    p = Path(path)
+    whole_file = start == 0.0 and dur >= _SLICE_MAX_SECONDS
+    if whole_file and p.suffix.lower() == ".wav" and p.exists() and p.stat().st_size <= _GROQ_MAX_BYTES:
+        return path
+    out = tmpdir / "stt.wav"
+    return str(out) if _extract_wav(path, start, dur, out) else None
+
+
+def _transcribe_best(
+    client, path: str, cfg: Config, *, start: float = 0.0, dur: float = _SLICE_MAX_SECONDS
+) -> tuple[str, str]:
+    """Groq Whisper API로 후보 언어별 전사해 평균 logprob 높은 결과를 (가사, 언어)로 반환.
+
+    start/dur를 주면 path에서 그 구간만 잘라 전사한다 — 배치는 후보 구간 전체를
+    받아두고 그 안의 노래 경계만 전사하므로, 파일을 따로 만들지 않고 여기서 잘라낸다.
+    """
     scfg = cfg.stt
     langs = [scfg.language] if scfg.language else ["en", "ko"]
+    with tempfile.TemporaryDirectory() as td:
+        path = _ensure_uploadable(path, Path(td), start, dur)
+        if path is None:
+            return "", ""
+        return _transcribe_langs(client, path, scfg, langs)
+
+
+def _transcribe_langs(client, path: str, scfg, langs: list[str]) -> tuple[str, str]:
     best_text, best_lang, best_score = "", "", -1e9
     for lang in langs:
         try:
@@ -107,7 +161,8 @@ def transcribe_songs(
     with tempfile.TemporaryDirectory() as td:
         wav = Path(td) / "seg.wav"
         for s in songs:
-            _extract_wav(audio_path, s.t, min(max_seconds, s.duration), wav)
+            if not _extract_wav(audio_path, s.t, min(max_seconds, s.duration), wav):
+                continue
             text, lang = _transcribe_best(model, str(wav), cfg)
             if _finalize(s, text, lang, cfg) or not drop_talk:
                 kept.append(s)
@@ -124,7 +179,8 @@ def transcribe_slices(
     model = _load_model(cfg)
     kept: list[Song] = []
     for song, path in pairs:
-        text, lang = _transcribe_best(model, path, cfg)  # Groq API가 mp4 파일을 직접 받음
+        # 슬라이스는 1080p mp4(수백 MB)지만 _transcribe_best가 오디오만 뽑아 올린다.
+        text, lang = _transcribe_best(model, path, cfg)
         if _finalize(song, text, lang, cfg) or not drop_talk:
             kept.append(song)
     log.info("전사 후 노래 %d곡 (토크/BGM %d개 제외)", len(kept), len(pairs) - len(kept))

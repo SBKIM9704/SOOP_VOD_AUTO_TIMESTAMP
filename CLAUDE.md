@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # install (editable, with dev tools)
-uv venv && uv pip install -e ".[audio,stt,youtube,batch,dev]"
+uv venv && uv pip install -e ".[audio,stt,batch,dev]"
 
 # lint + test (the CI gate)
 ruff check src tests && pytest
@@ -25,69 +25,179 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
 
 ### Two entry points into the same lower-level modules
 
-- **Manual CLI pipeline** (`cli.py`): a human runs `collect` → `songs`/`clips` → `clips --upload`
-  one VOD at a time, reviewing/editing `clips.json` between steps before anything goes to YouTube.
-- **Batch pipeline** (`batch.py`, driven by `soopts daily`/`soopts sync`): the same detection/clip/
+- **Manual CLI pipeline** (`cli.py`): a human runs `collect` → `songs`/`clips` one VOD at a time,
+  reviewing/editing `clips.json` between steps. `clips.json` holds song spans + lyrics, not files.
+- **Batch pipeline** (`batch.py`, driven by `soopts daily`): the same detection/clip/
   identify building blocks (`analyzers/audio_analyzer.py`, `collector/media.py`, `export/clips.py`,
   `analyzers/stt.py`, `analyzers/identify.py`) are composed directly, with Supabase (`db.py`) standing
   in for the human review step. `batch.py` does not reuse `cli.py`'s `_produce_clips`/`_songs_slice`
   helpers (those are argparse/print-oriented for interactive review) — it re-implements the same
-  region → download → cut → transcribe flow against a `vod_row` from the DB instead of a CLI `args`
+  region → download → detect-boundary → transcribe flow against a `vod_row` from the DB instead of a CLI `args`
   namespace.
 - Shared low-level helpers that both entry points need (e.g. `collector/media.py`'s `map_to_part`,
   which maps a global time range onto the right HLS part + local offsets) live in the module layer,
   not in `cli.py`, specifically so `batch.py` can call them without importing the CLI.
+- **Local escape hatch** (`soopts process <id>` → `batch.process_single_vod`): runs the *batch*
+  pipeline for one VOD and **writes to the DB** (unlike `songs`/`clips`, which only write local files
+  for interactive review). It exists for VODs the hosted runner can't finish — chiefly a
+  no-timeline VOD longer than `station.sweep_max_duration_s`, which `daily` fails fast on (see
+  Volatile-runner design). It runs `_process_vod` with `allow_sweep=True, enforce_guard=False`, so
+  there's no per-run sweep budget and no length guard — the operator's PC has no job timeout.
 
 ### Config system (`config.py`)
 
 One dataclass per concern (`Endpoints`, `CollectorConfig`, `AudioConfig`, `SttConfig`, `ClipConfig`,
-`YouTubeConfig`, `StationConfig`), assembled into `Config`. `load_config()` reads `soopts.toml` and
+`StationConfig`, `CommentConfig`), assembled into `Config`. `load_config()` reads `soopts.toml` and
 merges only the keys present per section (`_build_section` drops unknown keys) — so partial overrides
 in `soopts.toml` don't require repeating every field. `work_root` can also be overridden via CLI flag.
 
 ### Work directory as cache (`paths.py`)
 
 Every VOD gets `work/{vod_id}/` (`WorkPaths`): `meta.json`, `chat.jsonl`, `raw/` (chat XML cache),
-`audio_segmentation.json` (expensive STT segmentation cache), `songs.json`/`songs_{id}.txt`, `clips/`.
+`audio_segmentation.json` (expensive STT segmentation cache), `songs.json`/`songs_{id}.txt`, and
+`clips/` (downloaded region files — inputs to boundary-detection and STT, not media output).
 Steps check these files before re-fetching/re-computing; `--force` bypasses the cache. The batch
-pipeline uses the exact same layout, which is what makes clip-file resumability possible (see below).
+pipeline uses the exact same layout, but treats it as a pure cache — the truth is Supabase (see below).
 
 ### Lazy imports for heavy/optional dependencies
 
-`inaSpeechSegmenter`, the `google-api-python-client` stack, `supabase`, `groq`,
-and `rapidfuzz` are **only imported inside the functions that use them**, never at module top level.
+`inaSpeechSegmenter`, `supabase`, `groq`, and `rapidfuzz` are **only imported inside the functions
+that use them**, never at module top level.
 This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency extras (`audio`, `stt`,
-`youtube`, `batch`) actually be optional — a plain `pip install soopts` with no extras can still run
+`batch`) actually be optional — a plain `pip install soopts` with no extras can still run
 `collect`. Preserve this pattern when adding new functionality that touches one of these libraries.
 
 ### The Supabase boundary (`db.py`)
 
 `db.py` is the *only* module that talks to Supabase. The schema (`vods`, `performances`, `song_aliases`,
-`youtube_deletion_queue`, and the read-only `songs` catalog) is owned by a separate private repo
+and the read-only `songs` catalog) is owned by a separate private repo
 (`singgyul_sing_book`) — this codebase only consumes it and never creates migrations. `songs` rows are
 never created from this repo; unmatched songs always land as `needs_review` for a human to resolve in
-the separate review UI. `vods.status`/`performances.clip_status`/`performances.identify_status` are the
-actual state machine — treat them as the source of truth, not local files (see next point).
-`youtube_deletion_queue` is how the admin UI (region edits / performance deletes) asks this repo to
-delete an already-uploaded video; `_drain_deletion_queue()` in `batch.py` drains it from both `daily`
-and `sync` (independent of `performance_id`, which is nullable and unused for processing).
+the separate review UI. `vods.status` (per-VOD progress) and `performances.identify_status` (per-song
+review state) are the actual state machine — treat them as the source of truth, not local files
+(see next point).
+YouTube-era objects were dropped on 2026-07-18 (`performances.youtube_video_id`/`synced_at`/
+`clip_status`, the `youtube_deletion_queue` table) once both repos had stopped referencing them.
+`song_performance_counts` was recreated without its `youtube_video_id IS NOT NULL` filter — every
+performance is now reachable via deep link, so the old "only count uploaded ones" condition no longer
+made sense (3 songs → 47).
 
 ### Volatile-runner design (`batch.py`)
 
-GitHub-hosted runners don't persist disk between workflow runs. The upload queue therefore cannot
-depend on files surviving between `daily` invocations — its truth is `performances.clip_status` plus
-`start_s`/`end_s` in Supabase. `clip_file_path(work_root, title_no, start_s)` is a pure function that
-reconstructs the expected clip path deterministically from those DB columns; if the file is missing
-(runner reset since it was cut), `_reslice_clip()` re-downloads just that segment and re-cuts it rather
-than re-running full detection. Don't reintroduce any state that only lives in the runner's filesystem
-into the upload-queue logic.
+GitHub-hosted runners don't persist disk between workflow runs, so no pipeline stage may depend on
+files surviving between `daily` invocations. The truth is Supabase: `vods.status` for how far a VOD
+got, and one `performances` row per detected song (`start_s`/`end_s`/`identify_status`). Local `work/`
+files are a cache that may vanish at any time. Don't reintroduce state that only lives on the runner's disk.
+
+The deliverable is the **timestamp**, not a media file. `song_link(cfg, title_no, start_s)` builds the
+SOOP deep link that viewers actually follow, computed from DB columns alone — nothing is uploaded
+anywhere, so there is no per-song artifact to keep in sync or clean up.
+
+**No video is produced.** `detect_song_span()` returns boundary times, and STT extracts just that
+range from the downloaded region file (`_transcribe_best(..., start=, dur=)`). Re-encoding clips with
+ffmpeg used to be 76% of total runtime (6.6 min per song); removing it took a VOD from ~5.5h to ~20min.
+`cfg.clip.quality` is deliberately the *lowest* rendition (`hls-hd`, 540p): all three renditions carry
+the same AAC audio, and audio is all the segmenter and Whisper ever see, so the higher ones only cost
+download time. Don't raise it "for quality" — there is no video output to have quality.
+
+What remains after that is round-trip latency, not bandwidth: a region is ~50 segments fetched one by
+one, and dropping the bitrate 8× only halved download time. `_write_segments` therefore fetches
+`cfg.collector.segment_workers` (default 4) segments concurrently while writing them in **submission
+order** — out-of-order writes corrupt the fMP4. It keeps a sliding window rather than gathering
+everything first, so memory stays bounded at `workers` segments. Measured against the real stream:
+11.8s → 5.6s for a 300s region, byte-identical output.
+
+A run killed mid-VOD (timeout, cancel, runner reset) leaves `vods.status = 'pending'` because
+`mark_vod` never runs. `select_targets()` therefore treats **both** `failed` and `pending` as
+retryable. Any `pending` seen at selection time is necessarily stale: `concurrency: soopts-daily`
+forbids overlapping runs, and within one run selection happens once, before processing.
+Because retries are routine, **reprocessing must be idempotent**. `insert_performances` upserts on
+`(vod_id, start_s)` with `ignore_duplicates`, and `_process_vod` calls
+`clear_machine_performances()` first to drop the previous run's rows for that VOD. Rows with
+`identify_status = 'confirmed'` are spared — a human decided those and the machine cannot recreate
+them. Before this, every reprocess appended a fresh copy of each span (201142227 ended up with two
+sets of identical `start_s`/`end_s`).
+
+Retrying `pending` bumps `retry_count` inside `select_targets` — `mark_vod` only bumps it on
+`failed`, so without this a VOD that kills the runner every time would never reach `MAX_RETRIES`
+and would block the queue forever.
+
+Every row `select_targets` returns must carry the **same keys** (`_vod_row` enforces this).
+PostgREST builds the column list from the union of keys across the batch and writes an explicit
+NULL wherever a row lacks one — so mixing a retry row (rich, straight from `select *`) with a new
+row (sparse) made `retry_count` NULL on the new row and Postgres rejected the whole batch with
+`23502`. Never build the upsert dicts per-row-shape.
+
+### Candidate detection & per-region failure (`_find_candidates`, `_process_vod`)
+
+Two ways to enumerate a VOD's songs, chosen per VOD:
+- **`comment_timeline`**: fans leave unofficial per-song timestamps in comments. Each becomes a
+  padded candidate region; `detect_song_span` refines the exact boundary and STT reads just that
+  range. Fast (only candidate regions are downloaded) and carries an artist/title hint, so identify
+  skips the Groq lyric guess.
+- **`full_sweep`** (no timeline): download the whole VOD **part by part** and run
+  `inaSpeechSegmenter` over each part to enumerate *every* music block (`_run_full_sweep`). This
+  replaced a sticker-burst heuristic that collapsed a burst into a single "longest music block" and
+  missed every other song in it — no-timeline VODs were ending up almost entirely skipped as "not a
+  song". Accurate but slow (full download + full segmentation), so it's budgeted (below).
+
+**Partial failure is retryable, not silently lost.** A region that throws is skipped, but
+`retry_reason` makes `_process_vod` raise if *any* region errored — not only when *all* did. The old
+"raise only if nothing succeeded" left a VOD `analyzed` with one span permanently missing (a download
+`IncompleteRead` on one region among many). Reprocessing is idempotent (see `clear_machine_performances`),
+so re-running the whole VOD costs work but loses nothing; `MAX_RETRIES` bounds it. Playlist reads
+(`_parse_playlist`) go through the same retry+backoff as segment fetches (`_read_url`) — an
+`IncompleteRead` on the m3u8 itself was escaping raw and surfacing as a "download-step" failure.
+
+**Sweep budgeting.** `station.sweep_limit` (default 1) caps how many *new* full_sweeps run per
+`daily` invocation so several slow sweeps can't pile into one run (worst during no-timeline backfill).
+Retries always run (priority retry > new) but still consume the budget. A new sweep over budget is
+*deferred*: `_process_vod` returns `{"deferred": True}` before any download and the loop calls
+`db.delete_vod` to drop the freshly-upserted `pending` row — leaving it as an unprocessed candidate
+for next run instead of a `pending` that would burn `retry_count` every selection.
+
+**Length guard + local escape hatch.** A no-timeline VOD longer than
+`station.sweep_max_duration_s` (default 6h) can't finish segmenting inside the hosted runner's hard
+6h job cap, so `daily` fails it fast (seconds, before download) with a message pointing at
+`soopts process <id>` rather than timing out three times. That command
+(`batch.process_single_vod`) runs the same pipeline locally with the guard and budget off — the
+only supported path for such VODs. Raising `sweep_limit`/`sweep_max_duration_s` means bumping
+`daily.yml`'s `timeout-minutes` too (≤360 on hosted runners).
+
+### VOD selection (`_select_vods` in `batch.py`, `select_targets` in `db.py`)
+
+Priority is **retry > new > backfill**, with no floor — SOOP list expiry is the natural bottom.
+
+`fetch_retryable()` pulls `failed`/`pending` rows (under `MAX_RETRIES`) straight from the DB, so a
+`pending` that scrolled out of the recent-list window still gets retried — the old fixed
+`count * 3` window silently stranded them. New and backfill both come from paging the SOOP list
+newest-first via `iter_vod_pages()`: `_select_vods` keeps paging and skipping already-processed VODs
+until it has `count` targets or the list runs out, so when the newest are all done it walks backward
+into history automatically. No separate "new vs backfill" branch — newest-first traversal makes that
+ordering fall out. `select_targets` is the pure core (retry list + candidate list → picks); the impure
+paging loop lives in `batch.py` to keep `db.py` Supabase-only and `vod_list.py` SOOP-only.
+
+### Quality gate (`quality_warning`)
+
+Failures here show up as **degradation, not exceptions** — when Groq rejected every clip with 413 the
+run still finished "successfully", songs just piled up in the review queue with no lyrics, and the
+summary looked normal because it only counted detections. So `run_daily` measures `stt_ok /
+stt_attempted` and raises if it drops below `cfg.stt.min_success_rate` (default 0.5). The summary is
+sent to Slack *before* the gate raises, and DB writes are already committed, so failing the run never
+loses work — it just makes someone look.
+
+`format_summary` also splits auto-matches by basis (`hint_available` vs `lyrics_only`). That split is
+the specific blind spot from the incident: comment-timeline hints kept producing auto-matches while
+STT was dead, so the match rate looked fine. Note that when a hint exists the code skips lyric-based
+identification entirely, so `lyrics_only` staying at 0 is expected for VODs with a fan timeline.
 
 ### GitHub Actions workflows
 
 - `verify-env.yml` (manual): confirms SOOP's API/streams are reachable from a hosted-runner IP before
-  relying on `daily.yml`/`sync.yml`. If it starts failing, only `runs-on` needs to change to a
+  relying on `daily.yml`. If it starts failing, only `runs-on` needs to change to a
   self-hosted runner — nothing else.
-- `daily.yml` / `sync.yml`: scheduled + `workflow_dispatch`. Both pipe `soopts ... | tee *.log` and rely
+- `daily.yml`: scheduled every 6h (04/10/16/22 KST) + `workflow_dispatch`. It pipes
+  `soopts ... | tee *.log` and relies
   on the exit code to detect failure — any `run:` step doing this **must** start with
   `set -o pipefail`, or a crash in `soopts` gets masked by `tee`'s always-zero exit status (this has
   bitten this repo once already).
@@ -95,8 +205,8 @@ into the upload-queue logic.
 ### Testing philosophy
 
 Tests exercise pure functions only — no network, no DB, no ML model loading. One file per module
-under test (`tests/test_<module>.py`). Functions that call out to Groq/Supabase/YouTube are kept
-thin and tested by isolating the pure logic around them (e.g. `test_db.py` tests `select_pending`'s
+under test (`tests/test_<module>.py`). Functions that call out to Groq/Supabase are kept
+thin and tested by isolating the pure logic around them (e.g. `test_db.py` tests `select_targets`'s
 row-filtering logic directly, without touching Supabase; `test_stt.py` passes a fake client object
 into `_transcribe_best` to test the language-selection logic without a real API call). Fixtures
 under `tests/fixtures/` that capture real SOOP API/chat responses are anonymized (no real viewer

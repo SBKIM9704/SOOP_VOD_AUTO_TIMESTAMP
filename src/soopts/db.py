@@ -1,4 +1,4 @@
-"""Supabase 연동 — soopts daily/sync 배치가 vods/performances 상태를 읽고 쓴다.
+"""Supabase 연동 — soopts daily 배치가 vods/performances 상태를 읽고 쓴다.
 
 스키마의 주인은 singgyul_sing_book 레포(supabase/migrations/)다. 이 모듈은 스키마를
 소비만 하고 여기서 만들지 않는다. songs 테이블은 읽기 전용으로만 다룬다 — 신곡 행을
@@ -43,65 +43,136 @@ def _now_iso() -> str:
 # --------------------------------------------------------------------------- #
 # vods
 # --------------------------------------------------------------------------- #
-def select_pending(
+def select_targets(
+    retryable: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
     existing_by_no: dict[str, dict[str, Any]],
     n: int,
 ) -> list[dict[str, Any]]:
-    """순수 함수: candidates(최신순)에서 신규 또는 재시도 가능한 failed를 최대 n개 고른다.
+    """순수 함수: 우선순위 **재시도 > 신규 > 백필** 로 최대 n개를 고른다.
 
-    이미 vods에 있고 failed가 아니거나 retry_count가 상한에 닿은 건은 건너뛴다.
+    - **retryable**: 재시도 대상 DB 행(failed/pending, retry_count < 상한). 호출부가 SOOP
+      목록과 무관하게 DB에서 직접 뽑아 넘긴다 — pending이 최신 목록 창 밖으로 밀려나도
+      재시도되도록. failed는 처리 중 예외로 `mark_vod`가 기록한 상태, pending은 처리를
+      시작만 하고 SIGKILL(타임아웃·취소·러너 리셋)로 끝내지 못한 상태다.
+    - **candidates**: SOOP 목록 최신순. 신규(창 상단)와 백필(그보다 과거)이 한 리스트에
+      섞여 있으며, 최신순 순회가 '신규 > 백필' 우선순위를 자동으로 만든다. 처리 완료분
+      (existing_by_no에 있고 재시도 대상이 아닌 것)은 건너뛰므로, 신규가 없으면 자연히
+      과거로 내려가며 백필한다.
+
+    선택 시점에 보이는 pending은 반드시 죽은 실행이 남긴 것이다 — `concurrency: soopts-daily`
+    가 동시 실행을 막고, 한 실행 안에서 선택은 처리보다 먼저 한 번만 일어난다.
+
+    pending 재시도 시 retry_count를 여기서 올린다. failed는 `mark_vod`가 이미 올려주지만
+    pending은 그 경로를 못 거쳤으므로, 올리지 않으면 매번 러너를 죽이는 VOD가 상한에 영영
+    닿지 못해 큐를 무한히 막는다.
     """
+    cand_by_no = {str(c["title_no"]): c for c in candidates}
     picked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    # 1. 재시도 — SOOP 창과 무관하게 DB에서 온다. 목록에 아직 있으면 메타데이터를 갱신한다.
+    for row in retryable:
+        if len(picked) >= n:
+            break
+        title_no = str(row["soop_title_no"])
+        retry_count = row.get("retry_count") or 0
+        if row.get("status") == "pending":
+            retry_count += 1
+        picked.append(_vod_row(title_no, cand_by_no.get(title_no, {}), row, retry_count))
+        seen.add(title_no)
+
+    # 2+3. 신규·백필 — 최신순 순회. DB에 이미 있는 건(완료분·위에서 처리한 재시도)은 건너뛴다.
     for c in candidates:
         if len(picked) >= n:
             break
         title_no = str(c["title_no"])
-        row = existing_by_no.get(title_no)
-        if row is not None:
-            if row.get("status") == "failed" and row.get("retry_count", 0) < MAX_RETRIES:
-                # id는 GENERATED ALWAYS AS IDENTITY라 upsert 페이로드에 넣으면
-                # PostgREST가 거부한다(실제로 재시도 케이스에서 발생 확인) — 제외.
-                retry_row = {k: v for k, v in row.items() if k != "id"}
-                picked.append({**retry_row, "soop_title_no": title_no})
+        if title_no in seen or title_no in existing_by_no:
             continue
-        picked.append({
-            "soop_title_no": title_no,
-            "title": c.get("title", ""),
-            "broadcast_date": c.get("broadcast_date"),
-            "duration_s": c.get("duration_s"),
-        })
+        picked.append(_vod_row(title_no, c, {}, 0))
+        seen.add(title_no)
     return picked
 
 
-def pick_unprocessed_vods(candidates: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
-    """candidates 중 미처리분 최대 n개를 pending으로 upsert하고 그 vods 행을 반환한다."""
-    if not candidates or n <= 0:
+def fetch_retryable(n: int) -> list[dict[str, Any]]:
+    """재시도 가능한 vods 행(failed/pending, retry_count < 상한)을 최신 방송순 최대 n개."""
+    if n <= 0:
         return []
-    client = _client()
-    title_nos = [str(c["title_no"]) for c in candidates]
-    existing = client.table("vods").select("*").in_("soop_title_no", title_nos).execute().data
-    existing_by_no = {row["soop_title_no"]: row for row in existing}
-    picked = select_pending(candidates, existing_by_no, n)
-    if not picked:
-        return []
-    rows = [{**row, "status": "pending"} for row in picked]
-    return client.table("vods").upsert(rows, on_conflict="soop_title_no").execute().data
-
-
-def upsert_backfill_vod(soop_title_no: str, title: str, duration_s: int) -> dict[str, Any] | None:
-    """기존 유튜브 업로드용 더미 vods 행(scripts/backfill_existing_clips.py 전용)."""
-    rows = (
+    return (
         _client()
         .table("vods")
-        .upsert(
-            {"soop_title_no": soop_title_no, "title": title, "status": "done", "duration_s": duration_s},
-            on_conflict="soop_title_no",
-        )
+        .select("*")
+        .in_("status", ["failed", "pending"])
+        .lt("retry_count", MAX_RETRIES)
+        .order("broadcast_date", desc=True)
+        .limit(n)
         .execute()
         .data
     )
-    return rows[0] if rows else None
+
+
+def fetch_existing(title_nos: list[str]) -> dict[str, dict[str, Any]]:
+    """주어진 title_no들의 기존 vods 행을 soop_title_no로 키잉해 반환."""
+    if not title_nos:
+        return {}
+    rows = _client().table("vods").select("*").in_("soop_title_no", title_nos).execute().data
+    return {row["soop_title_no"]: row for row in rows}
+
+
+def upsert_pending(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """선정된 대상 행을 status='pending'으로 upsert하고 그 행을 반환한다."""
+    if not targets:
+        return []
+    rows = [{**row, "status": "pending"} for row in targets]
+    return _client().table("vods").upsert(rows, on_conflict="soop_title_no").execute().data
+
+
+def _vod_row(
+    title_no: str, candidate: dict[str, Any], existing: dict[str, Any], retry_count: int
+) -> dict[str, Any]:
+    """upsert에 넣을 vods 행. 신규·재시도가 **똑같은 키 집합**을 갖는 게 핵심이다.
+
+    PostgREST는 배치의 키 합집합으로 컬럼 목록을 만들고 빠진 값을 NULL로 채운다. 그래서
+    키가 다른 행이 한 배치에 섞이면, 어떤 행에만 있는 컬럼이 나머지 행에서 명시적 NULL이
+    되어 NOT NULL 제약을 깬다 — 실제로 재시도 행과 신규 행이 함께 올라가면서
+    `null value in column "retry_count" violates not-null constraint`로 배치 전체가
+    거부됐다. 행마다 dict를 다르게 만들지 말 것.
+
+    id도 넣지 않는다 — GENERATED ALWAYS AS IDENTITY라 PostgREST가 거부한다.
+    created_at/processed_at/error는 DB와 mark_vod가 관리하므로 여기서 되쓰지 않는다.
+    """
+    return {
+        "soop_title_no": title_no,
+        "title": candidate.get("title") or existing.get("title") or "",
+        "broadcast_date": candidate.get("broadcast_date") or existing.get("broadcast_date"),
+        "duration_s": candidate.get("duration_s") or existing.get("duration_s"),
+        "retry_count": retry_count,
+    }
+
+
+def delete_vod(title_no: str) -> None:
+    """vods 행을 삭제해 VOD를 '미처리'로 되돌린다 — 이번 런의 sweep 예산을 넘겨 미룬 신규
+    무-타임라인 VOD 전용.
+
+    행을 지우면 다음 런에서 신규 후보로 다시 선정되고 retry_count를 태우지 않는다(pending으로
+    남겨두면 select_targets가 매 선정마다 retry_count를 올려 MAX_RETRIES에 닿아 큐를 막는다).
+    status='pending'으로 한정해 안전장치를 둔다 — 미루는 대상은 갓 upsert된 pending 행이라
+    딸린 performances가 없어 삭제해도 잃을 게 없다(재시도 sweep은 애초에 미루지 않는다)."""
+    _client().table("vods").delete().eq("soop_title_no", title_no).eq(
+        "status", "pending"
+    ).execute()
+
+
+def mark_vod_unretryable(title_no: str, error: str) -> None:
+    """재시도해도 결과가 같은 **영구 실패**로 표시한다 — status='failed' + retry_count를 상한으로.
+
+    fetch_retryable이 `retry_count < MAX_RETRIES`만 뽑으므로 곧바로 큐에서 빠진다. 러너에서
+    처리 불가능한 초장시간 무-타임라인 VOD(sweep 길이 가드)가 매 런 슬롯을 차지하며 3번
+    헛도는 걸 막는다 — daily_vod_count가 작을수록(1이면 런 하나를 통째로) 이 낭비가 크다.
+    이런 VOD는 사람이 timeout 없는 로컬 `soopts process <id>`로 처리한다."""
+    _client().table("vods").update(
+        {"status": "failed", "error": error, "retry_count": MAX_RETRIES}
+    ).eq("soop_title_no", title_no).execute()
 
 
 def mark_vod(title_no: str, status: str, error: str | None = None) -> None:
@@ -126,6 +197,29 @@ def mark_vod(title_no: str, status: str, error: str | None = None) -> None:
 # --------------------------------------------------------------------------- #
 # performances
 # --------------------------------------------------------------------------- #
+def clear_machine_performances(vod_row_id: int) -> int:
+    """VOD의 기계 생성 performances를 지우고 지운 건수를 반환한다.
+
+    재처리는 이제 일상이다 — 중단된 실행이 남긴 pending VOD를 다음 실행이 다시 잡는다.
+    그런데 insert만 하면 같은 구간이 매번 새 행으로 쌓인다. 실제로 201142227에서
+    같은 start_s/end_s가 두 벌씩 생겼다(타임아웃 실행 4건 + 재처리 4건).
+
+    identify_status='confirmed'는 남긴다 — 사람이 검수 UI에서 확정한 결과이고, 기계가
+    다시 만들어낼 수 없는 유일한 정보다. 나머지(needs_review/auto_matched/rejected)는
+    이번 실행이 다시 만들어낸다.
+    """
+    rows = (
+        _client()
+        .table("performances")
+        .delete()
+        .eq("vod_id", vod_row_id)
+        .neq("identify_status", "confirmed")
+        .execute()
+        .data
+    )
+    return len(rows or [])
+
+
 def insert_performances(
     vod_row_id: str,
     songs: list[Song],
@@ -135,6 +229,12 @@ def insert_performances(
 
     identify_results를 생략하면 song_id=NULL, identify_status='needs_review'로 남는다.
     songs 테이블에 신곡 행을 만들지 않는다 — song_id는 기존 카탈로그 매칭 결과만 연결한다.
+
+    clip_status는 쓰지 않는다. 업로드 큐가 사라진 뒤로 이 컬럼은 전 행이 'clipped'인
+    상수가 되어 아무 정보도 담지 않는다(예전엔 'none'으로 넣고 곧바로 'clipped'로
+    UPDATE 했다). 컬럼 자체는 관리자 UI가 참조할 수 있어 DB에 남아 있지만, 여기서
+    쓰지 않으므로 나중에 DROP 해도 이 코드는 영향을 받지 않는다.
+    상태는 identify_status가 담는다 — 검수 흐름에서 실제로 쓰이는 건 그쪽이다.
     """
     if not songs:
         return []
@@ -151,112 +251,18 @@ def insert_performances(
             "match_confidence": r.match_confidence if r else None,
             "song_id": r.song_id if r else None,
             "identify_status": r.identify_status if r else "needs_review",
-            "clip_status": "none",
         }
         for s, r in zip(songs, results, strict=True)
     ]
-    return _client().table("performances").insert(rows).execute().data
-
-
-def update_performance(perf_id: str, **fields: Any) -> None:
-    _client().table("performances").update(fields).eq("id", perf_id).execute()
-
-
-def fetch_upload_queue(limit: int) -> list[dict[str, Any]]:
-    """clip_status='clipped'이면서 노래로 확정(auto_matched/confirmed)된 건을 오래된 순으로
-    최대 limit개, songs(title,artist)/vods.soop_title_no를 join해 반환.
-
-    identify_status가 needs_review/rejected인 건(노래 아님/미확정)은 clip_status만으로
-    거르면 큐에 섞여 업로드돼버린다 — 실제로 발생해 잘못 업로드된 적이 있어 명시적으로 제외한다.
-    song_id IS NOT NULL도 명시적으로 건다 — auto_matched/confirmed면 song_id가 항상 있어야
-    맞지만, DB에 그걸 강제하는 제약조건이 없어 혹시라도 어긋나는 행이 있으면(둘 중 하나가
-    버그로 어긋난 경우) 업로드해버리기 전에 걸러내는 안전장치다. songs(title,artist)는
-    유튜브 제목/설명에 원곡 아티스트를 넣기 위해 join한다.
-
-    러너가 휘발성이라 로컬 clip 파일이 사라질 수 있다 — 재슬라이스에 필요한 start_s/end_s/
-    soop_title_no가 반환값에 이미 있으므로 파일 없이도 재생성 가능해야 한다.
-    """
+    # (vod_id, start_s) 유니크 위반은 무시한다 — confirmed로 남겨둔 행과 같은 구간을
+    # 다시 감지한 경우다. 사람이 확정한 쪽을 덮어쓰지 않는다.
     return (
         _client()
         .table("performances")
-        .select("*, songs(title, artist), vods(soop_title_no)")
-        .eq("clip_status", "clipped")
-        .in_("identify_status", ["auto_matched", "confirmed"])
-        .not_.is_("song_id", "null")
-        .order("created_at")
-        .limit(limit)
+        .upsert(rows, on_conflict="vod_id,start_s", ignore_duplicates=True)
         .execute()
         .data
     )
-
-
-def fetch_confirmed_pending_sync() -> list[dict[str, Any]]:
-    """검수 확정(confirmed)됐지만 아직 유튜브에 반영 안 된(synced_at NULL) 건."""
-    return (
-        _client()
-        .table("performances")
-        .select("*, songs(title, original_title, artist), vods(soop_title_no, broadcast_date)")
-        .eq("identify_status", "confirmed")
-        .is_("synced_at", "null")
-        .execute()
-        .data
-    )
-
-
-def count_upload_queue() -> int:
-    """업로드 대상(clip_status='clipped' + identify_status auto_matched/confirmed +
-    song_id not null)으로 아직 업로드되지 않고 남은 전체 건수(요약 출력용).
-    fetch_upload_queue와 동일 조건이어야 "큐 잔여"가 실제로 다음 실행에서 드레인될
-    건수와 일치한다."""
-    resp = (
-        _client()
-        .table("performances")
-        .select("id", count="exact")
-        .eq("clip_status", "clipped")
-        .in_("identify_status", ["auto_matched", "confirmed"])
-        .not_.is_("song_id", "null")
-        .execute()
-    )
-    return resp.count or 0
-
-
-def fetch_deletion_queue(limit: int) -> list[dict[str, Any]]:
-    """youtube_deletion_queue에서 status='pending'인 요청을 오래된 순으로 최대 limit개.
-
-    singgyul_sing_book(Next.js 관리자 화면)이 구간 수정/performances 행 삭제 시 이 큐에
-    삭제 요청을 남긴다. performance_id는 참고용(행 삭제로 생긴 요청은 on delete set null로
-    null)이라 여기선 안 쓴다 — youtube_video_id만 있으면 처리 가능.
-    """
-    return (
-        _client()
-        .table("youtube_deletion_queue")
-        .select("*")
-        .eq("status", "pending")
-        .order("created_at")
-        .limit(limit)
-        .execute()
-        .data
-    )
-
-
-def mark_deletion(row_id: Any, status: str) -> None:
-    """youtube_deletion_queue 행의 처리 결과 기록(done/failed)."""
-    _client().table("youtube_deletion_queue").update(
-        {"status": status, "processed_at": _now_iso()}
-    ).eq("id", row_id).execute()
-
-
-def count_clipped_for_vod(title_no: str) -> int:
-    """해당 vod에 남은 clip_status='clipped' 건수 — 0이면 vod를 'done'으로 넘길 수 있다."""
-    resp = (
-        _client()
-        .table("performances")
-        .select("id, vods!inner(soop_title_no)", count="exact")
-        .eq("clip_status", "clipped")
-        .eq("vods.soop_title_no", title_no)
-        .execute()
-    )
-    return resp.count or 0
 
 
 # --------------------------------------------------------------------------- #
