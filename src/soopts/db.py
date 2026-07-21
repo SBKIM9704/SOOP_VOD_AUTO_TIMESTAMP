@@ -150,29 +150,50 @@ def _vod_row(
     }
 
 
-def delete_vod(title_no: str) -> None:
-    """vods 행을 삭제해 VOD를 '미처리'로 되돌린다 — 이번 런의 sweep 예산을 넘겨 미룬 신규
-    무-타임라인 VOD 전용.
+def fetch_vods_by_status(statuses: list[str]) -> list[dict[str, Any]]:
+    """주어진 status의 vods 행을 최신 방송순으로 — vod-audit 스킬의 감사 대상 목록용.
 
-    행을 지우면 다음 런에서 신규 후보로 다시 선정되고 retry_count를 태우지 않는다(pending으로
-    남겨두면 select_targets가 매 선정마다 retry_count를 올려 MAX_RETRIES에 닿아 큐를 막는다).
-    status='pending'으로 한정해 안전장치를 둔다 — 미루는 대상은 갓 upsert된 pending 행이라
-    딸린 performances가 없어 삭제해도 잃을 게 없다(재시도 sweep은 애초에 미루지 않는다)."""
-    _client().table("vods").delete().eq("soop_title_no", title_no).eq(
-        "status", "pending"
-    ).execute()
+    `soopts vods --status analyzed,done`가 이걸 그대로 노출해, 스킬 안에서 Claude가 어떤
+    VOD를 검증할지 고른다(판정은 코드가 아니라 스킬 안의 Claude가 원본 댓글로 한다)."""
+    if not statuses:
+        return []
+    return (
+        _client()
+        .table("vods")
+        .select("*")
+        .in_("status", statuses)
+        .order("broadcast_date", desc=True)
+        .execute()
+        .data
+    )
 
 
-def mark_vod_unretryable(title_no: str, error: str) -> None:
-    """재시도해도 결과가 같은 **영구 실패**로 표시한다 — status='failed' + retry_count를 상한으로.
+def count_machine_performances(vod_row_id: int) -> int:
+    """VOD의 기계 생성 performances 수(confirmed 제외) — recheck dry-run 리포트용."""
+    rows = (
+        _client()
+        .table("performances")
+        .select("id")
+        .eq("vod_id", vod_row_id)
+        .neq("identify_status", "confirmed")
+        .execute()
+        .data
+    )
+    return len(rows or [])
 
-    fetch_retryable이 `retry_count < MAX_RETRIES`만 뽑으므로 곧바로 큐에서 빠진다. 러너에서
-    처리 불가능한 초장시간 무-타임라인 VOD(sweep 길이 가드)가 매 런 슬롯을 차지하며 3번
-    헛도는 걸 막는다 — daily_vod_count가 작을수록(1이면 런 하나를 통째로) 이 낭비가 크다.
-    이런 VOD는 사람이 timeout 없는 로컬 `soopts process <id>`로 처리한다."""
-    _client().table("vods").update(
-        {"status": "failed", "error": error, "retry_count": MAX_RETRIES}
-    ).eq("soop_title_no", title_no).execute()
+
+def count_confirmed_performances(vod_row_id: int) -> int:
+    """VOD의 사람 확정(confirmed) performances 수 — recheck에서 보존됨을 확인용."""
+    rows = (
+        _client()
+        .table("performances")
+        .select("id")
+        .eq("vod_id", vod_row_id)
+        .eq("identify_status", "confirmed")
+        .execute()
+        .data
+    )
+    return len(rows or [])
 
 
 def mark_vod(title_no: str, status: str, error: str | None = None) -> None:
