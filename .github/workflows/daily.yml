@@ -24,12 +24,9 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-latest   # Phase 0 검증 실패 시 self-hosted로 교체 (나머지는 동일)
-    # 한 런은 VOD 1개만 처리하므로(daily_vod_count=1) 소요는 "그 VOD 하나"로 고정된다.
-    # 댓글 타임라인 VOD면 5~30분이지만, 무-타임라인이면 전체 오디오를 받아 세그멘테이션하는
-    # full_sweep이라 수십 분~1시간+ 걸린다. 레포가 public이라 러너는 무료이므로 넉넉히 잡는다.
-    # 이 상한을 넘길 만큼 긴 VOD는 sweep_max_duration_s 가드가 사전 차단한다(호스티드
-    # 러너는 timeout 설정과 무관하게 job당 6시간이 하드 상한).
-    timeout-minutes: 240
+    # 서버는 댓글 타임라인을 마커로 파싱해 DB에 기록만 한다(다운로드·STT 없음) — VOD당 수 초라
+    # 런 전체가 보통 1~2분이면 끝난다. 댓글 조회·Groq 식별의 재시도 여유만 두면 충분하다.
+    timeout-minutes: 15
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -43,17 +40,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: Cache 음악감지 모델
-        uses: actions/cache@v4
-        with:
-          path: ~/.keras/inaSpeechSegmenter
-          key: soopts-models-${{ runner.os }}-v1
-
-      - name: Install soopts (+audio,stt,batch)
-        run: pip install -e ".[audio,stt,batch]" yt-dlp
+      - name: Install soopts (batch only)
+        # 서버는 댓글 타임라인을 마커로 파싱해 DB에 기록만 한다 — 다운로드·세그멘테이션·STT가
+        # 없으므로 ffmpeg/inaSpeechSegmenter(audio)/Whisper(stt)/yt-dlp가 전부 불필요하다.
+        run: pip install -e ".[batch]"
 
       - name: soopts daily
         id: daily
