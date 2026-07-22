@@ -110,24 +110,28 @@ def test_spans_last_song_uses_cap_and_duration():
 
 
 # --------------------------------------------------------------------------- #
-# no_timeline_note — 🎤 0곡일 때 로컬 처리 우선순위 힌트
+# no_timeline_note — 🎤 0곡일 때 로컬 확인 사유 메모
 # --------------------------------------------------------------------------- #
-def test_note_flags_guest_songs_when_music_marker_present():
-    # 🎵(합방/게스트 공연)가 있으면 로컬에서 곡을 찾을 가능성이 높다 → 강하게 권함.
-    comments = ["05:07:35 🎵 갱십 - 이 지금\n05:14:47 🎵 올어바웃설이 - 2411"]
-    assert "로컬 claude-video" in no_timeline_note(comments)
+def test_note_music_marker_is_not_a_priority_signal():
+    # 🎵(합창/따라부르기/게스트)는 솔로 풀곡이 아니라 우선순위 신호가 아니다 — 타임라인
+    # 있음 메모로만 처리된다("솔로곡 확인" 문구, 🎵 특별대우 없음).
+    comments = ["05:07:35 🎵 갱십 - 이 지금\n05:14:47 🎵 올어바웃설이 - 2411\n"
+                "05:20:00 🎵 x - y\n05:25:00 🎵 a - b\n05:30:00 🎵 c - d\n"]
+    note = no_timeline_note(comments)
+    assert "솔로곡 확인" in note
+    assert "게스트/합방" not in note
 
 
-def test_note_weak_hint_when_timeline_but_no_music():
-    # 게임 방송도 타임라인(시각 나열)은 있다 — 음악 표기 없으면 약한 권고.
+def test_note_timeline_present_but_no_mic():
     comments = [
         "00:23:54 🍊 마녀의집?\n00:32:10 🍊 무장조\n00:40:40 🍊 나침반\n"
         "01:08:00 📝 히든\n01:34:50 🍊 금도끼\n"
     ]
     note = no_timeline_note(comments)
-    assert "한번 확인" in note
-    assert "claude-video" not in note
+    assert "팬 타임라인 있으나" in note
+    assert "솔로곡 확인" in note
 
 
-def test_note_says_no_timeline_when_few_comments():
-    assert "게임 방송" in no_timeline_note(["/업//업/", "그냥 종겜 데이였습니다"])
+def test_note_no_timeline_when_few_comments():
+    note = no_timeline_note(["/업//업/", "그냥 종겜 데이였습니다"])
+    assert "댓글 타임라인 없음" in note

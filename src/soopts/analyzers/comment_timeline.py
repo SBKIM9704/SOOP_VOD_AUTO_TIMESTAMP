@@ -91,23 +91,22 @@ def parse_song_timeline(comments: list[str]) -> list[TimelineSong]:
     return songs
 
 
-# 🎤가 아닌 음악 마커(게스트/합방 공연에 쓰임) + 타임라인 여부 판정용 시각 라인.
-_NOTE_MARK = re.compile(r"[🎵🎶]")
+# 타임라인 여부 판정용 시각 라인.
 _TS_LINE = re.compile(r"(?m)^\s*└?\s*\d{1,2}:\d{2}(?::\d{2})?\s")
 
 
 def no_timeline_note(comments: list[str]) -> str:
-    """🎤 곡이 0일 때 vods.status='manual'에 남길 사유 메모. 순수 함수 — 로컬 처리 우선순위 힌트.
+    """🎤(BJ 혼자 부른 풀곡) 곡이 0일 때 vods.status='manual'에 남길 사유 메모. 순수 함수.
 
-    게임 방송도 타임라인 댓글(시각 나열)은 있으므로, '타임라인 유무'만으론 숨은 곡을 못 가른다.
-    🎵/🎶(합방·콘서트 게스트 공연) 표기가 있으면 로컬에서 곡을 찾을 가능성이 높다 → 강하게 권함.
+    목표는 'BJ가 혼자 풀곡을 부른 것'만 기록하는 것이라 🎵/🎶(합창·따라부르기·게스트 공연)는
+    솔로 풀곡이 아니므로 애초에 세지 않는다 — 그래서 🎵는 우선순위 신호로도 쓰지 않는다.
+    그래도 0-🎤 VOD는 로컬에서 한 번 더 확인한다: 팬이 🎤로 표기하지 않았거나 옛 아이콘 없는
+    포맷에 솔로곡이 숨어 있을 수 있어서다.
     """
     joined = "\n".join(comments)
-    if _NOTE_MARK.search(joined):
-        return "🎵 게스트/합방 곡으로 보임 — 로컬 claude-video 처리 권장"
     if len(_TS_LINE.findall(joined)) >= 5:
-        return "타임라인 있으나 🎤 표기 없음 — 로컬에서 한번 확인 권장"
-    return "댓글 타임라인 없음(게임 방송 가능성)"
+        return "팬 타임라인 있으나 🎤 솔로곡 표기 없음 — 로컬에서 솔로곡 확인 권장"
+    return "댓글 타임라인 없음 — 로컬에서 솔로곡 확인 권장"
 
 
 def timeline_songs_to_spans(
