@@ -3,7 +3,7 @@
 스테이션 최신 VOD 중 미처리분 → 댓글 타임라인(🎤/🎵)을 마커로 파싱 → 곡별 span(시작=시각,
 끝=다음 곡 6분 캡) → 제목/가수로 카탈로그 매칭 → DB(performances)에 노래 구간 기록.
 다운로드·세그멘테이션·STT 없이 수 초에 끝난다(초경량). 댓글 타임라인이 없는 VOD는
-'manual'로 표시만 하고, 사람이 로컬에서 claude-video로 처리한다(`soopts ingest`).
+'manual'로 표시만 하고, 사람이 로컬에서 analyze_vod.py 전체 전사 후 `soopts ingest`로 처리한다.
 
 산출물은 **타임스탬프**다. 시청은 SOOP 원본 딥링크(`song_link()`)로 연결하며,
 이 저장소는 영상을 어디에도 업로드하지 않는다.
@@ -313,7 +313,7 @@ def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
             vod_stats = _process_vod(cfg, vod_row, bj_id, ctx)
             if vod_stats.get("no_timeline"):
                 # 🎤 곡이 0인 VOD는 서버에서 처리하지 않는다 — 'manual'로 표시(사유 메모 포함)해
-                # 재시도 큐에서 빼고, 사람이 로컬 claude-video로 처리한다. 메모(note)는 vods.error에
+                # 재시도 큐에서 빼고, 사람이 로컬 analyze_vod.py로 처리한다. 메모(note)는 vods.error에
                 # 남아 `soopts vods --status manual`에서 로컬 처리 우선순위 힌트가 된다.
                 db.mark_vod(title_no, "manual", error=vod_stats.get("note"))
                 stats["manual_skipped"] = stats.get("manual_skipped", 0) + 1
@@ -348,7 +348,7 @@ def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
 def span_to_song(span: dict[str, Any]):
     """ingest 입력 span(dict) → Song. 순수 함수 — start_s/end_s만 필수.
 
-    claude-video `/watch`로 사람이 뽑은 곡 구간이라 채팅 스티커 분석이 없다. sticker_rate=0.0,
+    로컬 분석(analyze_vod.py 등)으로 뽑은 곡 구간이라 채팅 스티커 분석이 없다. sticker_rate=0.0,
     song_likely=True로 둔다 — 사람/Claude가 '노래'라고 단언한 구간이므로 카탈로그 매칭이
     되면 auto_matched로 승격시킨다(댓글 힌트 경로와 같은 취급). title/lyrics는 있으면 식별
     단서로 쓰고, 둘 다 없으면 song_id NULL·needs_review로 남는다.
@@ -373,7 +373,7 @@ def span_to_song(span: dict[str, Any]):
 def ingest_vod(
     cfg: Config, *, title_no: str, bj_id: str, songs: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """claude-video `/watch`가 뽑은 곡 목록(spans)을 DB(performances/vods)에 기록한다.
+    """로컬 분석(analyze_vod.py 전체 전사 등)으로 뽑은 곡 목록(spans)을 DB(performances/vods)에 기록한다.
 
     감지/다운로드/STT/세그멘테이션을 전부 생략한다 — Claude가 로컬에서 영상을 보고 곡
     구간·제목을 이미 정했으므로, 이 함수는 식별(카탈로그 매칭)과 DB 기록만 한다. daily가
@@ -426,7 +426,7 @@ def _record_songs(
 ) -> dict[str, Any]:
     """Song 목록을 식별(카탈로그 매칭) 후 performances에 기록하고 stats를 반환한다(상태 마킹은 호출부).
 
-    댓글 타임라인 처리(_process_vod)와 claude-video ingest(ingest_vod)가 공유하는 코어다.
+    댓글 타임라인 처리(_process_vod)와 로컬 ingest(ingest_vod)가 공유하는 코어다.
     제목이 있으면 `resolve_song_match`(가사 추측 생략), 제목 없이 가사만 있으면 `identify_song`,
     둘 다 없으면 needs_review(None)로 남긴다. 감지된 노래 수만큼 hint_available로 센다.
     """
@@ -486,7 +486,7 @@ def _process_vod(
     타임라인의 🎤/🎵 항목이 시각·제목·가수를 모두 주므로, 시작=시각·끝=다음 곡(6분 캡)으로
     span을 만들고 제목/가수로 카탈로그를 매칭해 기록한다 — 예전의 구간 다운로드·경계 탐지·
     Whisper 전사·Groq 가사추측을 전부 없앴다(VOD당 수 초). 타임라인이 없으면(게임 방송 등)
-    {"no_timeline": True}를 돌려 호출부가 'manual'로 표시한다(로컬 claude-video 처리 대상).
+    {"no_timeline": True}를 돌려 호출부가 'manual'로 표시한다(로컬 처리 대상).
 
     재처리는 멱등하다: clear_machine_performances로 이전 기계 생성분을 지우고 다시 넣되
     사람 확정(confirmed)분은 보존한다. 상태 마킹은 호출부(run_daily)가 한다.

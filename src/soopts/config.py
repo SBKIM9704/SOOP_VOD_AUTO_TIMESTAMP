@@ -85,7 +85,7 @@ class StationConfig:
     bj_id: str = "singgyul"          # 데일리 배치 대상 스테이션
     daily_vod_count: int = 2         # 하루 처리할 미처리 VOD 수
     # 무-타임라인 VOD는 서버에서 처리하지 않는다 — daily가 'manual'로 표시하고, 사람이
-    # 로컬에서 claude-video로 곡을 뽑아 `soopts ingest`로 기록한다(느리고 부정확한 서버
+    # 로컬에서 analyze_vod.py 전체 전사로 곡을 뽑아 `soopts ingest`로 기록한다(느리고 부정확한 서버
     # 전체 오디오 sweep을 없앴다). 로컬 full_sweep 폴백은 `soopts process`.
 
 

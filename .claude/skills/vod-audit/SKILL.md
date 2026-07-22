@@ -51,8 +51,8 @@ set -a; source .env; set +a; .venv/bin/python -m soopts <subcommand> ...
 4. **근거표 제시.** 각 VOD에 대해: `title_no · status · 판정(+원본 댓글 인용 근거) · machine/confirmed · 권고`.
    권고는 다음 중 하나:
    - **keep** — 분류/처리가 맞음. 변경 없음.
-   - **to-manual** — 노래를 놓쳤거나 잘못 추측했고, 로컬에서 claude-video로 다시 처리해야 함.
-     (기계곡을 지우고 status를 manual로 되돌림 → 이후 `soopts ingest`로 재기록)
+   - **to-manual** — 노래를 놓쳤거나 잘못 추측했고, 로컬에서 analyze_vod.py 전체 전사로 다시 처리해야 함.
+     (기계곡을 지우고 status를 manual로 되돌림 → 이후 analyze_vod.py+`soopts ingest`로 재기록)
    - **investigate** — 애매함. 사람 확인 필요.
 
 5. **승인 후에만 적용.** 파괴적 변경(기계곡 삭제 + status 변경)은 반드시 사용자 승인을 받는다.

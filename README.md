@@ -115,10 +115,9 @@ GitHub Actions (public repo = 분 무제한 무료)
   받아둔 구간 파일이 실행 사이 사라져도, 어디까지 처리됐는지는 DB만 보면 알 수 있다.
 - **VOD 선택은 재시도 > 신규 > 백필 순.** 중단된 실행이 남긴 VOD를 먼저 재시도하고, 신규가
   없으면 처리 기록보다 과거로 내려가며 백필한다. SOOP 목록 만료가 자연 바닥선이다.
-- **서버는 댓글 타임라인이 있는 VOD만 처리한다.** 타임라인이 없으면 전체 오디오 sweep(느리고
-  부정확)을 돌리지 않고 `vods.status='manual'`로 표시만 하고 넘어간다. 이런 VOD는 로컬에서
-  [claude-video](https://github.com/bradautomates/claude-video)로 곡을 뽑아 `soopts ingest`로
-  기록한다(아래 "무-타임라인 VOD 로컬 처리").
+- **서버는 댓글 타임라인의 🎤(BJ 솔로곡)만 처리한다.** 🎤가 없으면 `vods.status='manual'`로
+  표시만 하고 넘어간다. 이런 VOD는 로컬에서 `scripts/analyze_vod.py`로 전체 전사해 솔로곡을
+  찾아 `soopts ingest`로 기록한다(아래 "무-타임라인 VOD 로컬 처리").
 - **품질 게이트** — STT 성공률이 임계값(`min_success_rate`, 기본 50%) 미만이면 실행을 실패로
   처리한다. 전사가 대량 실패하는(예: API 한도 초과) 조용한 장애를 드러내기 위함이다.
 - 신곡을 `songs` 테이블에 자동 생성하지 않는다 — 미식별 곡은 항상 `needs_review`로 검수 대기.
@@ -149,23 +148,27 @@ soopts daily --bj other_bj_id        # 다른 스테이션 대상
 
 ## 무-타임라인 VOD 로컬 처리
 
-댓글 타임라인이 없는 VOD는 서버가 `manual`로 남겨두므로, 로컬에서 직접 처리한다.
-[claude-video](https://github.com/bradautomates/claude-video) `/watch` 스킬은 프레임(화면의 곡
-제목)과 오디오를 함께 보므로, 세그멘테이션보다 곡 식별이 정확하다.
+댓글 타임라인의 🎤가 없는 VOD는 서버가 `manual`로 남겨두므로, 로컬에서 전체 전사로 처리한다.
+`scripts/analyze_vod.py`가 파트별 다운로드(멀티파트 안전, `work/` 캐시로 재개) + 전체 오디오
+Whisper 전사(청크별 캐시, `GROQ_API_KEY`/`_2`/`_3` 로테이션)를 하고, 전사문에서 BJ가 혼자 부른
+풀곡을 찾아 기록한다.
 
 ```bash
-# 1) manual 상태 VOD 확인 (Supabase에서 status='manual' 조회)
+# 1) manual VOD 확인
+soopts vods --status manual --json
 
-# 2) claude-video로 곡 목록 추출 — SOOP VOD URL을 바로 넘겨보고(yt-dlp 기반),
-#    안 받으면 영상을 로컬 파일로 받아 파일 경로를 넘긴다.
-#    /watch <url|file> "부른 모든 노래의 시작/끝(초)과 화면의 곡제목·가수를 JSON으로"
-#    → spans.json 저장: {"songs": [{"start_s":1023,"end_s":1245,"title":"...","artist":"..."}]}
+# 2) 전체 전사 (work/{id}/transcript.txt 생성, 재개 가능)
+python scripts/analyze_vod.py 201142227
 
-# 3) DB에 기록 (감지/STT 없이 식별 + performances 기록, status를 analyzed/done으로 승격)
+# 3) transcript.txt를 읽어 BJ 솔로 풀곡 구간을 골라 spans.json 작성
+#    {"songs": [{"start_s":1023,"end_s":1245,"title":"...","artist":"..."}]}
+#    (게임 대화·인트로 BGM은 제외 — 흐르는 가사가 있는 실제 노래만)
+
+# 4) DB에 기록 (식별 + performances 기록, status를 analyzed/done으로 승격)
 soopts ingest 201142227 spans.json
 ```
 
-Claude Code에서는 `/vod-video-ingest` 스킬이 이 흐름(manual 조회 → /watch → ingest)을 대신 몰아준다.
+곡을 하나도 못 찾으면(순수 게임 방송) ingest하지 않고 그대로 두거나 `soopts set-manual`류로 정리한다.
 
 ### 처리 결과 검증 (vod-audit 스킬)
 

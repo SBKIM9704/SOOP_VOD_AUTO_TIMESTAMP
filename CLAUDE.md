@@ -35,25 +35,19 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
 - Shared low-level helpers that both entry points need (e.g. `collector/media.py`'s `map_to_part`)
   live in the module layer, not in `cli.py`. The manual CLI (`songs`/`clips`) still uses the download/
   segment/STT helpers; the batch path no longer touches them.
-- **Local processing of no-timeline VODs** — a `manual` VOD is handled locally by a human, then
-  recorded via **`soopts ingest <id> spans.json`** → `batch.ingest_vod`. `ingest` takes song spans
-  (`{"songs": [{start_s, end_s, title?, artist?, lyrics?}]}`), matches each against the catalog
-  (reusing `resolve_song_match`/`identify_song` via the shared `_record_songs` core), records
-  `performances`, and promotes the VOD out of `manual`. It **writes to the DB** (unlike `songs`/`clips`,
-  local files only) and does no download/STT itself — the finding was already done. Two tools produce
-  the spans, and they're complementary:
-  - **`scripts/analyze_vod.py`** — *finding* (audio). Downloads parts (multi-part safe, offsets from
-    `meta.parts`, cached in `work/` so it survives teardown + resumes), extracts audio, and Whisper-
-    transcribes the **whole VOD** in resumable per-chunk cache (rotates `GROQ_API_KEY`/`_2`/`_3` when a
-    key saturates). You read `work/{id}/transcript.txt` to locate sung songs + timestamps. Proven on an
-    11.6h/4-part VOD on one key. Reliable for "is there singing, and where" on long VODs — but audio
-    only, so it can't read on-screen song titles and needs context to tell live singing from intro BGM.
-  - **`vod-video-ingest` skill** (external [claude-video](https://github.com/bradautomates/claude-video)
-    `/watch`) — *confirming* (visual/frames). Use after `analyze_vod.py` when you need the screen: read
-    an on-screen song-title overlay (when lyrics don't match the catalog), or confirm the BJ is actually
-    singing vs an intro waiting-screen/played track. claude-video downloads the full video, so feed it a
-    pre-fetched 540p local file (`yt-dlp -f hls-hd -N 16 -o "%(playlist_index)s.mp4"`) rather than the
-    URL (its default `hls-original` is ~12GB for a few hours).
+- **Local processing of no-timeline VODs** — a `manual` VOD is analyzed locally with
+  **`scripts/analyze_vod.py`**, then recorded via **`soopts ingest <id> spans.json`** → `batch.ingest_vod`.
+  - `analyze_vod.py` downloads the VOD parts (multi-part safe, offsets from `meta.parts`, cached in
+    `work/` so it survives teardown + resumes), extracts audio, and Whisper-transcribes the **whole VOD**
+    into a resumable per-chunk cache (rotating `GROQ_API_KEY`/`_2`/`_3` when a key saturates). You read
+    `work/{id}/transcript.txt` to find the BJ's solo full songs + timestamps (distinguishing them from
+    game talk / intro BGM by context). Proven on an 11.6h/4-part VOD on one key. This replaced the
+    segmenter (full_sweep), which false-positived on game BGM.
+  - `soopts ingest` then takes the song spans (`{"songs": [{start_s, end_s, title?, artist?, lyrics?}]}`),
+    matches each against the catalog (reusing `resolve_song_match`/`identify_song` via the shared
+    `_record_songs` core), records `performances`, and promotes the VOD out of `manual`. It **writes to
+    the DB** (unlike `songs`/`clips`, local files only). Unmatched titles land as `needs_review` for a
+    human to resolve in the review UI.
 
 ### Config system (`config.py`)
 
@@ -151,7 +145,7 @@ and `run_daily` marks `vods.status = 'manual'`. This covers game-only streams, a
 and old icon-less timelines alike — anything the marker parser can't confidently read goes local.
 `manual` is terminal for the queue: `fetch_retryable` pulls only `failed`/`pending`, and
 `select_targets` skips any title_no already in `existing_by_no`, so a `manual` VOD is never retried
-or re-picked. A human processes it via `soopts ingest` (claude-video), promoting it to `analyzed`/`done`.
+or re-picked. A human processes it locally (`analyze_vod.py` → `soopts ingest`), promoting it to `analyzed`/`done`.
 Reprocessing is idempotent: `clear_machine_performances()` drops the prior run's rows (sparing
 `confirmed`) before re-inserting.
 

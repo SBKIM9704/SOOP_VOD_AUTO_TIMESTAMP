@@ -45,4 +45,4 @@ daily_vod_count = 1        # 한 런에서 처리할 미처리 VOD 수. 1개씩 
                            # cron 주기를 좁히는 쪽이 격리를 유지한다.
 # 서버(daily)는 댓글 타임라인의 🎤 마커만 파싱해 DB에 기록한다(다운로드·STT·세그멘테이션 없음).
 # 🎤가 없는 VOD(게임 방송·🎵 합방·옛 아이콘 없는 타임라인)는 'manual'로 표시하고, 사람이 로컬에서
-# claude-video로 곡을 뽑아 `soopts ingest`로 기록한다. 과거 처리분 검증은 vod-audit 스킬.
+# `scripts/analyze_vod.py`로 전체 전사해 솔로곡을 찾아 `soopts ingest`로 기록한다. 과거 처리분 검증은 vod-audit 스킬.
