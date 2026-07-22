@@ -98,9 +98,9 @@ def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int
         if not spans:
             continue
         raw = work.clips_dir / f"region_{int(ds)}.mp4"
-        if not raw.exists() or args.force:
-            download_span(spans, raw, workers=cfg.collector.segment_workers)
-        span = detect_song_span(cfg, str(raw), ds, de, media_offset=ds)
+        lead, _ = download_span(spans, raw, workers=cfg.collector.segment_workers, force=args.force)
+        # 파일 t=0은 요청 시각(ds)이 아니라 그 시각을 품은 세그먼트의 시작이다(lead만큼 이르다).
+        span = detect_song_span(cfg, str(raw), ds, de, media_offset=ds - lead)
         if span:
             clip, local_start, local_end = span
             clips.append(clip)
@@ -389,22 +389,26 @@ def cmd_transcribe(args) -> int:
     if not spans:
         raise RuntimeError(f"구간 [{ds:.0f},{de:.0f}] 파트 매핑 실패")
     raw = work.clips_dir / f"seg_{int(ds)}_{int(de)}.mp4"
-    if not raw.exists() or args.force:
-        download_span(spans, raw, workers=cfg.collector.segment_workers)
-    # 파트 경계를 넘으면 여러 조각이 이어 붙으므로, 전사 길이는 조각 길이의 합이다.
-    dur = sum(le - ls for _, ls, le in spans)
+    # lead: 파일이 요청 시각보다 앞서 시작하는 초(세그먼트 단위로만 받을 수 있어서). 그래서
+    # 파일 t=0의 절대초는 ds가 아니라 ds-lead다. 파일 안에서 lead초를 건너뛰는 대신 **환산에서
+    # 빼는** 이유: ffmpeg의 입력 -ss는 키프레임으로 되감겨(세그먼트 경계라 사실상 0) 스킵이
+    # 먹지 않는다 — 실측에서 창을 1초씩 옮기면 같은 가사가 1초씩 밀려 찍혔다.
+    lead, dur = download_span(spans, raw, workers=cfg.collector.segment_workers, force=args.force)
+    file_start = ds - lead
+    dur += lead   # 앞에 lead가 붙었으므로 그만큼 더 읽어야 요청 끝까지 담긴다
     model = _load_model(cfg)
     langs = [args.lang] if args.lang else ([cfg.stt.language] if cfg.stt.language else ["en", "ko"])
     if args.segments:
         # 세그먼트별 타임스탬프 JSON — 종료 경계 판정용(가사 끝→아웃트로 잡담 시작 지점 찾기).
-        # 시각은 구간 시작(ds) 오프셋을 더해 VOD 절대초로 환산해 출력한다.
+        # 시각은 파일 t=0의 절대초(file_start = ds - lead)를 더해 VOD 절대초로 환산한다.
         import json as _json
 
         with tempfile.TemporaryDirectory() as td:
             p = _ensure_uploadable(str(raw), Path(td), 0, dur)
             segs, _ = _transcribe_segments(model, p, cfg.stt, langs) if p else ([], "")
         out = [
-            {"start": round(ds + s["start"], 1), "end": round(ds + s["end"], 1), "text": s["text"]}
+            {"start": round(file_start + s["start"], 1),
+             "end": round(file_start + s["end"], 1), "text": s["text"]}
             for s in segs
         ]
         print(_json.dumps(out, ensure_ascii=False))
@@ -506,8 +510,8 @@ def _songs_slice(cfg: Config, vod_id: str, work: WorkPaths, meta, args):
             log.warning("구간 %d-%d 파트 매핑 실패 — 건너뜀", int(s), int(e))
             continue
         path = slice_dir / f"slice_{int(s)}_{int(e)}.mp4"
-        if not path.exists() or args.force:
-            download_span(spans, path, workers=cfg.collector.segment_workers)
+        # 이 경로는 슬라이스 전체를 통째로 전사하고 시각은 region(s,e)에서 오므로 lead는 안 쓴다.
+        download_span(spans, path, workers=cfg.collector.segment_workers, force=args.force)
         rate = sum(1 for t in stickers if s <= t <= e) / max((e - s) / 60.0, 1e-6)
         song = Song(t=int(s), end=int(e), duration=int(e - s),
                     sticker_rate=round(rate, 1), song_likely=rate >= cfg.audio.sticker_rate_strong)

@@ -16,6 +16,7 @@ import time
 import urllib.request
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -55,16 +56,19 @@ def resolve_m3u8_list(url_or_id: str, quality: str = "hls-hd") -> list[str]:
 
 def download_slice(
     m3u8_url: str, start_s: float, end_s: float, out_path: Path, workers: int = 4
-) -> Path:
+) -> float:
     """[start_s, end_s] 구간을 덮는 세그먼트만 받아 concat한 fMP4를 저장한다.
 
     yt-dlp --download-sections는 이 VOD의 HLS에서 빈 출력 버그가 있어, m3u8을 직접 파싱해
     해당 seg-*.m4s + init.m4s를 받아 붙인다(실측 검증됨).
+
+    **반환값은 저장된 파일의 t=0이 실제로 몇 초인지**(세그먼트 경계라 요청한 start_s보다
+    이르다). 세그먼트를 통째로만 받을 수 있어 파일은 요청 시각이 아니라 그 시각을 포함하는
+    세그먼트의 시작에서 출발한다 — 이 값을 무시하고 파일 t=0을 start_s로 취급하면 전사
+    타임스탬프가 최대 세그먼트 길이(~6초)만큼 어긋난다.
     """
     base, init_uri, starts, seg_uris = _parse_playlist(m3u8_url)
-    idxs = [i for i, s in enumerate(starts) if s + 6.0 >= start_s and s <= end_s]
-    if not idxs:
-        raise RuntimeError(f"구간 세그먼트 없음: {start_s}-{end_s}")
+    idxs = _covering_idxs(starts, start_s, end_s)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as fh:
@@ -72,7 +76,17 @@ def download_slice(
             fh.write(_fetch(f"{base}/{init_uri}"))
         _write_segments(fh, [f"{base}/{seg_uris[i]}" for i in idxs], workers)
     log.info("슬라이스 저장(seg %d~%d, %ds): %s", idxs[0], idxs[-1], int(end_s - start_s), out_path)
-    return out_path
+    return starts[idxs[0]]
+
+
+def slice_lead_s(m3u8_url: str, start_s: float, end_s: float) -> float:
+    """요청 시작보다 슬라이스 파일이 몇 초 앞서 시작하는지(≥0). 다운로드 없이 m3u8만 읽는다.
+
+    캐시된 슬라이스를 재사용할 때도 이 값이 필요해서 분리했다(`_parse_playlist`는 URL 단위로
+    캐시되므로 같은 실행 안에서는 추가 요청이 없다).
+    """
+    _, _, starts, _ = _parse_playlist(m3u8_url)
+    return max(0.0, start_s - starts[_covering_idxs(starts, start_s, end_s)[0]])
 
 
 def split_by_part(
@@ -101,38 +115,70 @@ def split_by_part(
 
 
 def download_span(
-    spans: list[tuple[str, float, float]], out_path: Path, workers: int = 4
-) -> float:
-    """`split_by_part`가 쪼갠 구간들을 받아 out_path 하나로 만들고, 담긴 길이(초)를 반환.
+    spans: list[tuple[str, float, float]], out_path: Path,
+    *, workers: int = 4, force: bool = False,
+) -> tuple[float, float]:
+    """`split_by_part`가 쪼갠 구간들을 out_path 하나로 만들고 `(lead_s, covered_s)`를 반환.
+
+    - **lead_s**: 요청 시작보다 파일이 앞서 시작하는 초(세그먼트 경계 때문, ≥0). 호출부는
+      파일 안에서 `lead_s`부터 읽어야 요청 구간과 정확히 맞는다.
+    - **covered_s**: 요청 구간의 길이.
 
     파트가 하나면 그대로 슬라이스 저장. 여러 파트에 걸치면 파트별로 받아 ffmpeg concat으로
     이어 붙인다 — 파트마다 자체 init.m4s(fMP4 헤더)가 있어 한 파일에 그냥 이어 쓰면
     디코더가 두 번째 파트를 읽지 못한다.
+
+    캐시(out_path 존재)일 때도 lead_s는 계산해서 돌려준다 — 캐시 여부에 따라 타임스탬프가
+    달라지면 안 되기 때문이다. 다운로드를 건너뛰어도 m3u8은 읽지만 URL 단위로 캐시된다.
     """
     if not spans:
         raise RuntimeError("구간 파트 매핑 실패 — 받을 세그먼트가 없습니다")
     out_path = Path(out_path)
     covered = sum(le - ls for _, ls, le in spans)
+    head = spans[0]
+    if out_path.exists() and not force:
+        return slice_lead_s(*head), covered
     if len(spans) == 1:
-        m3u8, ls, le = spans[0]
-        download_slice(m3u8, ls, le, out_path, workers=workers)
-        return covered
+        m3u8, ls, le = head
+        return max(0.0, ls - download_slice(m3u8, ls, le, out_path, workers=workers)), covered
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp: list[Path] = []
+    lead = 0.0
     try:
         for i, (m3u8, ls, le) in enumerate(spans):
             part_path = out_path.with_name(f"{out_path.stem}.part{i}{out_path.suffix}")
-            download_slice(m3u8, ls, le, part_path, workers=workers)
+            actual = download_slice(m3u8, ls, le, part_path, workers=workers)
+            if i == 0:
+                lead = max(0.0, ls - actual)
             tmp.append(part_path)
         _concat(tmp, out_path)
         log.info("파트 %d개에 걸친 구간 병합: %s", len(tmp), out_path)
     finally:
         for p in tmp:
             p.unlink(missing_ok=True)
-    return covered
+    return lead, covered
 
 
 # --------------------------------------------------------------------------- #
+def _covering_idxs(starts: list[float], start_s: float, end_s: float) -> list[int]:
+    """[start_s, end_s]와 겹치는 세그먼트 인덱스. 순수 함수.
+
+    끝 시각은 다음 세그먼트의 시작에서 얻는다(마지막은 직전 간격으로 추정) — 예전엔 길이를
+    6초로 하드코딩해 `s + 6.0 >= start_s`로 골랐는데, 두 가지가 어긋났다: 요청이 세그먼트
+    경계에 정확히 맞으면 아무것도 겹치지 않는 앞 세그먼트를 통째로 더 받았고, 반대로 6초보다
+    긴 세그먼트가 있으면 정작 요청 시각을 품은 세그먼트를 빠뜨려 앞부분이 잘릴 수 있었다.
+    """
+    if not starts:
+        raise RuntimeError(f"구간 세그먼트 없음: {start_s}-{end_s}")
+    gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
+    ends = [*starts[1:], starts[-1] + (gaps[-1] if gaps else 6.0)]
+    idxs = [i for i, (s0, e0) in enumerate(zip(starts, ends, strict=True))
+            if e0 > start_s and s0 <= end_s]
+    if not idxs:
+        raise RuntimeError(f"구간 세그먼트 없음: {start_s}-{end_s}")
+    return idxs
+
+
 def _concat(paths: list[Path], out_path: Path) -> None:
     """조각들을 **오디오만** ADTS로 뽑아 이어 붙인 뒤 mp4로 리먹스한다(재인코딩 없음).
 
@@ -234,8 +280,14 @@ def _fetch(url: str) -> bytes:
     return _read_url(url, timeout=30, min_bytes=_MIN_SEGMENT_BYTES)
 
 
+@lru_cache(maxsize=8)
 def _parse_playlist(m3u8_url: str) -> tuple[str, str, list[float], list[str]]:
-    """m3u8 → (base_url, init_uri, 세그먼트별 누적시작초, 세그먼트 URI)."""
+    """m3u8 → (base_url, init_uri, 세그먼트별 누적시작초, 세그먼트 URI).
+
+    VOD의 플레이리스트는 불변이라 URL 단위로 캐시한다 — 한 실행에서 구간을 여러 개 받거나
+    캐시된 슬라이스의 lead만 다시 계산할 때 큰 m3u8을 반복해서 받지 않는다. 반환 리스트는
+    공유되므로 호출부는 읽기만 한다.
+    """
     text = _read_url(m3u8_url, timeout=15, min_bytes=1).decode("utf-8", "replace")
     base = m3u8_url.rsplit("/", 1)[0]
     init_uri = ""
