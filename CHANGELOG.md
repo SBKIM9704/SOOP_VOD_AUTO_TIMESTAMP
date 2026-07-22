@@ -1,6 +1,31 @@
 # Changelog
 
-## [v0.5.0] - 2026-07-20
+## [v0.6.0] - 2026-07-22
+
+서버를 **댓글 타임라인 🎤 파싱 전용**(미디어·STT 없음)으로 전환하고, 무-타임라인·검증 작업을
+**로컬 스킬**로 분리. performance를 로컬에서 전면 검증·보강하고 종료 경계까지 정밀화했다.
+
+### Added
+- **`perf-review` 스킬 + 프리미티브 5종**: 기록된 performance를 로컬에서 재전사해 진짜 노래·BJ
+  솔로·시간을 검증하고 가사·제목·song_id·`local_review`를 채운다. `perfs`/`set-perf`/
+  `match-song`/`add-song`/`transcribe` 프리미티브로 오케스트레이션 (4798954, #37)
+- **`manual-ingest` 스킬**: 서버가 `manual`로 남긴 무-타임라인 VOD를 로컬 전체 전사 후 BJ 솔로
+  풀곡만 골라 `soopts ingest`로 기록 (4798954, #37)
+- **`scripts/analyze_vod.py`**: 무-타임라인 VOD 전체 오디오를 파트별로 받아 Whisper로 전량
+  전사(재개 캐시·GROQ 키 로테이션). 게임 BGM에 오탐하던 segmenter sweep을 대체 (61d1d35, #35)
+- **`transcribe --segments`**: 텍스트 대신 세그먼트별 타임스탬프 JSON을 출력하는 종료 경계
+  보정 프리미티브(`stt._transcribe_segments`). perf-review ③단계에 편입 (962c1c9, #40)
+
+### Changed
+- **서버를 댓글 타임라인 🎤 파싱 전용으로 전환**: HLS 다운로드·segmenter·STT를 배치에서 제거,
+  🎤 마커만 파싱해 DB 기록. 무-타임라인 VOD는 `manual`로 표시해 로컬 처리 (c373561, #33)
+- **🎤만 대상**: 🎵(합창·게스트·튼음악)를 우선순위 신호에서 제거 — BJ가 혼자 부른 풀곡만
+  데이터화 (1ee6e40, #34)
+- **로컬 도구 역할 정리 + 무-타임라인 처리 문서 일원화**: 실효 없던 vod-video-ingest 제거
+  (f596d7c, #36)
+- **`local_review` 축 도입**: 로컬 검증 워크플로(pending→verified)를 작업 기준으로, `needs_review`는
+  검토 후에도 사람이 봐야 할 소수에만 붙이는 escalation으로 정정 (691655a, #39)
+- **임시 체크리스트 gitignore**: 생성되는 needs_review.md 추적 해제 (1d0c2f9, #38)
 
 산출물을 **타임스탬프**로 재정의(유튜브·영상 생산 제거)하고, 배치의 유실·재시도
 신뢰성과 무-타임라인 VOD 감지를 전면 보강.
