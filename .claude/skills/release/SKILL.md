@@ -24,9 +24,12 @@ metadata:
 ```bash
 git checkout develop
 git pull origin develop
-git log main..develop --oneline
+git fetch origin --tags        # 원격 main·태그 최신화 (로컬 main은 stale일 수 있음)
+git log origin/main..develop --oneline
 ```
 
+- **반드시 로컬 `main`이 아니라 `origin/main` 기준으로 비교한다.** 로컬 `main`은 오래돼 divergent일
+  수 있어(`main..develop`가 이미 릴리즈된 커밋까지 잡음), 잘못된 CHANGELOG·태그 위치로 이어진다.
 - 커밋이 없으면 "릴리즈할 변경사항이 없습니다." 안내 후 종료한다.
 
 #### 1-2. 현재 최신 태그 확인
@@ -39,7 +42,7 @@ git tag -l "v*" | sort -V | tail -1
 
 #### 1-3. 버전 자동 추천 (인자가 없을 때)
 
-`$ARGUMENTS`가 비어 있으면, `git log main..develop --oneline` 출력의 커밋 타입을 분석하여 다음 규칙으로 버전을 추천한다:
+`$ARGUMENTS`가 비어 있으면, `git log origin/main..develop --oneline` 출력의 커밋 타입을 분석하여 다음 규칙으로 버전을 추천한다:
 
 | 조건 | 범프 종류 | 예시 |
 |------|-----------|------|
@@ -69,16 +72,19 @@ git tag -l "v*" | sort -V | tail -1
 
 ### 2. 버전 bump
 
-```bash
-npm version $VERSION --no-git-tag-version
+이 저장소는 **Python 패키지**다. 버전은 `pyproject.toml`의 `version = "X.Y.Z"` 한 곳에만 있다
+(package.json·package-lock.json 없음, npm 사용 금지). Edit 도구로 그 줄만 교체한다:
+
+```
+version = "<이전>"   →   version = "$VERSION"
 ```
 
-- `package.json`과 `package-lock.json`이 동시에 업데이트된다.
-- `--no-git-tag-version`: git tag는 main merge 완료 후 생성한다.
+- 확인: `grep -m1 '^version' pyproject.toml` 이 `version = "$VERSION"` 인지.
+- git tag는 여기서 만들지 않는다 — main merge 완료 후 8단계에서 생성한다.
 
 ### 3. CHANGELOG.md 업데이트
 
-`git log main..develop --oneline`의 출력을 파싱하여 아래 형식으로 CHANGELOG.md 상단에 prepend한다:
+`git log origin/main..develop --oneline`의 출력을 파싱하여 아래 형식으로 CHANGELOG.md 상단에 prepend한다:
 
 ```markdown
 ## [v$VERSION] - YYYY-MM-DD
@@ -103,7 +109,7 @@ npm version $VERSION --no-git-tag-version
 ### 4. 버전 bump 커밋
 
 ```bash
-git add package.json package-lock.json CHANGELOG.md
+git add pyproject.toml CHANGELOG.md
 git commit -m "chore: release v$VERSION"
 git push origin develop
 ```
@@ -156,11 +162,15 @@ gh pr merge <PR번호> --merge --delete-branch=false
 - **merge commit** 방식 사용 (develop 커밋 이력을 main에 보존)
 - develop 브랜치는 삭제하지 않는다.
 
-### 8. 완료 처리
+### 8. 완료 처리 (태그 생성)
+
+**merge 직후 원격을 다시 fetch하고, 태그는 `origin/main`(병합된 커밋)에 직접 건다.**
+`git checkout main && git pull` 방식은 금지 — 로컬 `main`이 divergent이면 pull이 실패하고
+태그가 **stale한 로컬 main의 옛 커밋에 잘못 찍힌다**(실제로 겪은 버그).
 
 ```bash
-git checkout main
-git pull origin main
+git fetch origin
+git log origin/main --oneline -1     # 병합 커밋(release: v$VERSION merge)인지 확인
 ```
 
 태그가 이미 존재하는지 확인한다:
@@ -169,15 +179,25 @@ git pull origin main
 git tag -l "v$VERSION"
 ```
 
-- 비어 있으면 태그를 생성하고 push한다:
+- 비어 있으면 **`origin/main`을 가리키도록** 태그를 생성하고 push한다:
   ```bash
-  git tag v$VERSION
+  git tag v$VERSION origin/main
   git push origin v$VERSION
   ```
-- 이미 존재하면 "태그 v$VERSION 이미 존재, 건너뜀" 안내만 출력한다.
+- 이미 존재하면, 그 태그가 `origin/main`을 가리키는지 확인한다
+  (`git rev-list -n1 v$VERSION` == `git rev-parse origin/main`). 다른 커밋을 가리키면 잘못
+  찍힌 것이므로 삭제 후 재생성한다:
+  ```bash
+  git push origin :refs/tags/v$VERSION && git tag -d v$VERSION
+  git tag v$VERSION origin/main && git push origin v$VERSION
+  ```
+
+로컬 `main`을 원격에 안전하게 맞춘다(체크아웃/merge 없이, divergent여도 안전):
 
 ```bash
-git checkout develop
+git branch -f main origin/main
 ```
 
-- 최종적으로 PR URL, 버전(`v$VERSION`), 태그 상태를 출력한다.
+- 검증: `git show main:pyproject.toml | grep -m1 '^version'` 이 `version = "$VERSION"` 인지,
+  `git rev-list -n1 v$VERSION`가 `origin/main` HEAD와 같은지 확인한다.
+- 최종적으로 PR URL, 버전(`v$VERSION`), 태그 커밋 해시를 출력한다. 현재 브랜치는 `develop` 유지.
