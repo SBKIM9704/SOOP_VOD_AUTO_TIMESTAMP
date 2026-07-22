@@ -176,3 +176,33 @@ def test_transcribe_best_returns_empty_when_extraction_fails(tmp_path, monkeypat
     monkeypatch.setattr(stt, "_transcribe_langs",
                         lambda *a, **k: pytest.fail("추출 실패 시 업로드하면 안 된다"))
     assert _transcribe_best(_FakeClient({}), str(mp4), Config()) == ("", "")
+
+
+def _tsegs(*items):
+    """(text, start, end) 튜플들을 verbose_json 세그먼트(dict)로. avg_logprob는 고정."""
+    return [{"text": t, "start": s, "end": e, "avg_logprob": -0.2} for (t, s, e) in items]
+
+
+def test_transcribe_segments_returns_slim_timestamps(tmp_path):
+    """세그먼트별 {start,end,text}만 남기고 float은 소수1자리로 반올림한다."""
+    wav = tmp_path / "seg.wav"
+    wav.write_bytes(b"fake-audio")
+    client = _FakeClient({"ko": _tsegs(("가사 한 줄", 0.0, 3.44), ("다음 줄", 3.44, 7.06))})
+    segs, lang = stt._transcribe_segments(client, str(wav), Config().stt, ["ko"])
+    assert lang == "ko"
+    assert segs == [
+        {"start": 0.0, "end": 3.4, "text": "가사 한 줄"},
+        {"start": 3.4, "end": 7.1, "text": "다음 줄"},
+    ]
+
+
+def test_transcribe_segments_picks_best_scoring_language(tmp_path):
+    """언어별 평균 logprob이 높은 쪽의 세그먼트를 고른다(텍스트 선택과 동일 기준)."""
+    wav = tmp_path / "seg.wav"
+    wav.write_bytes(b"fake-audio")
+    en = [{"text": "la la", "start": 0.0, "end": 2.0, "avg_logprob": -0.9}]
+    ko = [{"text": "노래 가사", "start": 0.0, "end": 2.0, "avg_logprob": -0.1}]
+    segs, lang = stt._transcribe_segments(_FakeClient({"en": en, "ko": ko}), str(wav),
+                                          Config().stt, ["en", "ko"])
+    assert lang == "ko"
+    assert [s["text"] for s in segs] == ["노래 가사"]

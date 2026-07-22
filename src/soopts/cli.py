@@ -369,6 +369,7 @@ def cmd_transcribe(args) -> int:
         _load_model,
         _transcribe_best,
         _transcribe_langs,
+        _transcribe_segments,
     )
     from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
     from soopts.collector.meta import fetch_meta
@@ -391,6 +392,21 @@ def cmd_transcribe(args) -> int:
     if not raw.exists() or args.force:
         download_slice(m3u8, ls, le, raw, workers=cfg.collector.segment_workers)
     model = _load_model(cfg)
+    langs = [args.lang] if args.lang else ([cfg.stt.language] if cfg.stt.language else ["en", "ko"])
+    if args.segments:
+        # 세그먼트별 타임스탬프 JSON — 종료 경계 판정용(가사 끝→아웃트로 잡담 시작 지점 찾기).
+        # 시각은 구간 시작(ds) 오프셋을 더해 VOD 절대초로 환산해 출력한다.
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as td:
+            p = _ensure_uploadable(str(raw), Path(td), 0, le - ls)
+            segs, _ = _transcribe_segments(model, p, cfg.stt, langs) if p else ([], "")
+        out = [
+            {"start": round(ds + s["start"], 1), "end": round(ds + s["end"], 1), "text": s["text"]}
+            for s in segs
+        ]
+        print(_json.dumps(out, ensure_ascii=False))
+        return 0
     if args.lang:
         with tempfile.TemporaryDirectory() as td:
             p = _ensure_uploadable(str(raw), Path(td), 0, le - ls)
@@ -610,6 +626,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--end", type=float, required=True, help="끝 초")
     sp.add_argument("--pad", type=float, default=15.0, help="앞뒤 여유 초(기본 15)")
     sp.add_argument("--lang", help="강제 언어(en/ko). 없으면 자동")
+    sp.add_argument(
+        "--segments", action="store_true",
+        help="텍스트 대신 세그먼트별 [{start,end,text}] 타임스탬프 JSON 출력(종료 경계 판정용)")
     sp.set_defaults(func=cmd_transcribe)
 
     sp = sub.add_parser("fetch", help="yt-dlp로 전체 오디오 다운로드")

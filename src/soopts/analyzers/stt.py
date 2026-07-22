@@ -135,6 +135,41 @@ def _transcribe_langs(client, path: str, scfg, langs: list[str]) -> tuple[str, s
     return best_text, best_lang
 
 
+def _transcribe_segments(client, path: str, scfg, langs: list[str]) -> tuple[list[dict], str]:
+    """best-language 세그먼트 목록 ``[{start,end,text}]`` 과 언어를 반환 — 종료 경계 판정용.
+
+    ``_transcribe_langs`` 는 세그먼트를 이어붙인 텍스트만 돌려주지만, 노래 실제 종료 지점을
+    찾으려면 세그먼트별 타임스탬프가 필요하다(가사가 끝나고 아웃트로 잡담이 시작되는 시각).
+    시각은 전사한 파일(구간) 기준 상대초다 — 호출부가 구간 시작 오프셋을 더해 VOD 절대초로 만든다.
+    """
+    best_segs: list[dict] = []
+    best_lang, best_score = "", -1e9
+    for lang in langs:
+        try:
+            with open(path, "rb") as f:
+                resp = client.audio.transcriptions.create(
+                    file=f, model=scfg.groq_model, language=lang, response_format="verbose_json",
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("Groq 전사 실패(lang=%s): %s", lang, e)
+            continue
+        segs = resp.segments or []
+        if not segs:
+            continue
+        score = sum(s.get("avg_logprob", 0.0) for s in segs) / len(segs)
+        if score > best_score:
+            best_segs = [
+                {
+                    "start": round(float(s.get("start", 0.0)), 1),
+                    "end": round(float(s.get("end", 0.0)), 1),
+                    "text": (s.get("text") or "").strip(),
+                }
+                for s in segs
+            ]
+            best_lang, best_score = lang, score
+    return best_segs, best_lang
+
+
 def _load_model(cfg: Config):
     from groq import Groq
 
