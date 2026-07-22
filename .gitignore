@@ -26,3 +26,4 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
+needs_review.md
