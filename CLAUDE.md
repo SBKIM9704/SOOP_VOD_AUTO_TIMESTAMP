@@ -198,6 +198,17 @@ into history automatically. No separate "new vs backfill" branch — newest-firs
 ordering fall out. `select_targets` is the pure core (retry list + candidate list → picks); the impure
 paging loop lives in `batch.py` to keep `db.py` Supabase-only and `vod_list.py` SOOP-only.
 
+**Cooldown — VODs younger than `station.min_vod_age_days` (7) are not candidates.** A fan timeline
+doesn't exist right after a broadcast, and processing early is irreversible in both directions:
+0 🎤 songs → `manual` (dumped into the most expensive human queue, full local transcription), and a
+half-written timeline → only those songs recorded, VOD marked `analyzed`, the rest silently lost.
+Neither state is ever re-processed automatically (`fetch_retryable` sees only `failed`/`pending`,
+and `select_targets` skips anything in `existing_by_no`). `cooldown_cutoff()` computes the boundary
+date in **KST** — `broadcast_date` comes from SOOP's KST `reg_date` while the runner is UTC, so a
+UTC-based date is off by one on the 04:00 KST run. Retries are exempt (already-committed work;
+blocking them would wedge the queue), and a candidate with no `broadcast_date` is not filtered.
+Throughput is unaffected: the paging loop just walks further into history to fill the slots.
+
 ### Quality gate (`quality_warning`)
 
 `quality_warning` measures the STT success rate (`stt_ok / stt_attempted`) and raises below

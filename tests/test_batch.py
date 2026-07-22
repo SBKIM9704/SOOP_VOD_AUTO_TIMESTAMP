@@ -1,4 +1,6 @@
 
+from datetime import UTC, datetime
+
 import pytest
 
 import soopts.batch as batch_module
@@ -6,6 +8,7 @@ from soopts.batch import (
     RunContext,
     TimelineEvent,
     _narration_preserves_numbers,
+    cooldown_cutoff,
     fmt_duration_s,
     format_detailed_summary,
     format_summary,
@@ -52,6 +55,21 @@ def test_span_to_song_rejects_bad_range():
 def test_span_to_song_requires_bounds():
     with pytest.raises(ValueError):
         span_to_song({"title": "곡"})  # start_s/end_s 없음
+
+def test_cooldown_cutoff_subtracts_days_from_kst_date():
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)   # KST 2026-07-22 21:00
+    assert cooldown_cutoff(7, now) == "2026-07-15"
+
+
+def test_cooldown_cutoff_uses_kst_not_utc_date():
+    # UTC로 재면 07-21이라 경계가 하루 어긋난다. daily는 04시(KST) 슬롯이 있어 실제로 밟는 경로다.
+    now = datetime(2026, 7, 21, 19, 0, tzinfo=UTC)   # KST 2026-07-22 04:00
+    assert cooldown_cutoff(7, now) == "2026-07-15"
+
+
+def test_cooldown_cutoff_disabled_when_days_not_positive():
+    assert cooldown_cutoff(0, datetime(2026, 7, 22, tzinfo=UTC)) is None
+
 
 def test_next_vod_status_no_songs_detected_is_done():
     # 감지된 노래가 없으면 검수·업로드할 게 없으니 바로 종결(done) — analyzed에 영구히 머물지 않는다.
@@ -314,7 +332,7 @@ def test_select_vods_backfills_across_pages(monkeypatch):
     up = _fake_db(monkeypatch, existing_rows={
         "20": {"status": "done"}, "19": {"status": "analyzed"},
     })
-    batch_module._select_vods(object(), "bj", 2)
+    batch_module._select_vods(Config(), "bj", 2)
     assert [r["soop_title_no"] for r in up["rows"]] == ["10", "9"]
 
 
@@ -330,7 +348,7 @@ def test_select_vods_stops_paging_once_filled(monkeypatch):
 
     monkeypatch.setattr(vod_list, "iter_vod_pages", _iter)
     _fake_db(monkeypatch, existing_rows={})
-    batch_module._select_vods(object(), "bj", 1)
+    batch_module._select_vods(Config(), "bj", 1)
     assert visited == ["20"]   # 1페이지에서 채웠으므로 2페이지 미방문
 
 
@@ -345,8 +363,23 @@ def test_select_vods_retry_skips_paging_when_full(monkeypatch):
     monkeypatch.setattr(vod_list, "iter_vod_pages", _boom)
     up = _fake_db(monkeypatch, existing_rows={},
                   retryable=[{"soop_title_no": "9", "status": "failed", "retry_count": 0}])
-    batch_module._select_vods(object(), "bj", 1)
+    batch_module._select_vods(Config(), "bj", 1)
     assert [r["soop_title_no"] for r in up["rows"]] == ["9"]
+
+
+def test_select_vods_pages_past_cooldown_window(monkeypatch):
+    """쿨다운 안의 최신 VOD는 건너뛰고 그만큼 과거로 더 내려가 슬롯을 채운다."""
+    from soopts.collector import vod_list
+    from soopts.config import Config as Cfg
+    from soopts.config import StationConfig
+    monkeypatch.setattr(batch_module, "cooldown_cutoff", lambda days: "2026-07-15")
+    monkeypatch.setattr(vod_list, "iter_vod_pages", _pages(
+        [{"title_no": "20", "broadcast_date": "2026-07-21"}],   # 쿨다운 안 — 제외
+        [{"title_no": "10", "broadcast_date": "2026-06-30"}],   # 충분히 과거
+    ))
+    up = _fake_db(monkeypatch, existing_rows={})
+    batch_module._select_vods(Cfg(station=StationConfig(min_vod_age_days=7)), "bj", 1)
+    assert [r["soop_title_no"] for r in up["rows"]] == ["10"]
 
 
 def test_select_vods_converges_when_no_past_left(monkeypatch):
@@ -354,5 +387,5 @@ def test_select_vods_converges_when_no_past_left(monkeypatch):
     from soopts.collector import vod_list
     monkeypatch.setattr(vod_list, "iter_vod_pages", _pages([{"title_no": "20"}]))
     up = _fake_db(monkeypatch, existing_rows={"20": {"status": "done"}})
-    batch_module._select_vods(object(), "bj", 3)
+    batch_module._select_vods(Config(), "bj", 3)
     assert up["rows"] == []

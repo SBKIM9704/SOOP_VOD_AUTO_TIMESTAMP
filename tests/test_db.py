@@ -48,6 +48,41 @@ def test_select_targets_retry_then_fills_with_new():
 
 
 # --------------------------------------------------------------------------- #
+# 쿨다운 — 방송 직후 VOD 제외
+# --------------------------------------------------------------------------- #
+def test_select_targets_skips_candidates_newer_than_cutoff():
+    """방송 직후 VOD는 팬 타임라인이 아직 없거나 쓰이는 중이라 건드리지 않는다."""
+    candidates = [
+        {"title_no": "2", "title": "어제 방송", "broadcast_date": "2026-07-21"},
+        {"title_no": "1", "title": "지난달 방송", "broadcast_date": "2026-06-30"},
+    ]
+    picked = select_targets([], candidates, {}, n=2, cutoff_date="2026-07-15")
+    assert [p["soop_title_no"] for p in picked] == ["1"]
+
+
+def test_select_targets_includes_candidate_on_the_cutoff_date():
+    """cutoff 당일은 포함 — 경계에서 하루를 더 기다리게 만들지 않는다."""
+    candidates = [{"title_no": "1", "title": "A", "broadcast_date": "2026-07-15"}]
+    picked = select_targets([], candidates, {}, n=1, cutoff_date="2026-07-15")
+    assert [p["soop_title_no"] for p in picked] == ["1"]
+
+
+def test_select_targets_keeps_candidate_without_broadcast_date():
+    """날짜를 모르면 판단 근거가 없다 — 근거 없이 무기한 보류하느니 처리한다."""
+    candidates = [{"title_no": "1", "title": "A", "broadcast_date": None}]
+    picked = select_targets([], candidates, {}, n=1, cutoff_date="2026-07-15")
+    assert [p["soop_title_no"] for p in picked] == ["1"]
+
+
+def test_select_targets_cutoff_does_not_block_retries():
+    """재시도는 면제 — 이미 착수한 작업이고, 여기서 막으면 큐가 영영 안 비워진다."""
+    retryable = [{"soop_title_no": "9", "status": "failed", "retry_count": 0,
+                  "broadcast_date": "2026-07-21"}]
+    picked = select_targets(retryable, [], {}, n=1, cutoff_date="2026-07-15")
+    assert [p["soop_title_no"] for p in picked] == ["9"]
+
+
+# --------------------------------------------------------------------------- #
 # 재시도 — retry_count 처리
 # --------------------------------------------------------------------------- #
 def test_select_targets_bumps_retry_count_for_stale_pending():

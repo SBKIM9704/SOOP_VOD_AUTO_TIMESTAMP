@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from soopts.config import Config
@@ -87,6 +88,18 @@ def fmt_duration_s(seconds: float) -> str:
     if s or not parts:
         parts.append(f"{s}초")
     return " ".join(parts)
+
+
+def cooldown_cutoff(days: int, now: datetime | None = None) -> str | None:
+    """쿨다운 경계 날짜 'YYYY-MM-DD'(이 날짜까지 처리 대상). days<=0이면 None(쿨다운 없음).
+
+    기준은 **KST**다 — broadcast_date는 SOOP reg_date(KST)의 날짜 부분인데 러너는 UTC로
+    돌아서, UTC 날짜로 재면 04시(KST) 런에서 하루씩 어긋난다.
+    """
+    if days <= 0:
+        return None
+    kst_now = (now or datetime.now(UTC)).astimezone(timezone(timedelta(hours=9)))
+    return (kst_now.date() - timedelta(days=days)).isoformat()
 
 
 def next_vod_status(detected: int) -> str:
@@ -272,22 +285,27 @@ def _select_vods(cfg: Config, bj_id: str, count: int) -> list[dict[str, Any]]:
     처리 완료분을 건너뛰므로 신규가 없으면 자연히 과거로 내려가 백필하고, 목록 마지막
     페이지(SOOP 만료의 자연 바닥)에 닿으면 멈춘다. 과거가 없거나 최신만 남으면 그대로
     수렴한다 — 별도 분기가 필요 없다.
+
+    쿨다운(`station.min_vod_age_days`) 안의 최신 VOD는 후보에서 빠진다. 슬롯이 비지는
+    않는다 — 순회가 그만큼 과거로 더 내려가 백필로 채우고, 백필까지 마르면 그냥 덜 처리하고
+    끝난다(VOD가 창 밖으로 나오면 다음 런이 잡는다).
     """
     from soopts import db
     from soopts.collector.vod_list import iter_vod_pages
 
     if count <= 0:
         return []
+    cutoff = cooldown_cutoff(cfg.station.min_vod_age_days)
     retryable = db.fetch_retryable(count)
     candidates: list[dict[str, Any]] = []
     existing_by_no: dict[str, dict[str, Any]] = {}
-    targets = db.select_targets(retryable, candidates, existing_by_no, count)
+    targets = db.select_targets(retryable, candidates, existing_by_no, count, cutoff)
 
     if len(targets) < count:
         for page in iter_vod_pages(cfg, bj_id):
             candidates.extend(page)
             existing_by_no.update(db.fetch_existing([str(c["title_no"]) for c in page]))
-            targets = db.select_targets(retryable, candidates, existing_by_no, count)
+            targets = db.select_targets(retryable, candidates, existing_by_no, count, cutoff)
             if len(targets) >= count:
                 break
     return db.upsert_pending(targets)
