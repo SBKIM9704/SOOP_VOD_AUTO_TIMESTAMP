@@ -35,13 +35,25 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
 - Shared low-level helpers that both entry points need (e.g. `collector/media.py`'s `map_to_part`)
   live in the module layer, not in `cli.py`. The manual CLI (`songs`/`clips`) still uses the download/
   segment/STT helpers; the batch path no longer touches them.
-- **Local processing of no-timeline VODs — `soopts ingest <id> spans.json`** → `batch.ingest_vod`.
-  A human runs the external [claude-video](https://github.com/bradautomates/claude-video) `/watch`
-  skill (or the `vod-video-ingest` skill) locally on the VOD to find sung segments + on-screen titles,
-  emitting song spans (`{"songs": [{start_s, end_s, title?, artist?, lyrics?}]}`). `ingest` matches
-  each against the catalog (reusing `resolve_song_match`/`identify_song` via the shared `_record_songs`
-  core) and records `performances`. This **writes to the DB** (unlike `songs`/`clips`, local files
-  only) and promotes the VOD out of `manual`. No download/STT/segment — Claude already did the finding.
+- **Local processing of no-timeline VODs** — a `manual` VOD is handled locally by a human, then
+  recorded via **`soopts ingest <id> spans.json`** → `batch.ingest_vod`. `ingest` takes song spans
+  (`{"songs": [{start_s, end_s, title?, artist?, lyrics?}]}`), matches each against the catalog
+  (reusing `resolve_song_match`/`identify_song` via the shared `_record_songs` core), records
+  `performances`, and promotes the VOD out of `manual`. It **writes to the DB** (unlike `songs`/`clips`,
+  local files only) and does no download/STT itself — the finding was already done. Two tools produce
+  the spans, and they're complementary:
+  - **`scripts/analyze_vod.py`** — *finding* (audio). Downloads parts (multi-part safe, offsets from
+    `meta.parts`, cached in `work/` so it survives teardown + resumes), extracts audio, and Whisper-
+    transcribes the **whole VOD** in resumable per-chunk cache (rotates `GROQ_API_KEY`/`_2`/`_3` when a
+    key saturates). You read `work/{id}/transcript.txt` to locate sung songs + timestamps. Proven on an
+    11.6h/4-part VOD on one key. Reliable for "is there singing, and where" on long VODs — but audio
+    only, so it can't read on-screen song titles and needs context to tell live singing from intro BGM.
+  - **`vod-video-ingest` skill** (external [claude-video](https://github.com/bradautomates/claude-video)
+    `/watch`) — *confirming* (visual/frames). Use after `analyze_vod.py` when you need the screen: read
+    an on-screen song-title overlay (when lyrics don't match the catalog), or confirm the BJ is actually
+    singing vs an intro waiting-screen/played track. claude-video downloads the full video, so feed it a
+    pre-fetched 540p local file (`yt-dlp -f hls-hd -N 16 -o "%(playlist_index)s.mp4"`) rather than the
+    URL (its default `hls-original` is ~12GB for a few hours).
 
 ### Config system (`config.py`)
 
