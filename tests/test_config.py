@@ -42,3 +42,22 @@ def test_broadcast_date_from_file_info_key():
     # 형식 다르면 빈 문자열(안전)
     m2 = MetaResult("v", "t", "bj", "nick", 100, parts=[MetaPart(0, "weirdkey", 100, 0)])
     assert broadcast_date(m2) == ""
+
+
+def test_youtube_and_video_sections_have_safe_defaults():
+    """업로드는 unlisted — 검색·추천에 노출되는 public이 기본이 되면 안 된다."""
+    cfg = load_config(Path("nope.toml"))
+    assert cfg.youtube.privacy == "unlisted"
+    assert cfg.youtube.daily_upload_limit == 1
+    assert cfg.video.quality == "hls-original"
+    assert cfg.video.fallback_quality == "hls-hd4k"
+
+
+def test_youtube_section_partial_override(tmp_path):
+    p = tmp_path / "soopts.toml"
+    p.write_text('[video]\nquality = "hls-hd4k"\n[youtube]\ncategory_id = "24"\n', encoding="utf-8")
+    cfg = load_config(p)
+    assert cfg.video.quality == "hls-hd4k"
+    assert cfg.video.preset == "veryfast"        # 나머지는 기본값
+    assert cfg.youtube.category_id == "24"
+    assert cfg.youtube.privacy == "unlisted"

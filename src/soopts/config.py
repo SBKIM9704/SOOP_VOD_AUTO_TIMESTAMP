@@ -105,6 +105,63 @@ class CommentConfig:
 
 
 @dataclass
+class YouTubeConfig:
+    """노래모음 업로드(soopts youtube-upload).
+
+    `unlisted`(일부 공개)로 올린다 — 링크를 아는 사람만 볼 수 있고 검색·추천에는 뜨지 않는다.
+    검수 뒤에 공개하는 2단계 게이트는 두지 않는다: performances.youtube_url이 업로드 시점에
+    기록되므로 곧바로 살아있는 링크여야 소비 앱이 상태를 따로 걸러낼 필요가 없다. 완전 공개
+    (public) 전환은 사람이 스튜디오에서 한다 — 코드에는 그 경로가 없다.
+    """
+
+    client_secret: str = "client_secret.json"  # Google Cloud OAuth 클라이언트(사용자 준비)
+    token_file: str = "~/.config/soopts/yt_token.json"  # 최초 동의 후 저장되는 토큰
+    privacy: str = "unlisted"        # 링크로만 시청 가능(검색·추천 노출 없음)
+    category_id: str = "10"          # 10 = Music
+    made_for_kids: bool = False
+    # 쿼터: videos.insert 1600유닛/건, 일일 10000유닛. 하루 1건이면 조회/수정 여유가 충분하고,
+    # 무엇보다 봇 같은 케이던스를 만들지 않는다.
+    daily_upload_limit: int = 1
+    # 치환자: {date}(방송일 YYYY-MM-DD) {n}(곡 수) {title} {artist}(1곡일 때만)
+    title_template: str = "{date} 노래 모음 ({n}곡)"
+    # 1곡짜리 VOD는 "모음"이 어색해서 곡명을 그대로 제목에 쓴다(전체의 1/4가 1곡짜리다).
+    title_template_single: str = "{date} {title} - {artist}"
+
+
+@dataclass
+class VideoConfig:
+    """노래 구간을 이어붙인 합본 영상 빌드(export/video.py).
+
+    모든 클립을 같은 해상도/fps/SAR/샘플레이트로 재인코딩한다 — concat 디먹서가 `-c copy`로
+    붙으려면 파라미터가 완전히 같아야 하고, 어차피 곡 제목 오버레이 때문에 인코딩은 피할 수 없다.
+    """
+
+    quality: str = "hls-original"    # 1920x1080 8Mbps (yt-dlp -F 실측)
+    fallback_quality: str = "hls-hd4k"  # 1280x720 4Mbps — original이 없는 VOD용
+    width: int = 1920
+    height: int = 1080
+    fps: int = 30
+    crf: int = 23
+    preset: str = "veryfast"         # 러너 2코어로 100분짜리를 시간 안에 끝내려면 이 이상 못 올린다
+    audio_bitrate: str = "192k"
+    audio_rate: int = 48000
+    # 좌상단 곡 정보 오버레이: 제목/아티스트 리본 2줄 + 왼쪽 액센트 바. 리본 폭은 drawtext의
+    # box에 맡겨 글자 길이에 자동으로 맞춘다(고정 폭 패널은 긴 곡 제목이 삐져나온다).
+    font_file: str = "/usr/share/fonts/truetype/nanum/NanumSquareR.ttf"
+    font_file_bold: str = "/usr/share/fonts/truetype/nanum/NanumSquareB.ttf"
+    title_overlay_font_size: int = 44
+    artist_overlay_font_size: int = 28   # 제목보다 작아야 어느 쪽이 곡명인지 한눈에 들어온다
+    title_overlay_opacity: float = 0.6
+    overlay_x: int = 40
+    overlay_y: int = 40
+    accent_bar_w: int = 7
+    accent_color: str = "0xFFD24A@0.95"
+    # 상한 — 러너 시간·디스크 예산의 안전판. 실측 최대가 30곡/109분이라 여유를 두고 잡았다.
+    max_songs: int = 40
+    max_total_minutes: float = 150.0
+
+
+@dataclass
 class Config:
     endpoints: Endpoints = field(default_factory=Endpoints)
     collector: CollectorConfig = field(default_factory=CollectorConfig)
@@ -113,6 +170,8 @@ class Config:
     clip: ClipConfig = field(default_factory=ClipConfig)
     station: StationConfig = field(default_factory=StationConfig)
     comment: CommentConfig = field(default_factory=CommentConfig)
+    youtube: YouTubeConfig = field(default_factory=YouTubeConfig)
+    video: VideoConfig = field(default_factory=VideoConfig)
     work_root: Path = Path("work")
 
 
@@ -138,6 +197,8 @@ def load_config(path: Path | None = None, work_root: Path | None = None) -> Conf
         clip=_build_section(ClipConfig, data.get("clip", {})),
         station=_build_section(StationConfig, data.get("station", {})),
         comment=_build_section(CommentConfig, data.get("comment", {})),
+        youtube=_build_section(YouTubeConfig, data.get("youtube", {})),
+        video=_build_section(VideoConfig, data.get("video", {})),
     )
     if data.get("work_root") is not None:
         cfg.work_root = Path(data["work_root"])
