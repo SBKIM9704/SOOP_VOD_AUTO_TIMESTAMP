@@ -146,9 +146,9 @@ def cmd_daily(args) -> int:
 
 
 def cmd_ingest(args) -> int:
-    """claude-video로 뽑은 곡 목록(JSON)을 DB에 기록 — 무-타임라인 VOD 로컬 처리 경로.
+    """로컬 분석(analyze_vod.py)으로 뽑은 곡 목록(JSON)을 DB에 기록 — 무-타임라인 VOD 로컬 처리 경로.
 
-    daily가 'manual'로 표시한 무-타임라인 VOD를 사람이 로컬에서 claude-video `/watch`로
+    daily가 'manual'로 표시한 무-타임라인 VOD를 사람이 로컬에서 analyze_vod.py 전체 전사로
     보고 곡 구간·제목을 뽑은 뒤, 그 JSON을 이 명령으로 넣는다. 감지/STT를 돌리지 않고
     식별(카탈로그 매칭)과 DB 기록만 한다. daily와 동일하게 Supabase에 남아 딥링크가 생성된다.
     필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GROQ_API_KEY.
@@ -398,7 +398,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "ingest",
-        help="claude-video로 뽑은 곡 목록(JSON)을 DB에 기록 (무-타임라인 VOD 로컬 처리)",
+        help="로컬 분석(analyze_vod.py)으로 뽑은 곡 목록(JSON)을 DB에 기록 (무-타임라인 VOD)",
     )
     add_vod(sp)
     sp.add_argument("spans", help="곡 목록 JSON 파일 경로 ({\"songs\": [{start_s,end_s,title,...}]})")
