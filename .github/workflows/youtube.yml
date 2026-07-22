@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       title_no:
-        description: "특정 VOD 지정 (비우면 가장 오래된 대상 자동 선택)"
+        description: "특정 VOD 지정 (비우면 가장 최신 대상 자동 선택)"
         required: false
         type: string
       dry_run:

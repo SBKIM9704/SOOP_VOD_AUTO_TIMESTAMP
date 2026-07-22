@@ -397,22 +397,24 @@ def youtube_block_reason(vod: dict[str, Any], perfs: list[dict[str, Any]]) -> st
 def select_youtube_target(
     vods: list[dict[str, Any]], perfs_by_vod: dict[int, list[dict[str, Any]]]
 ) -> dict[str, Any] | None:
-    """업로드할 VOD 하나를 고른다 — 오래된 방송부터(순수 함수).
+    """업로드할 VOD 하나를 고른다 — 최신 방송부터(순수 함수).
 
-    오래된 순인 이유: 채널이 방송 순서대로 쌓이고, 백로그가 결정론적으로 소진된다. 방송일이
-    없는 행은 판단 근거가 없으니 맨 뒤로 보낸다(빈 문자열로 두면 최고참인 척 큐를 새치기한다).
+    최신 순인 이유: 방금 검증이 끝난 최근 방송을 먼저 올려 채널이 원 방송과 가까운 시점에
+    노출되게 한다. 방송일이 없는 행은 판단 근거가 없으니 맨 뒤로 보낸다(빈 문자열로 두면
+    최신인 척 큐를 새치기한다). tie는 title_no 큰 쪽(더 최근에 올라온 VOD)이 먼저다.
     """
     ok = [v for v in vods if youtube_block_reason(v, perfs_by_vod.get(v["id"], [])) is None]
     if not ok:
         return None
-    return min(ok, key=lambda v: (v.get("broadcast_date") or "9999-99-99", str(v["soop_title_no"])))
+    return max(ok, key=lambda v: (v.get("broadcast_date") or "", int(v["soop_title_no"])))
 
 
 def fetch_youtube_candidates() -> list[dict[str, Any]]:
-    """아직 업로드하지 않은 analyzed/done VOD 전부(오래된 방송순).
+    """아직 업로드하지 않은 analyzed/done VOD 전부(최신 방송순).
 
     곡 완결 여부는 여기서 거르지 않는다 — performances를 봐야 알 수 있고, 그 판정은 순수
-    함수(`youtube_block_reason`)로 빼서 테스트할 수 있게 뒀다.
+    함수(`youtube_block_reason`)로 빼서 테스트할 수 있게 뒀다. 정렬은 참고용이고, 실제
+    선택은 `select_youtube_target`이 최신순으로 다시 한다.
     """
     return (
         _client()
@@ -420,7 +422,7 @@ def fetch_youtube_candidates() -> list[dict[str, Any]]:
         .select("*")
         .in_("status", sorted(UPLOADABLE_VOD_STATUSES))
         .is_("youtube_status", "null")
-        .order("broadcast_date")
+        .order("broadcast_date", desc=True)
         .execute()
         .data
     )

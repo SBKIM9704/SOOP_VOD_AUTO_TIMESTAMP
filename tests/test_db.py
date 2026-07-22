@@ -265,7 +265,7 @@ def test_clear_machine_performances_spares_human_confirmations(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# select_youtube_target — "모든 곡이 완결된 VOD"만, 오래된 방송부터
+# select_youtube_target — "모든 곡이 완결된 VOD"만, 최신 방송부터
 # --------------------------------------------------------------------------- #
 def _vod(row_id: int, date: str, **over):
     return {
@@ -287,9 +287,16 @@ def _perf(perf_id: int, **over):
     }
 
 
-def test_select_youtube_target_picks_oldest_complete_vod():
+def test_select_youtube_target_picks_newest_complete_vod():
     vods = [_vod(1, "2026-07-19"), _vod(2, "2026-06-25")]
     perfs = {1: [_perf(10)], 2: [_perf(20), _perf(21)]}
+    assert db.select_youtube_target(vods, perfs)["id"] == 1
+
+
+def test_select_youtube_target_tiebreaks_on_title_no():
+    """방송일이 같으면 title_no가 큰(더 최근에 올라온) VOD를 먼저 올린다."""
+    vods = [_vod(1, "2026-07-19"), _vod(2, "2026-07-19")]   # id 2 → title_no 200000002
+    perfs = {1: [_perf(10)], 2: [_perf(20)]}
     assert db.select_youtube_target(vods, perfs)["id"] == 2
 
 
@@ -317,14 +324,15 @@ def test_select_youtube_target_returns_none_when_nothing_qualifies():
 
 
 def test_select_youtube_target_ignores_already_uploaded():
-    vods = [_vod(1, "2026-06-25", youtube_status="uploaded_private"), _vod(2, "2026-07-19")]
+    """더 최신이라도 이미 올라간 VOD는 후보에서 빠진다."""
+    vods = [_vod(1, "2026-07-19", youtube_status="uploaded"), _vod(2, "2026-06-25")]
     perfs = {1: [_perf(10)], 2: [_perf(20)]}
     assert db.select_youtube_target(vods, perfs)["id"] == 2
 
 
 def test_select_youtube_target_sorts_missing_date_last():
-    """방송일이 없는 행이 빈 문자열로 최고참 행세를 하며 큐를 새치기하면 안 된다."""
-    vods = [_vod(1, None), _vod(2, "2026-07-19")]
+    """방송일이 없는 행이 빈 문자열로 최신인 척 큐를 새치기하면 안 된다."""
+    vods = [_vod(1, None), _vod(2, "2026-06-25")]
     perfs = {1: [_perf(10)], 2: [_perf(20)]}
     assert db.select_youtube_target(vods, perfs)["id"] == 2
 
