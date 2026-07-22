@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 import subprocess
+import tempfile
 import time
 import urllib.request
 from collections import deque
@@ -74,26 +75,94 @@ def download_slice(
     return out_path
 
 
-def map_to_part(
+def split_by_part(
     s: float, e: float, parts: list[MetaPart], m3u8s: list[str]
-) -> tuple[str | None, float, float]:
-    """전역 시각 구간 (s,e)를 해당 파트의 m3u8 + 파트-로컬 시각으로 매핑.
+) -> list[tuple[str, float, float]]:
+    """전역 시각 구간 (s,e)가 걸치는 **모든** 파트를 (m3u8, 파트-로컬 시작, 끝)으로 쪼갠다.
 
-    단일 파트(메타 없음)면 그대로 첫 m3u8 사용. 파트 경계를 넘으면 시작 파트 안으로 클램프.
+    순수 함수. 단일 파트(메타 없음)면 첫 m3u8을 그대로 쓴다. 겹치는 파트가 없거나 해당
+    파트의 m3u8이 없으면 빈 목록 — 호출부가 건너뛰거나 실패로 처리한다.
+
+    예전에는 시작 파트 하나로만 매핑하고 끝을 그 파트 안으로 클램프했는데, 파트 경계를
+    넘는 구간이 **에러 없이 앞부분만** 받아져 전사가 조용히 잘렸다(실제 사례: 198797609의
+    방종곡이 파트3/4 경계 36140s에 걸려 앞 3초만 받아졌고, 그 결과 가사 대신 영어 환청이
+    나왔다). 경계에 정확히 시작하는 구간(s == offset_s)이 이전 파트 끝으로 잘못 붙던 것도
+    같은 원인이다 — 이제 겹침 판정(`e > 파트시작 and s < 파트끝`)이라 뒤 파트로 간다.
     """
     if not parts:
-        return m3u8s[0], s, e
+        return [(m3u8s[0], s, e)] if m3u8s else []
+    spans: list[tuple[str, float, float]] = []
     for p in parts:
-        if p.offset_s <= s < p.offset_s + p.duration:
-            if p.idx >= len(m3u8s):
-                return None, 0, 0
-            ls = s - p.offset_s
-            le = min(e - p.offset_s, float(p.duration))  # 파트 끝으로 클램프
-            return m3u8s[p.idx], ls, le
-    return None, 0, 0
+        p_start, p_end = float(p.offset_s), float(p.offset_s + p.duration)
+        if e <= p_start or s >= p_end or p.idx >= len(m3u8s):
+            continue
+        spans.append((m3u8s[p.idx], max(s, p_start) - p_start, min(e, p_end) - p_start))
+    return spans
+
+
+def download_span(
+    spans: list[tuple[str, float, float]], out_path: Path, workers: int = 4
+) -> float:
+    """`split_by_part`가 쪼갠 구간들을 받아 out_path 하나로 만들고, 담긴 길이(초)를 반환.
+
+    파트가 하나면 그대로 슬라이스 저장. 여러 파트에 걸치면 파트별로 받아 ffmpeg concat으로
+    이어 붙인다 — 파트마다 자체 init.m4s(fMP4 헤더)가 있어 한 파일에 그냥 이어 쓰면
+    디코더가 두 번째 파트를 읽지 못한다.
+    """
+    if not spans:
+        raise RuntimeError("구간 파트 매핑 실패 — 받을 세그먼트가 없습니다")
+    out_path = Path(out_path)
+    covered = sum(le - ls for _, ls, le in spans)
+    if len(spans) == 1:
+        m3u8, ls, le = spans[0]
+        download_slice(m3u8, ls, le, out_path, workers=workers)
+        return covered
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp: list[Path] = []
+    try:
+        for i, (m3u8, ls, le) in enumerate(spans):
+            part_path = out_path.with_name(f"{out_path.stem}.part{i}{out_path.suffix}")
+            download_slice(m3u8, ls, le, part_path, workers=workers)
+            tmp.append(part_path)
+        _concat(tmp, out_path)
+        log.info("파트 %d개에 걸친 구간 병합: %s", len(tmp), out_path)
+    finally:
+        for p in tmp:
+            p.unlink(missing_ok=True)
+    return covered
 
 
 # --------------------------------------------------------------------------- #
+def _concat(paths: list[Path], out_path: Path) -> None:
+    """조각들을 **오디오만** ADTS로 뽑아 이어 붙인 뒤 mp4로 리먹스한다(재인코딩 없음).
+
+    concat 디먹서(-c copy)로는 안 된다: 파트마다 자체 타임라인(fMP4 baseMediaDecodeTime)을
+    갖고 있어 두 번째 조각이 원래 시각에 그대로 얹힌다. 실측에서 390초짜리 구간이 duration
+    18308초 파일이 됐고, 앞 87초 뒤로는 거대한 공백이라 뒷부분 오디오가 사실상 사라졌다.
+    ADTS는 컨테이너 타임스탬프가 없어 바이트로 이으면 그대로 연속 재생된다.
+
+    영상을 버리는 건 손해가 아니다 — 하위 단계(WAV 추출·세그멘테이션·STT)는 전부 오디오만
+    본다(`clip.quality`를 최저 화질로 두는 이유와 같다).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        aacs = []
+        for i, p in enumerate(paths):
+            aac = Path(td) / f"{i}.aac"
+            _run_ffmpeg(["-i", str(p), "-vn", "-c:a", "copy", "-f", "adts", str(aac)],
+                        f"오디오 추출 실패({p.name})")
+            aacs.append(str(aac))
+        _run_ffmpeg(["-i", "concat:" + "|".join(aacs), "-c", "copy", str(out_path)],
+                    "파트 병합 실패")
+    if not out_path.exists():
+        raise RuntimeError(f"파트 병합 결과 없음: {out_path}")
+
+
+def _run_ffmpeg(args: list[str], err_prefix: str) -> None:
+    proc = subprocess.run(["ffmpeg", "-nostdin", "-y", *args], capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{err_prefix}: {proc.stderr.decode('utf8', 'replace').strip()[-300:]}")
+
+
 def _norm_url(url_or_id: str) -> str:
     return (
         url_or_id if url_or_id.startswith("http")
