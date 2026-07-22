@@ -32,7 +32,7 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
   by title/artist against the catalog (`analyzers/identify.py`), and writes `performances` to Supabase
   (`db.py`). It does **not** download HLS, run `inaSpeechSegmenter`, or STT — those live only in the
   manual CLI now. A VOD without a timeline is marked `manual` and left for local processing.
-- Shared low-level helpers that both entry points need (e.g. `collector/media.py`'s `map_to_part`)
+- Shared low-level helpers that both entry points need (e.g. `collector/media.py`'s `split_by_part`)
   live in the module layer, not in `cli.py`. The manual CLI (`songs`/`clips`) still uses the download/
   segment/STT helpers; the batch path no longer touches them.
 - **Local processing of no-timeline VODs** — a `manual` VOD is analyzed locally with
@@ -63,6 +63,21 @@ Every VOD gets `work/{vod_id}/` (`WorkPaths`): `meta.json`, `chat.jsonl`, `raw/`
 `clips/` (downloaded region files — inputs to boundary-detection and STT, not media output).
 Steps check these files before re-fetching/re-computing; `--force` bypasses the cache. The batch
 pipeline uses the exact same layout, but treats it as a pure cache — the truth is Supabase (see below).
+
+**Multi-part VODs (`split_by_part` / `download_span` in `collector/media.py`).** A VOD's HLS comes
+as one m3u8 per part (`meta.parts` gives each part's duration + global offset). A requested region
+can straddle a part boundary, so `split_by_part` (pure) returns **one span per part touched**, and
+`download_span` downloads each and joins them. Do not map a region to a single part: the old
+`map_to_part` clamped the end into the starting part, so a straddling region came back silently
+truncated — 198797609's closing song sat on the 36140s boundary and yielded 3 seconds of audio,
+which Whisper turned into English hallucinations rather than any visible error. Joining is done by
+extracting **audio-only ADTS and concatenating bytes**, not by ffmpeg's concat demuxer with
+`-c copy`: each part's fMP4 carries its own `baseMediaDecodeTime`, so a copy-concat lands the second
+piece at its original timestamp (a 390s region became an 18308s file with the tail effectively gone).
+Dropping video costs nothing — every downstream consumer (WAV extraction, segmenter, STT) reads
+audio only. Note a residual imprecision that predates this: a slice starts at the first HLS segment
+overlapping the request, so file-relative times can run up to one segment (~6s) ahead of the
+requested start, and a cross-part join can add another.
 
 ### Lazy imports for heavy/optional dependencies
 
