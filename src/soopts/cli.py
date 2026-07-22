@@ -149,7 +149,7 @@ def cmd_youtube_upload(args) -> int:
     """검증 완료 VOD 하나의 노래 구간을 합본 영상으로 만들어 유튜브에 **unlisted** 업로드.
 
     하루 1건만 돈다(GitHub Actions youtube.yml). 대상은 status가 analyzed/done이고 모든
-    performance의 identify_status·local_review가 완료된 VOD 중 가장 오래된 방송이다.
+    performance의 identify_status·local_review가 완료된 VOD 중 가장 최신 방송이다.
     올린 뒤 코드가 영상을 고치거나 지우는 경로는 없다 — 손볼 일은 유튜브 스튜디오에서.
     필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, (Slack) SLACK_WEBHOOK_URL.
     OAuth 토큰: [youtube] token_file (러너는 YT_TOKEN 시크릿에서 복원).
@@ -578,7 +578,7 @@ def build_parser() -> argparse.ArgumentParser:
         "youtube-upload",
         help="검증 완료 VOD 하나의 노래 구간을 합본 영상으로 유튜브 업로드(unlisted, 하루 1건)",
     )
-    sp.add_argument("--title-no", help="특정 VOD 지정(기본: 가장 오래된 대상 자동 선택)")
+    sp.add_argument("--title-no", help="특정 VOD 지정(기본: 가장 최신 대상 자동 선택)")
     sp.add_argument("--dry-run", action="store_true",
                     help="합본 영상·제목·설명만 만들고 업로드하지 않음(산출물 보존)")
     sp.set_defaults(func=cmd_youtube_upload)

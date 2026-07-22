@@ -289,8 +289,9 @@ untouched and imported one-way for shared helpers.
 
 **Selection is "every song is finished, or the VOD waits."** `select_youtube_target` (pure) takes
 `analyzed`/`done` VODs with `youtube_status IS NULL` and requires **all** performances to have
-`identify_status in (auto_matched, confirmed)` **and** `local_review = 'verified'`; oldest
-`broadcast_date` first. One unfinished song blocks the whole VOD — a wrong title becomes a chapter
+`identify_status in (auto_matched, confirmed)` **and** `local_review = 'verified'`; newest
+`broadcast_date` first (tie broken by larger `soop_title_no`). One unfinished song blocks the whole
+VOD — a wrong title becomes a chapter
 name in a video that cannot be taken down (see below). `youtube_block_reason` returns *why* a VOD was
 rejected, which is what `--title-no` reports.
 
