@@ -28,6 +28,19 @@ _SONG_MARK = re.compile(r"🎤")
 _TS = re.compile(r"^(\d{1,2}:\d{2}(?::\d{2})?)")
 # 노래가 아니라 '클립/영상 참조'인 항목 — 실제 공연이 아니므로 제외한다.
 _REF_KEYWORDS = ("편집본", "클립이슈", "틀어놓", "티저", "뮤비", "챌린지", "샤라웃")
+# 크루(합작 팀) 이름. 팬은 "실제로 불렀다"는 뜻으로 그룹 공연에도 🎤를 쓴다 — `🎤 바보즈 -
+# Pretty Girl(카라)`(싱크룸), `🎤 [성공] 하데스 - 낭만 한도 초과`(단체 노래깎기)처럼. 목표는
+# **BJ가 혼자 부른 곡**이므로 이런 줄은 제외한다. 아티스트 자리와 [태그]만 본다 — 괄호는
+# 어느 마커에서든 **원곡자**라(`릴파ver - LADY(요네즈 켄시)`), 거기 크루명이 있는 건 그 곡이
+# 원래 크루 곡이라는 뜻이지 크루가 공연했다는 뜻이 아니다.
+#
+# 넣고 빼는 기준: 이 스테이션에서 반복 등장하는 **고정 팀명**만 넣는다. 콘서트 즉석 조합
+# (`챈솜초띵`/`솜띵` 같은 순열)은 무한하고 애초에 🎵로 적혀 파싱되지 않으므로 넣지 않는다.
+# 새 크루가 생기면 여기 추가하기 전까지 그룹곡이 섞일 수 있는데, 그건 `vod-audit`이 잡는다.
+# 반대 방향 오류(크루 자작곡을 BJ가 솔로로 불렀는데 제외됨)도 가능하지만, 이 저장소는
+# 일관되게 **놓치는 쪽**을 택한다 — 잘못 기록된 딥링크(혼자 안 부른 곡)가 더 나쁘다.
+_CREW_NAMES = ("바보즈", "하데스", "키띵초")
+_TAG = re.compile(r"\[([^\]]*)\]")
 # 선행 이모지/기호(마커 제외한 하트·아이콘 등)를 벗겨 '아티스트 - 제목'만 남기기 위한 패턴.
 _LEAD_JUNK = re.compile(r"^[^\w가-힣(\[]+")
 
@@ -51,7 +64,8 @@ def hms_to_s(hms: str) -> int:
 def _parse_line(line: str) -> TimelineSong | None:
     """타임라인 한 줄 → TimelineSong(노래일 때만), 아니면 None. 순수 함수.
 
-    조건: 맨 앞 타임스탬프 + 🎤 마커 + `아티스트 - 제목` 형식. 클립/티저 참조는 제외.
+    조건: 맨 앞 타임스탬프 + 🎤 마커 + `아티스트 - 제목` 형식. 클립/티저 참조와 크루
+    공연(`_CREW_NAMES`)은 제외 — BJ가 혼자 부른 곡만 남긴다.
     """
     line = line.strip().lstrip("└").strip()
     m = _TS.match(line)
@@ -63,10 +77,13 @@ def _parse_line(line: str) -> TimelineSong | None:
     body = html.unescape(line[m.end():])
     body = _SONG_MARK.sub("", body)
     body = _LEAD_JUNK.sub("", body).strip()
+    tags = " ".join(_TAG.findall(body))  # 벗기기 전에 확보 — [바보즈 불러놔]가 크루 신호다
     body = re.sub(r"^\[[^\]]*\]\s*", "", body).strip()  # [방종곡]·[튠걸고] 등
     if " - " not in body:
         return None
     artist, title = (p.strip() for p in body.split(" - ", 1))
+    if any(c in artist or c in tags for c in _CREW_NAMES):
+        return None
     # 제목 끝의 장식 하트/이모지(예: "... 💛")를 벗긴다.
     title = re.sub(r"[\s💛💚💜💙🩷🖤🩶✨🔥]+$", "", title).strip()
     if not title:

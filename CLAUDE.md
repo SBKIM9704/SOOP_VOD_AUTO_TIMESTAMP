@@ -154,6 +154,20 @@ performances, or clip references) and **icon-less** lines (older timeline format
 **not** counted: whether they're a real BJ performance is ambiguous, and a wrong guess just adds
 noise. Clip/teaser references (`편집본`/`클립이슈`/`티저`/`뮤비`/…) are denylisted.
 
+**Crew performances are denylisted too (`_CREW_NAMES`).** Fans write 🎤 to mean "actually sang",
+which includes *group* numbers — `🎤 바보즈 - Pretty Girl(카라)` (sync-room trio),
+`🎤 [성공] 하데스 - 낭만 한도 초과` (crew song-polishing). The goal is songs the BJ sang **alone**,
+so a crew name in the **artist slot or a `[tag]`** (`[바보즈 불러놔] 트와이스 - …`) drops the line.
+Only those two positions are checked: parentheses always hold the *original* artist
+(`릴파ver - LADY(요네즈 켄시)`), so a crew name there means the song is originally the crew's — not
+that the crew performed it. (The artist slot itself means different things per marker: under 🎤 it is
+whose *version* the BJ covered, under 🎵 it is the person who performed — `🎵 베베리 - 메가피스
+하모니(하데스)` is another streamer's guest spot, which never reaches this check.) Keep the list to stable
+team names; ad-hoc concert permutations (`챈솜초띵`/`솜띵`) are unbounded and are written 🎵 anyway.
+A new crew leaks group songs until it's added here — `vod-audit` is the backstop. The reverse error
+(BJ solo-covering a crew's own song gets dropped) is accepted: this repo consistently prefers
+missing a song over recording a wrong one.
+
 `timeline_songs_to_spans()` turns each 🎤 song into a span: `start = timestamp`, `end = next song's
 start` capped at 6 min (deep-links only need the start; the cap keeps inter-song talk out of the
 "length"). `_record_songs()` then matches each by title/artist (`resolve_song_match`) and writes
