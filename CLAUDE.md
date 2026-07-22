@@ -75,9 +75,19 @@ extracting **audio-only ADTS and concatenating bytes**, not by ffmpeg's concat d
 `-c copy`: each part's fMP4 carries its own `baseMediaDecodeTime`, so a copy-concat lands the second
 piece at its original timestamp (a 390s region became an 18308s file with the tail effectively gone).
 Dropping video costs nothing — every downstream consumer (WAV extraction, segmenter, STT) reads
-audio only. Note a residual imprecision that predates this: a slice starts at the first HLS segment
-overlapping the request, so file-relative times can run up to one segment (~6s) ahead of the
-requested start, and a cross-part join can add another.
+audio only.
+
+**A slice never starts exactly where you asked, so `download_span` returns `lead_s`.** Segments are
+only fetchable whole, so the file begins at the segment containing the requested start — up to one
+segment (~6s) early. Treating file `t=0` as the requested time skewed every absolute timestamp by
+that much (measured: sliding the request window by 1s moved the same utterance by 1s, a 6.9s spread
+across four windows; with `lead_s` applied it drops to Whisper's own ~1.9s variance). Callers must
+subtract it: `cmd_transcribe` converts with `ds - lead`, `_produce_clips` passes
+`media_offset = ds - lead`. **Compensate in the arithmetic, don't seek past it** — ffmpeg's *input*
+`-ss` snaps back to a keyframe (segment boundary, effectively 0 here), so skipping `lead` inside the
+file silently does nothing. `lead_s` is returned on cache hits too (`slice_lead_s` re-reads the
+playlist, which is `lru_cache`d per URL) — timestamps must not depend on whether the slice was
+cached.
 
 ### Lazy imports for heavy/optional dependencies
 

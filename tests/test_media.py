@@ -53,6 +53,14 @@ def test_split_by_part_outside_all_parts_is_empty():
     assert split_by_part(50000, 50100, _parts(18000, 300), ["A", "B"]) == []
 
 
+@pytest.fixture(autouse=True)
+def _clear_playlist_cache():
+    # _parse_playlist는 URL 단위 lru_cache라 테스트 간에 결과가 새면 안 된다.
+    media._parse_playlist.cache_clear()
+    yield
+    media._parse_playlist.cache_clear()
+
+
 class _FakeResponse:
     def __init__(self, data: bytes):
         self._data = data
@@ -204,3 +212,73 @@ def test_write_segments_handles_fewer_urls_than_workers(monkeypatch):
     sink = _Sink()
     media._write_segments(sink, ["http://x/seg-0"], workers=8)
     assert sink.data == b"x"
+
+
+# --------------------------------------------------------------------------- #
+# 슬라이스 시작 시각 — 파일은 요청 시각이 아니라 세그먼트 경계에서 시작한다
+# --------------------------------------------------------------------------- #
+_PLAYLIST_10 = "#EXTM3U\n" + '#EXT-X-MAP:URI="init.mp4"\n' + "".join(
+    f"#EXTINF:6.0,\nseg-{i}.m4s\n" for i in range(10)
+)   # 세그먼트 시작: 0, 6, 12, … 54
+
+
+@pytest.fixture
+def fake_hls(monkeypatch):
+    """m3u8은 플레이리스트를, 나머지 URL은 더미 세그먼트를 돌려주는 가짜 서버."""
+    fetched: list[str] = []
+
+    def fake_urlopen(url, timeout=15):
+        fetched.append(url)
+        if url.endswith(".m3u8"):
+            return _FakeResponse(_PLAYLIST_10.encode())
+        return _FakeResponse(b"\x00" * 1024)   # _MIN_SEGMENT_BYTES 통과용
+
+    monkeypatch.setattr(media_module.urllib.request, "urlopen", fake_urlopen)
+    return fetched
+
+
+def test_download_slice_returns_actual_segment_start(tmp_path, fake_hls):
+    """20초를 요청해도 파일은 그 시각을 품은 세그먼트(18초)에서 시작한다 — 그 값을 돌려줘야
+    호출부가 전사 타임스탬프를 맞출 수 있다."""
+    actual = media.download_slice("http://x/y/i.m3u8", 20.0, 30.0, tmp_path / "s.mp4")
+    assert actual == 18.0
+
+
+def test_slice_lead_s_is_gap_between_request_and_segment_start(fake_hls):
+    assert media.slice_lead_s("http://x/y/i.m3u8", 20.0, 30.0) == 2.0
+    assert media.slice_lead_s("http://x/y/i.m3u8", 12.0, 30.0) == 0.0   # 경계에 딱 맞으면 0
+
+
+def test_download_span_returns_lead_and_covered(tmp_path, fake_hls):
+    spans = [("http://x/y/i.m3u8", 20.0, 30.0)]
+    lead, covered = media.download_span(spans, tmp_path / "s.mp4")
+    assert (lead, covered) == (2.0, 10.0)
+
+
+def test_download_span_reports_same_lead_from_cache(tmp_path, fake_hls):
+    """캐시 여부에 따라 타임스탬프가 달라지면 안 된다 — 다운로드를 건너뛰어도 lead는 같다."""
+    out = tmp_path / "s.mp4"
+    first = media.download_span([("http://x/y/i.m3u8", 20.0, 30.0)], out)
+    n_before = len(fake_hls)
+    second = media.download_span([("http://x/y/i.m3u8", 20.0, 30.0)], out)
+    assert second == first
+    assert len(fake_hls) == n_before   # 세그먼트도 m3u8도 다시 받지 않았다(플레이리스트 캐시)
+
+
+def test_download_span_force_redownloads(tmp_path, fake_hls):
+    out = tmp_path / "s.mp4"
+    media.download_span([("http://x/y/i.m3u8", 20.0, 30.0)], out)
+    n_before = len(fake_hls)
+    media.download_span([("http://x/y/i.m3u8", 20.0, 30.0)], out, force=True)
+    assert len(fake_hls) > n_before
+
+
+def test_covering_idxs_excludes_segment_that_only_touches_start():
+    # 세그먼트 [6,12)는 요청 시작 12와 겹치지 않는다 — 예전 하드코딩(6.0) 조건은 이걸 포함해
+    # 슬라이스가 항상 한 세그먼트 일찍 시작했다.
+    assert media._covering_idxs([0.0, 6.0, 12.0, 18.0], 12.0, 20.0) == [2, 3]
+
+
+def test_covering_idxs_handles_segments_longer_than_six_seconds():
+    # 길이가 6초보다 길면 예전 조건은 요청 시각을 품은 세그먼트를 빠뜨려 앞부분이 잘렸다.
+    assert media._covering_idxs([0.0, 10.0, 20.0], 8.0, 12.0) == [0, 1]
