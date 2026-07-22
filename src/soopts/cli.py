@@ -265,6 +265,142 @@ def cmd_set_manual(args) -> int:
     return 0
 
 
+def cmd_perfs(args) -> int:
+    """performance 목록을 출력 — perf-review 스킬의 로컬 검증 대상 조회용.
+
+    필터: --identify(identify_status), --local(local_review). 각 행에 title_no·시각·추측제목·
+    lyrics 유무를 얹는다. Groq 없이 순수 조회. 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+    """
+    import json
+
+    from soopts import db
+
+    rows = db.fetch_performances(identify_status=args.identify, local_review=args.local)
+    out = [
+        {
+            "id": p["id"],
+            "title_no": p.get("soop_title_no"),
+            "start_s": p.get("start_s"),
+            "end_s": p.get("end_s"),
+            "title_guess": p.get("title_guess"),
+            "song_id": p.get("song_id"),
+            "identify_status": p.get("identify_status"),
+            "local_review": p.get("local_review"),
+            "has_lyrics": bool((p.get("lyrics_snippet") or "").strip()),
+        }
+        for p in rows
+    ]
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        print(f"performances {len(out)}건 (identify={args.identify}, local={args.local})")
+        for o in out:
+            print(f"  #{o['id']} {o['title_no']} {o['start_s']}~{o['end_s']}s "
+                  f"[{o['identify_status']}/{o['local_review']}] {o['title_guess'] or '(미상)'}")
+    return 0
+
+
+def cmd_set_perf(args) -> int:
+    """performance 한 행을 갱신 — perf-review 스킬이 로컬 검증·보강 결과를 적용.
+
+    보내지 않은 필드는 그대로 둔다. 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+    """
+    from soopts import db
+
+    fields = {
+        "start_s": args.start_s, "end_s": args.end_s, "title_guess": args.title_guess,
+        "lyrics_snippet": args.lyrics, "song_id": args.song_id,
+        "identify_status": args.identify_status, "local_review": args.local_review,
+    }
+    r = db.update_performance(args.perf_id, fields)
+    if r is None:
+        print(f"performance #{args.perf_id}: 갱신할 필드 없음 또는 행 없음")
+        return 1
+    print(f"performance #{args.perf_id} 갱신: "
+          f"identify={r.get('identify_status')} local={r.get('local_review')} song_id={r.get('song_id')}")
+    return 0
+
+
+def cmd_add_song(args) -> int:
+    """songs에 draft 신곡을 삽입하고 song_id를 출력 — 무-카탈로그 곡 등록(perf-review).
+
+    status는 기본 'draft'(검수 UI가 published로 승격 전까지 정식 카탈로그와 구분). 필요 env:
+    SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+    """
+    from soopts import db
+
+    song_id = db.insert_draft_song(
+        title=args.title, artist=args.artist, lyrics=args.lyrics, status=args.status
+    )
+    print(song_id)
+    return 0
+
+
+def cmd_match_song(args) -> int:
+    """제목/가수(+가사)를 카탈로그에 매칭해 결과를 JSON으로 — perf-review가 재식별 후 확인용.
+
+    resolve_song_match(ingest와 동일 로직)를 재사용한다. song_id가 나오면 카탈로그에 있는 것,
+    null이면 신곡(draft 삽입 대상). 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GROQ_API_KEY.
+    """
+    import json
+
+    from soopts import db
+    from soopts.analyzers.identify import resolve_song_match
+
+    catalog = db.load_song_catalog()
+    r = resolve_song_match(args.title, args.artist or "", args.lyrics or "", True, catalog)
+    print(json.dumps({
+        "song_id": r.song_id, "title_guess": r.title_guess,
+        "confidence": round(r.match_confidence, 1), "identify_status": r.identify_status,
+    }, ensure_ascii=False))
+    return 0
+
+
+def cmd_transcribe(args) -> int:
+    """VOD의 [start,end] 구간만 받아 Whisper로 전사·출력 — perf-review 스킬의 검증 입력.
+
+    구간만 받으므로(멀티파트 안전) 긴 VOD도 빠르다. 캐시는 work/{id}/clips/에 남는다.
+    필요 env: GROQ_API_KEY (전사).
+    """
+    import tempfile
+
+    from soopts.analyzers.stt import (
+        _ensure_uploadable,
+        _load_model,
+        _transcribe_best,
+        _transcribe_langs,
+    )
+    from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
+    from soopts.collector.meta import fetch_meta
+
+    cfg = load_config(
+        Path(args.config) if args.config else None,
+        work_root=Path(args.work_root) if args.work_root else None,
+    )
+    vod_id = extract_vod_id(args.vod)
+    work = work_paths(cfg.work_root, vod_id).ensure()
+    work.clips_dir.mkdir(parents=True, exist_ok=True)
+    meta = fetch_meta(cfg, vod_id, work)
+    ds = max(0.0, args.start - args.pad)
+    de = args.end + args.pad
+    m3u8s = resolve_m3u8_list(vod_id, cfg.clip.quality)
+    m3u8, ls, le = map_to_part(ds, de, meta.parts, m3u8s)
+    if m3u8 is None:
+        raise RuntimeError(f"구간 [{ds:.0f},{de:.0f}] 파트 매핑 실패")
+    raw = work.clips_dir / f"seg_{int(ds)}_{int(de)}.mp4"
+    if not raw.exists() or args.force:
+        download_slice(m3u8, ls, le, raw, workers=cfg.collector.segment_workers)
+    model = _load_model(cfg)
+    if args.lang:
+        with tempfile.TemporaryDirectory() as td:
+            p = _ensure_uploadable(str(raw), Path(td), 0, le - ls)
+            text, _ = _transcribe_langs(model, p, cfg.stt, [args.lang]) if p else ("", "")
+    else:
+        text, _ = _transcribe_best(model, str(raw), cfg, start=0, dur=le - ls)
+    print(text)
+    return 0
+
+
 def cmd_fetch(args) -> int:
     cfg, vod_id, work = _ctx(args)
     from soopts.collector.media import download_audio_full
@@ -430,6 +566,51 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--clear-machine", action="store_true",
                     help="기계 생성 performances를 먼저 삭제(confirmed는 보존)")
     sp.set_defaults(func=cmd_set_manual)
+
+    sp = sub.add_parser(
+        "perfs", help="performance 목록 조회 (perf-review 스킬용, 판정 안 함)")
+    sp.add_argument("--identify", help="identify_status 필터(needs_review/auto_matched/confirmed 등)")
+    sp.add_argument("--local", help="local_review 필터(pending/verified/needs_human)")
+    sp.add_argument("--json", action="store_true", help="JSON 출력")
+    sp.set_defaults(func=cmd_perfs)
+
+    sp = sub.add_parser(
+        "set-perf", help="performance 갱신 (perf-review 스킬이 로컬 검증·보강 적용)")
+    sp.add_argument("perf_id", type=int, help="performance id")
+    sp.add_argument("--start-s", type=int, dest="start_s")
+    sp.add_argument("--end-s", type=int, dest="end_s")
+    sp.add_argument("--title-guess", dest="title_guess")
+    sp.add_argument("--lyrics")
+    sp.add_argument("--song-id", dest="song_id")
+    sp.add_argument("--identify-status", dest="identify_status",
+                    help="auto_matched/needs_review/confirmed 등")
+    sp.add_argument("--local-review", dest="local_review",
+                    help="verified/needs_human/pending")
+    sp.set_defaults(func=cmd_set_perf)
+
+    sp = sub.add_parser(
+        "add-song", help="songs에 draft 신곡 삽입 → song_id 출력 (무-카탈로그 곡 등록)")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--artist")
+    sp.add_argument("--lyrics")
+    sp.add_argument("--status", default="draft", help="기본 draft")
+    sp.set_defaults(func=cmd_add_song)
+
+    sp = sub.add_parser(
+        "match-song", help="제목/가수를 카탈로그에 매칭 → song_id JSON (perf-review 재식별용)")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--artist")
+    sp.add_argument("--lyrics")
+    sp.set_defaults(func=cmd_match_song)
+
+    sp = sub.add_parser(
+        "transcribe", help="VOD의 [start,end] 구간만 받아 Whisper 전사·출력 (perf-review용)")
+    add_vod(sp)
+    sp.add_argument("--start", type=float, required=True, help="시작 초")
+    sp.add_argument("--end", type=float, required=True, help="끝 초")
+    sp.add_argument("--pad", type=float, default=15.0, help="앞뒤 여유 초(기본 15)")
+    sp.add_argument("--lang", help="강제 언어(en/ko). 없으면 자동")
+    sp.set_defaults(func=cmd_transcribe)
 
     sp = sub.add_parser("fetch", help="yt-dlp로 전체 오디오 다운로드")
     add_vod(sp)

@@ -286,8 +286,67 @@ def insert_performances(
     )
 
 
+def fetch_performances(
+    identify_status: str | None = None, local_review: str | None = None
+) -> list[dict[str, Any]]:
+    """performances 행을 필터로 조회하고 각 행에 소속 VOD의 soop_title_no를 붙여 반환한다.
+
+    perf-review 스킬이 곡별로 구간을 다시 받아 로컬 검증할 때 쓴다 — 세그먼트 다운로드에
+    title_no가 필요하므로 vods와 조인해 얹는다. 필터는 둘 다 선택(없으면 전체).
+    """
+    client = _client()
+    q = client.table("performances").select("*")
+    if identify_status:
+        q = q.eq("identify_status", identify_status)
+    if local_review:
+        q = q.eq("local_review", local_review)
+    perfs = q.order("vod_id").order("start_s").execute().data
+    vid = {p["vod_id"] for p in perfs}
+    if not vid:
+        return []
+    vods = client.table("vods").select("id,soop_title_no,title").in_("id", list(vid)).execute().data
+    by_id = {v["id"]: v for v in vods}
+    for p in perfs:
+        v = by_id.get(p["vod_id"], {})
+        p["soop_title_no"] = v.get("soop_title_no")
+        p["vod_title"] = v.get("title")
+    return perfs
+
+
+def update_performance(perf_id: int, fields: dict[str, Any]) -> dict[str, Any] | None:
+    """performance 한 행을 갱신한다(perf-review 스킬의 보강/검증 적용).
+
+    None 값 필드는 보내지 않는다 — 명시적 NULL 덮어쓰기를 막기 위함. 허용 필드만 통과시킨다.
+    """
+    allowed = {
+        "start_s", "end_s", "title_guess", "lyrics_snippet", "song_id",
+        "match_confidence", "identify_status", "local_review", "song_likely",
+    }
+    payload = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if not payload:
+        return None
+    rows = (
+        _client().table("performances").update(payload).eq("id", perf_id).execute().data
+    )
+    return rows[0] if rows else None
+
+
+def insert_draft_song(
+    title: str, artist: str | None = None, lyrics: str | None = None, status: str = "draft"
+) -> str:
+    """songs에 신곡을 삽입하고 song_id(uuid)를 반환한다.
+
+    무-카탈로그 곡을 로컬 검증(perf-review)에서 draft로 넣기 위한 유일한 song 생성 경로다.
+    기존 원칙("songs는 이 repo에서 만들지 않는다")의 의도적 예외 — status='draft'로만 넣어
+    검수 UI가 published로 승격하기 전까지 정식 카탈로그와 구분되게 한다.
+    """
+    row = {"title": title, "artist": artist, "lyrics": lyrics, "status": status}
+    res = _client().table("songs").insert(row).execute().data
+    return res[0]["id"]
+
+
 # --------------------------------------------------------------------------- #
-# songs (읽기 전용)
+# songs (읽기 전용 카탈로그 — 단, draft 신곡은 insert_draft_song로 예외 삽입)
 # --------------------------------------------------------------------------- #
 def load_song_catalog() -> list[CatalogEntry]:
     client = _client()

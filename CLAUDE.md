@@ -75,12 +75,17 @@ This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency
 ### The Supabase boundary (`db.py`)
 
 `db.py` is the *only* module that talks to Supabase. The schema (`vods`, `performances`, `song_aliases`,
-and the read-only `songs` catalog) is owned by a separate private repo
-(`singgyul_sing_book`) — this codebase only consumes it and never creates migrations. `songs` rows are
-never created from this repo; unmatched songs always land as `needs_review` for a human to resolve in
-the separate review UI. `vods.status` (per-VOD progress) and `performances.identify_status` (per-song
-review state) are the actual state machine — treat them as the source of truth, not local files
-(see next point).
+and the `songs` catalog) is owned by a separate private repo (`singgyul_sing_book`) — this codebase
+consumes it and never creates migrations. **Two DB axes on `performances`:** `identify_status` (which
+catalog song: `auto_matched`/`needs_review`/`confirmed`) and `local_review` (local verification state:
+`pending`/`verified`/`needs_human`, added 2026-07 for the `perf-review` skill). `vods.status` and these
+two are the state machine — the source of truth, not local files.
+
+Historically this repo never created `songs` rows (unmatched → `needs_review` for a human). That's now
+relaxed for **one path only**: the `perf-review` skill inserts genuinely-new songs as `status='draft'`
+via `db.insert_draft_song` (the schema already had `songs.status` with a `draft` value). Drafts stay
+distinct from the real catalog until the review UI promotes them to `published`. Nothing else creates
+songs; catalog matching (`resolve_song_match`) still only links existing rows.
 YouTube-era objects were dropped on 2026-07-18 (`performances.youtube_video_id`/`synced_at`/
 `clip_status`, the `youtube_deletion_queue` table) once both repos had stopped referencing them.
 `song_performance_counts` was recreated without its `youtube_video_id IS NOT NULL` filter — every
@@ -161,6 +166,24 @@ comments and decides**. Code only exposes deterministic primitives the skill orc
 
 The skill never applies destructive changes without user approval. Don't re-add a code-based `recheck`
 that auto-judges and deletes — that's what this replaced.
+
+**Local skills (three).** All human-run; the headless `daily` runner can't call skills.
+- `.claude/skills/manual-ingest/` — process `manual` VODs: `analyze_vod.py` full transcript → Claude
+  picks BJ solo full songs → `soopts ingest`.
+- `.claude/skills/perf-review/` — **re-verify + enrich recorded performances** (the `local_review`
+  axis). Per performance it re-transcribes the `[start_s, end_s]` segment and Claude checks: real song?
+  BJ solo? boundaries right? then fills accurate lyrics/title, links `song_id` (or inserts a `draft`
+  song), and sets `local_review = verified` (all good) or `needs_human` (real-song/BJ doubt or
+  unidentifiable). Same code-does-I/O, Claude-decides split as vod-audit.
+- `.claude/skills/vod-audit/` — audit VOD-level classification against comments (above).
+
+Primitives these skills orchestrate (all in `cli.py`/`db.py`, no Groq except match/transcribe):
+- `soopts perfs [--identify S] [--local S] --json` (`db.fetch_performances`) — performance worklist.
+- `soopts transcribe <vod> --start --end [--lang]` — download+Whisper just that segment.
+- `soopts match-song --title --artist [--lyrics]` (`resolve_song_match`) — catalog lookup → song_id/null.
+- `soopts add-song --title --artist [--lyrics] [--status draft]` (`db.insert_draft_song`) — new draft song.
+- `soopts set-perf <id> --lyrics/--title-guess/--song-id/--identify-status/--local-review/--start-s/--end-s`
+  (`db.update_performance`) — apply the verified/enriched fields.
 
 ### VOD selection (`_select_vods` in `batch.py`, `select_targets` in `db.py`)
 
