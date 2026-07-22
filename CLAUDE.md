@@ -27,22 +27,27 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
 
 - **Manual CLI pipeline** (`cli.py`): a human runs `collect` → `songs`/`clips` one VOD at a time,
   reviewing/editing `clips.json` between steps. `clips.json` holds song spans + lyrics, not files.
-- **Batch pipeline** (`batch.py`, driven by `soopts daily`): the same detection/clip/
-  identify building blocks (`analyzers/audio_analyzer.py`, `collector/media.py`, `export/clips.py`,
-  `analyzers/stt.py`, `analyzers/identify.py`) are composed directly, with Supabase (`db.py`) standing
-  in for the human review step. `batch.py` does not reuse `cli.py`'s `_produce_clips`/`_songs_slice`
-  helpers (those are argparse/print-oriented for interactive review) — it re-implements the same
-  region → download → detect-boundary → transcribe flow against a `vod_row` from the DB instead of a CLI `args`
-  namespace.
-- Shared low-level helpers that both entry points need (e.g. `collector/media.py`'s `map_to_part`,
-  which maps a global time range onto the right HLS part + local offsets) live in the module layer,
-  not in `cli.py`, specifically so `batch.py` can call them without importing the CLI.
-- **Local escape hatch** (`soopts process <id>` → `batch.process_single_vod`): runs the *batch*
-  pipeline for one VOD and **writes to the DB** (unlike `songs`/`clips`, which only write local files
-  for interactive review). It exists for VODs the hosted runner can't finish — chiefly a
-  no-timeline VOD longer than `station.sweep_max_duration_s`, which `daily` fails fast on (see
-  Volatile-runner design). It runs `_process_vod` with `allow_sweep=True, enforce_guard=False`, so
-  there's no per-run sweep budget and no length guard — the operator's PC has no job timeout.
+- **Batch pipeline** (`batch.py`, driven by `soopts daily`): **timeline-parse only, no media.** It
+  fetches comments, parses the fan timeline into songs (`analyzers/comment_timeline.py`), matches each
+  by title/artist against the catalog (`analyzers/identify.py`), and writes `performances` to Supabase
+  (`db.py`). It does **not** download HLS, run `inaSpeechSegmenter`, or STT — those live only in the
+  manual CLI now. A VOD without a timeline is marked `manual` and left for local processing.
+- Shared low-level helpers that both entry points need (e.g. `collector/media.py`'s `map_to_part`)
+  live in the module layer, not in `cli.py`. The manual CLI (`songs`/`clips`) still uses the download/
+  segment/STT helpers; the batch path no longer touches them.
+- **Local processing of no-timeline VODs** — a `manual` VOD is analyzed locally with
+  **`scripts/analyze_vod.py`**, then recorded via **`soopts ingest <id> spans.json`** → `batch.ingest_vod`.
+  - `analyze_vod.py` downloads the VOD parts (multi-part safe, offsets from `meta.parts`, cached in
+    `work/` so it survives teardown + resumes), extracts audio, and Whisper-transcribes the **whole VOD**
+    into a resumable per-chunk cache (rotating `GROQ_API_KEY`/`_2`/`_3` when a key saturates). You read
+    `work/{id}/transcript.txt` to find the BJ's solo full songs + timestamps (distinguishing them from
+    game talk / intro BGM by context). Proven on an 11.6h/4-part VOD on one key. This replaced the
+    segmenter (full_sweep), which false-positived on game BGM.
+  - `soopts ingest` then takes the song spans (`{"songs": [{start_s, end_s, title?, artist?, lyrics?}]}`),
+    matches each against the catalog (reusing `resolve_song_match`/`identify_song` via the shared
+    `_record_songs` core), records `performances`, and promotes the VOD out of `manual`. It **writes to
+    the DB** (unlike `songs`/`clips`, local files only). Unmatched titles land as `needs_review` for a
+    human to resolve in the review UI.
 
 ### Config system (`config.py`)
 
@@ -70,12 +75,17 @@ This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency
 ### The Supabase boundary (`db.py`)
 
 `db.py` is the *only* module that talks to Supabase. The schema (`vods`, `performances`, `song_aliases`,
-and the read-only `songs` catalog) is owned by a separate private repo
-(`singgyul_sing_book`) — this codebase only consumes it and never creates migrations. `songs` rows are
-never created from this repo; unmatched songs always land as `needs_review` for a human to resolve in
-the separate review UI. `vods.status` (per-VOD progress) and `performances.identify_status` (per-song
-review state) are the actual state machine — treat them as the source of truth, not local files
-(see next point).
+and the `songs` catalog) is owned by a separate private repo (`singgyul_sing_book`) — this codebase
+consumes it and never creates migrations. **Two DB axes on `performances`:** `identify_status` (which
+catalog song: `auto_matched`/`needs_review`/`confirmed`) and `local_review` (local verification state:
+`pending`/`verified`/`needs_human`, added 2026-07 for the `perf-review` skill). `vods.status` and these
+two are the state machine — the source of truth, not local files.
+
+Historically this repo never created `songs` rows (unmatched → `needs_review` for a human). That's now
+relaxed for **one path only**: the `perf-review` skill inserts genuinely-new songs as `status='draft'`
+via `db.insert_draft_song` (the schema already had `songs.status` with a `draft` value). Drafts stay
+distinct from the real catalog until the review UI promotes them to `published`. Nothing else creates
+songs; catalog matching (`resolve_song_match`) still only links existing rows.
 YouTube-era objects were dropped on 2026-07-18 (`performances.youtube_video_id`/`synced_at`/
 `clip_status`, the `youtube_deletion_queue` table) once both repos had stopped referencing them.
 `song_performance_counts` was recreated without its `youtube_video_id IS NOT NULL` filter — every
@@ -93,19 +103,11 @@ The deliverable is the **timestamp**, not a media file. `song_link(cfg, title_no
 SOOP deep link that viewers actually follow, computed from DB columns alone — nothing is uploaded
 anywhere, so there is no per-song artifact to keep in sync or clean up.
 
-**No video is produced.** `detect_song_span()` returns boundary times, and STT extracts just that
-range from the downloaded region file (`_transcribe_best(..., start=, dur=)`). Re-encoding clips with
-ffmpeg used to be 76% of total runtime (6.6 min per song); removing it took a VOD from ~5.5h to ~20min.
-`cfg.clip.quality` is deliberately the *lowest* rendition (`hls-hd`, 540p): all three renditions carry
-the same AAC audio, and audio is all the segmenter and Whisper ever see, so the higher ones only cost
-download time. Don't raise it "for quality" — there is no video output to have quality.
-
-What remains after that is round-trip latency, not bandwidth: a region is ~50 segments fetched one by
-one, and dropping the bitrate 8× only halved download time. `_write_segments` therefore fetches
-`cfg.collector.segment_workers` (default 4) segments concurrently while writing them in **submission
-order** — out-of-order writes corrupt the fMP4. It keeps a sliding window rather than gathering
-everything first, so memory stays bounded at `workers` segments. Measured against the real stream:
-11.8s → 5.6s for a 300s region, byte-identical output.
+**The batch path touches no media at all.** Since the runner only parses the comment timeline and
+writes DB rows, there is no download, no `inaSpeechSegmenter`, no STT, no ffmpeg on the `daily` path
+— a run is comments-fetch + Groq-identify + DB-write, on the order of seconds per VOD. `daily.yml`
+installs only `.[batch]` (no `audio`/`stt`/ffmpeg/yt-dlp). The HLS downloader + segmenter + Whisper
+still exist for the **manual CLI** (`songs`/`clips`) and are lazy-imported there.
 
 A run killed mid-VOD (timeout, cancel, runner reset) leaves `vods.status = 'pending'` because
 `mark_vod` never runs. `select_targets()` therefore treats **both** `failed` and `pending` as
@@ -128,41 +130,60 @@ NULL wherever a row lacks one — so mixing a retry row (rich, straight from `se
 row (sparse) made `retry_count` NULL on the new row and Postgres rejected the whole batch with
 `23502`. Never build the upsert dicts per-row-shape.
 
-### Candidate detection & per-region failure (`_find_candidates`, `_process_vod`)
+### Candidate detection (`_find_candidates`, `_process_vod`, `analyzers/comment_timeline.py`)
 
-Two ways to enumerate a VOD's songs, chosen per VOD:
-- **`comment_timeline`**: fans leave unofficial per-song timestamps in comments. Each becomes a
-  padded candidate region; `detect_song_span` refines the exact boundary and STT reads just that
-  range. Fast (only candidate regions are downloaded) and carries an artist/title hint, so identify
-  skips the Groq lyric guess.
-- **`full_sweep`** (no timeline): download the whole VOD **part by part** and run
-  `inaSpeechSegmenter` over each part to enumerate *every* music block (`_run_full_sweep`). This
-  replaced a sticker-burst heuristic that collapsed a burst into a single "longest music block" and
-  missed every other song in it — no-timeline VODs were ending up almost entirely skipped as "not a
-  song". Accurate but slow (full download + full segmentation), so it's budgeted (below).
+The runner enumerates a VOD's songs by **marker-parsing the fan comment timeline** — no LLM, no
+media. `parse_song_timeline()` (pure, regex) pulls lines of the form `HH:MM:SS 🎤 아티스트 - 제목`.
+Only the **🎤** marker counts — it means the BJ actually sang. `🎵/🎶` (guest/collab/concert
+performances, or clip references) and **icon-less** lines (older timeline format) are deliberately
+**not** counted: whether they're a real BJ performance is ambiguous, and a wrong guess just adds
+noise. Clip/teaser references (`편집본`/`클립이슈`/`티저`/`뮤비`/…) are denylisted.
 
-**Partial failure is retryable, not silently lost.** A region that throws is skipped, but
-`retry_reason` makes `_process_vod` raise if *any* region errored — not only when *all* did. The old
-"raise only if nothing succeeded" left a VOD `analyzed` with one span permanently missing (a download
-`IncompleteRead` on one region among many). Reprocessing is idempotent (see `clear_machine_performances`),
-so re-running the whole VOD costs work but loses nothing; `MAX_RETRIES` bounds it. Playlist reads
-(`_parse_playlist`) go through the same retry+backoff as segment fetches (`_read_url`) — an
-`IncompleteRead` on the m3u8 itself was escaping raw and surfacing as a "download-step" failure.
+`timeline_songs_to_spans()` turns each 🎤 song into a span: `start = timestamp`, `end = next song's
+start` capped at 6 min (deep-links only need the start; the cap keeps inter-song talk out of the
+"length"). `_record_songs()` then matches each by title/artist (`resolve_song_match`) and writes
+`performances`. This replaced the old Groq `extract_song_timeline` (missed songs — 201933359 got 2 of
+12) + per-region download + `inaSpeechSegmenter` + Whisper + Groq lyric-guess pipeline.
 
-**Sweep budgeting.** `station.sweep_limit` (default 1) caps how many *new* full_sweeps run per
-`daily` invocation so several slow sweeps can't pile into one run (worst during no-timeline backfill).
-Retries always run (priority retry > new) but still consume the budget. A new sweep over budget is
-*deferred*: `_process_vod` returns `{"deferred": True}` before any download and the loop calls
-`db.delete_vod` to drop the freshly-upserted `pending` row — leaving it as an unprocessed candidate
-for next run instead of a `pending` that would burn `retry_count` every selection.
+**No timeline (0 🎤 songs) → `manual`, not processed.** `_process_vod` returns `{"no_timeline": True}`
+and `run_daily` marks `vods.status = 'manual'`. This covers game-only streams, all-🎵 concert VODs,
+and old icon-less timelines alike — anything the marker parser can't confidently read goes local.
+`manual` is terminal for the queue: `fetch_retryable` pulls only `failed`/`pending`, and
+`select_targets` skips any title_no already in `existing_by_no`, so a `manual` VOD is never retried
+or re-picked. A human processes it locally (`analyze_vod.py` → `soopts ingest`), promoting it to `analyzed`/`done`.
+Reprocessing is idempotent: `clear_machine_performances()` drops the prior run's rows (sparing
+`confirmed`) before re-inserting.
 
-**Length guard + local escape hatch.** A no-timeline VOD longer than
-`station.sweep_max_duration_s` (default 6h) can't finish segmenting inside the hosted runner's hard
-6h job cap, so `daily` fails it fast (seconds, before download) with a message pointing at
-`soopts process <id>` rather than timing out three times. That command
-(`batch.process_single_vod`) runs the same pipeline locally with the guard and budget off — the
-only supported path for such VODs. Raising `sweep_limit`/`sweep_max_duration_s` means bumping
-`daily.yml`'s `timeout-minutes` too (≤360 on hosted runners).
+**Auditing processed VODs — the `vod-audit` skill, not code.** The 🎤-only rule is safe (no false
+positives) but incomplete: a 🎤+🎵 mixed VOD records only its 🎤 songs and is marked `analyzed`, so the
+🎵 ones are silently missed. Deciding whether such a VOD (or a game/chat/teaser timeline) was handled
+right is a judgment call, so it lives in `.claude/skills/vod-audit/`, where **Claude reads the raw
+comments and decides**. Code only exposes deterministic primitives the skill orchestrates:
+- `soopts vods --status analyzed,done --json` (`db.fetch_vods_by_status` + perf counts) — worklist.
+- `soopts comments <id> --json` (`fetch_comments`, no Groq) — raw comments, the judgment input.
+- `soopts set-manual <id> [--clear-machine]` (`batch.set_vod_manual`) — apply one Claude-approved
+  decision: clear machine `performances` (sparing `confirmed`) and set `status = 'manual'`.
+
+The skill never applies destructive changes without user approval. Don't re-add a code-based `recheck`
+that auto-judges and deletes — that's what this replaced.
+
+**Local skills (three).** All human-run; the headless `daily` runner can't call skills.
+- `.claude/skills/manual-ingest/` — process `manual` VODs: `analyze_vod.py` full transcript → Claude
+  picks BJ solo full songs → `soopts ingest`.
+- `.claude/skills/perf-review/` — **re-verify + enrich recorded performances** (the `local_review`
+  axis). Per performance it re-transcribes the `[start_s, end_s]` segment and Claude checks: real song?
+  BJ solo? boundaries right? then fills accurate lyrics/title, links `song_id` (or inserts a `draft`
+  song), and sets `local_review = verified` (all good) or `needs_human` (real-song/BJ doubt or
+  unidentifiable). Same code-does-I/O, Claude-decides split as vod-audit.
+- `.claude/skills/vod-audit/` — audit VOD-level classification against comments (above).
+
+Primitives these skills orchestrate (all in `cli.py`/`db.py`, no Groq except match/transcribe):
+- `soopts perfs [--identify S] [--local S] --json` (`db.fetch_performances`) — performance worklist.
+- `soopts transcribe <vod> --start --end [--lang]` — download+Whisper just that segment.
+- `soopts match-song --title --artist [--lyrics]` (`resolve_song_match`) — catalog lookup → song_id/null.
+- `soopts add-song --title --artist [--lyrics] [--status draft]` (`db.insert_draft_song`) — new draft song.
+- `soopts set-perf <id> --lyrics/--title-guess/--song-id/--identify-status/--local-review/--start-s/--end-s`
+  (`db.update_performance`) — apply the verified/enriched fields.
 
 ### VOD selection (`_select_vods` in `batch.py`, `select_targets` in `db.py`)
 
@@ -179,17 +200,11 @@ paging loop lives in `batch.py` to keep `db.py` Supabase-only and `vod_list.py` 
 
 ### Quality gate (`quality_warning`)
 
-Failures here show up as **degradation, not exceptions** — when Groq rejected every clip with 413 the
-run still finished "successfully", songs just piled up in the review queue with no lyrics, and the
-summary looked normal because it only counted detections. So `run_daily` measures `stt_ok /
-stt_attempted` and raises if it drops below `cfg.stt.min_success_rate` (default 0.5). The summary is
-sent to Slack *before* the gate raises, and DB writes are already committed, so failing the run never
-loses work — it just makes someone look.
-
-`format_summary` also splits auto-matches by basis (`hint_available` vs `lyrics_only`). That split is
-the specific blind spot from the incident: comment-timeline hints kept producing auto-matches while
-STT was dead, so the match rate looked fine. Note that when a hint exists the code skips lyric-based
-identification entirely, so `lyrics_only` staying at 0 is expected for VODs with a fan timeline.
+`quality_warning` measures the STT success rate (`stt_ok / stt_attempted`) and raises below
+`cfg.stt.min_success_rate`. With the batch path no longer running STT, `stt_attempted` is always 0 on
+`daily`, so the gate is a no-op there — it's kept (harmless) for the manual CLI and any future audio
+path. Every timeline song carries a title/artist hint, so batch auto-matches are all `hint_available`
+and `lyrics_only` stays 0 by design.
 
 ### GitHub Actions workflows
 

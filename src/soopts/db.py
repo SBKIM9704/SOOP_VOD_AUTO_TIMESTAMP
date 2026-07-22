@@ -150,29 +150,50 @@ def _vod_row(
     }
 
 
-def delete_vod(title_no: str) -> None:
-    """vods 행을 삭제해 VOD를 '미처리'로 되돌린다 — 이번 런의 sweep 예산을 넘겨 미룬 신규
-    무-타임라인 VOD 전용.
+def fetch_vods_by_status(statuses: list[str]) -> list[dict[str, Any]]:
+    """주어진 status의 vods 행을 최신 방송순으로 — vod-audit 스킬의 감사 대상 목록용.
 
-    행을 지우면 다음 런에서 신규 후보로 다시 선정되고 retry_count를 태우지 않는다(pending으로
-    남겨두면 select_targets가 매 선정마다 retry_count를 올려 MAX_RETRIES에 닿아 큐를 막는다).
-    status='pending'으로 한정해 안전장치를 둔다 — 미루는 대상은 갓 upsert된 pending 행이라
-    딸린 performances가 없어 삭제해도 잃을 게 없다(재시도 sweep은 애초에 미루지 않는다)."""
-    _client().table("vods").delete().eq("soop_title_no", title_no).eq(
-        "status", "pending"
-    ).execute()
+    `soopts vods --status analyzed,done`가 이걸 그대로 노출해, 스킬 안에서 Claude가 어떤
+    VOD를 검증할지 고른다(판정은 코드가 아니라 스킬 안의 Claude가 원본 댓글로 한다)."""
+    if not statuses:
+        return []
+    return (
+        _client()
+        .table("vods")
+        .select("*")
+        .in_("status", statuses)
+        .order("broadcast_date", desc=True)
+        .execute()
+        .data
+    )
 
 
-def mark_vod_unretryable(title_no: str, error: str) -> None:
-    """재시도해도 결과가 같은 **영구 실패**로 표시한다 — status='failed' + retry_count를 상한으로.
+def count_machine_performances(vod_row_id: int) -> int:
+    """VOD의 기계 생성 performances 수(confirmed 제외) — recheck dry-run 리포트용."""
+    rows = (
+        _client()
+        .table("performances")
+        .select("id")
+        .eq("vod_id", vod_row_id)
+        .neq("identify_status", "confirmed")
+        .execute()
+        .data
+    )
+    return len(rows or [])
 
-    fetch_retryable이 `retry_count < MAX_RETRIES`만 뽑으므로 곧바로 큐에서 빠진다. 러너에서
-    처리 불가능한 초장시간 무-타임라인 VOD(sweep 길이 가드)가 매 런 슬롯을 차지하며 3번
-    헛도는 걸 막는다 — daily_vod_count가 작을수록(1이면 런 하나를 통째로) 이 낭비가 크다.
-    이런 VOD는 사람이 timeout 없는 로컬 `soopts process <id>`로 처리한다."""
-    _client().table("vods").update(
-        {"status": "failed", "error": error, "retry_count": MAX_RETRIES}
-    ).eq("soop_title_no", title_no).execute()
+
+def count_confirmed_performances(vod_row_id: int) -> int:
+    """VOD의 사람 확정(confirmed) performances 수 — recheck에서 보존됨을 확인용."""
+    rows = (
+        _client()
+        .table("performances")
+        .select("id")
+        .eq("vod_id", vod_row_id)
+        .eq("identify_status", "confirmed")
+        .execute()
+        .data
+    )
+    return len(rows or [])
 
 
 def mark_vod(title_no: str, status: str, error: str | None = None) -> None:
@@ -265,8 +286,67 @@ def insert_performances(
     )
 
 
+def fetch_performances(
+    identify_status: str | None = None, local_review: str | None = None
+) -> list[dict[str, Any]]:
+    """performances 행을 필터로 조회하고 각 행에 소속 VOD의 soop_title_no를 붙여 반환한다.
+
+    perf-review 스킬이 곡별로 구간을 다시 받아 로컬 검증할 때 쓴다 — 세그먼트 다운로드에
+    title_no가 필요하므로 vods와 조인해 얹는다. 필터는 둘 다 선택(없으면 전체).
+    """
+    client = _client()
+    q = client.table("performances").select("*")
+    if identify_status:
+        q = q.eq("identify_status", identify_status)
+    if local_review:
+        q = q.eq("local_review", local_review)
+    perfs = q.order("vod_id").order("start_s").execute().data
+    vid = {p["vod_id"] for p in perfs}
+    if not vid:
+        return []
+    vods = client.table("vods").select("id,soop_title_no,title").in_("id", list(vid)).execute().data
+    by_id = {v["id"]: v for v in vods}
+    for p in perfs:
+        v = by_id.get(p["vod_id"], {})
+        p["soop_title_no"] = v.get("soop_title_no")
+        p["vod_title"] = v.get("title")
+    return perfs
+
+
+def update_performance(perf_id: int, fields: dict[str, Any]) -> dict[str, Any] | None:
+    """performance 한 행을 갱신한다(perf-review 스킬의 보강/검증 적용).
+
+    None 값 필드는 보내지 않는다 — 명시적 NULL 덮어쓰기를 막기 위함. 허용 필드만 통과시킨다.
+    """
+    allowed = {
+        "start_s", "end_s", "title_guess", "lyrics_snippet", "song_id",
+        "match_confidence", "identify_status", "local_review", "song_likely",
+    }
+    payload = {k: v for k, v in fields.items() if k in allowed and v is not None}
+    if not payload:
+        return None
+    rows = (
+        _client().table("performances").update(payload).eq("id", perf_id).execute().data
+    )
+    return rows[0] if rows else None
+
+
+def insert_draft_song(
+    title: str, artist: str | None = None, lyrics: str | None = None, status: str = "draft"
+) -> str:
+    """songs에 신곡을 삽입하고 song_id(uuid)를 반환한다.
+
+    무-카탈로그 곡을 로컬 검증(perf-review)에서 draft로 넣기 위한 유일한 song 생성 경로다.
+    기존 원칙("songs는 이 repo에서 만들지 않는다")의 의도적 예외 — status='draft'로만 넣어
+    검수 UI가 published로 승격하기 전까지 정식 카탈로그와 구분되게 한다.
+    """
+    row = {"title": title, "artist": artist, "lyrics": lyrics, "status": status}
+    res = _client().table("songs").insert(row).execute().data
+    return res[0]["id"]
+
+
 # --------------------------------------------------------------------------- #
-# songs (읽기 전용)
+# songs (읽기 전용 카탈로그 — 단, draft 신곡은 insert_draft_song로 예외 삽입)
 # --------------------------------------------------------------------------- #
 def load_song_catalog() -> list[CatalogEntry]:
     client = _client()

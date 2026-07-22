@@ -2,25 +2,19 @@
 import pytest
 
 import soopts.batch as batch_module
-from soopts.analyzers.comment_timeline import TimelineSong
 from soopts.batch import (
     RunContext,
     TimelineEvent,
     _narration_preserves_numbers,
-    comment_candidates,
     fmt_duration_s,
     format_detailed_summary,
-    format_region_failure_alert,
     format_summary,
     format_vod_result,
     narrate_with_llm,
     next_vod_status,
     quality_warning,
-    retry_reason,
     song_link,
-    sweep_allowed,
-    sweep_part_range,
-    sweep_too_long_reason,
+    span_to_song,
     vod_link,
 )
 from soopts.config import Config
@@ -33,95 +27,31 @@ def test_format_summary_basic_counts():
 
 
 
-class _FakePart:
-    def __init__(self, offset_s, duration):
-        self.offset_s = offset_s
-        self.duration = duration
+def test_span_to_song_basic():
+    s = span_to_song({"start_s": 100, "end_s": 250, "title": "곡", "lyrics": "가사"})
+    assert (s.t, s.end, s.duration) == (100, 250, 150)
+    assert s.title == "곡"
+    assert s.lyrics == "가사"
+    # 채팅 분석이 없으니 sticker_rate=0, 사람이 노래라 단언 → song_likely=True.
+    assert s.sticker_rate == 0.0
+    assert s.song_likely is True
 
 
-def test_sweep_part_range_uses_meta_offsets():
-    parts = [_FakePart(0, 3600), _FakePart(3600, 1800)]
-    assert sweep_part_range(0, parts, 5400) == (0.0, 3600.0)
-    assert sweep_part_range(1, parts, 5400) == (3600.0, 1800.0)
+def test_span_to_song_minimal_fields():
+    """start_s/end_s만 있어도 되고, title/lyrics 없으면 None/빈문자열로 남는다."""
+    s = span_to_song({"start_s": 0, "end_s": 60})
+    assert s.title is None
+    assert s.lyrics == ""
 
 
-def test_sweep_part_range_skips_part_without_meta_offset():
-    """m3u8 수 > 메타 파트 수면 오프셋을 모른다 — 0으로 추정하면 그 파트의 곡이 전부
-    틀린 전역 시각으로 DB에 들어가 딥링크가 엉뚱한 데를 가리킨다. 건너뛰는 게 맞다."""
-    parts = [_FakePart(0, 3600)]
-    assert sweep_part_range(1, parts, 3600) is None
+def test_span_to_song_rejects_bad_range():
+    with pytest.raises(ValueError):
+        span_to_song({"start_s": 200, "end_s": 100})  # end <= start
 
 
-def test_sweep_part_range_unknown_duration_downloads_whole_playlist():
-    """메타 파싱 실패로 파트가 없고 total_duration=0이면 끝을 아주 크게 잡아야 한다.
-    0을 그대로 쓰면 download_slice가 첫 세그먼트 하나만 골라 6초만 훑고 조용히 끝난다."""
-    offset, end_s = sweep_part_range(0, [], 0)
-    assert offset == 0.0
-    assert end_s > 24 * 3600  # 어떤 실제 VOD보다 길어야 전부 받는다
-
-
-def test_sweep_part_range_single_part_uses_total_duration():
-    assert sweep_part_range(0, [], 7200) == (0.0, 7200.0)
-
-
-def test_sweep_allowed_new_gated_by_budget():
-    # 신규 sweep은 예산 안에서만 허용.
-    assert sweep_allowed(is_new=True, sweep_used=0, sweep_limit=1) is True
-    assert sweep_allowed(is_new=True, sweep_used=1, sweep_limit=1) is False
-
-
-def test_sweep_allowed_retry_always_runs():
-    # 재시도 sweep은 우선순위상 예산과 무관하게 항상 허용.
-    assert sweep_allowed(is_new=False, sweep_used=5, sweep_limit=1) is True
-
-
-def test_sweep_allowed_zero_limit_blocks_new():
-    assert sweep_allowed(is_new=True, sweep_used=0, sweep_limit=0) is False
-    assert sweep_allowed(is_new=False, sweep_used=0, sweep_limit=0) is True
-
-
-def test_sweep_too_long_error_is_runtime_error():
-    """영구 실패 전용 예외지만, 따로 잡지 않는 경로에선 기존 RuntimeError처럼 다뤄져야 한다."""
-    assert issubclass(batch_module.SweepTooLongError, RuntimeError)
-
-
-def test_sweep_too_long_reason_over_limit():
-    reason = sweep_too_long_reason(9 * 3600, 6 * 3600)
-    assert reason is not None
-    assert "sweep 상한" in reason
-    assert "9시간" in reason
-
-
-def test_sweep_too_long_reason_within_limit_is_none():
-    assert sweep_too_long_reason(5 * 3600, 6 * 3600) is None
-    assert sweep_too_long_reason(6 * 3600, 6 * 3600) is None  # 경계는 통과
-
-
-def test_sweep_too_long_reason_disabled_with_zero():
-    # 0이면 가드 비활성 — 아무리 길어도 None.
-    assert sweep_too_long_reason(100 * 3600, 0) is None
-
-
-def test_retry_reason_none_when_no_region_errors():
-    # 실패 구간이 없으면 재시도 사유가 없다 — 정상 종결(analyzed/done).
-    assert retry_reason(5, []) is None
-    assert retry_reason(0, []) is None
-
-
-def test_retry_reason_all_failed():
-    reason = retry_reason(0, ["04:54:08~04:59:18: IncompleteRead(64525 bytes read)"])
-    assert reason is not None
-    assert "전부 실패" in reason
-    assert "IncompleteRead" in reason
-
-
-def test_retry_reason_partial_failure_still_retries():
-    # 일부만 실패해도 그 구간이 영영 유실되지 않도록 재시도 대상이 된다(예전엔 전부 실패해야만 던졌다).
-    reason = retry_reason(19, ["06:16:36~06:21:46: IncompleteRead(49897 bytes read)"])
-    assert reason is not None
-    assert "19곡 성공" in reason
-    assert "1개 구간 실패" in reason
-
+def test_span_to_song_requires_bounds():
+    with pytest.raises(ValueError):
+        span_to_song({"title": "곡"})  # start_s/end_s 없음
 
 def test_next_vod_status_no_songs_detected_is_done():
     # 감지된 노래가 없으면 검수·업로드할 게 없으니 바로 종결(done) — analyzed에 영구히 머물지 않는다.
@@ -162,17 +92,6 @@ def test_format_vod_result_success_includes_hyperlink_and_counts():
     assert "자동매칭 1" in text
     assert "검수대기 2" in text
 
-
-def test_format_vod_result_reports_partial_region_failures():
-    cfg = Config()
-    text = format_vod_result(cfg, "201651295", {
-        "detected": 1, "auto_matched": 0, "needs_review": 1,
-        "region_errors": ["01:03:22~01:06:10: IncompleteRead(...)"],
-    })
-    assert "일부 구간 실패(1건)" in text
-    assert "01:03:22~01:06:10" in text
-
-
 def test_format_vod_result_whole_vod_failure():
     cfg = Config()
     text = format_vod_result(cfg, "201651295", {"error": "IncompleteRead(34668 bytes read, ...)"})
@@ -199,20 +118,6 @@ def test_fmt_duration_s_zero_is_zero_seconds():
 class IncompleteReadError(Exception):
     pass
 
-
-def test_format_region_failure_alert_includes_context():
-    cfg = Config()
-    text = format_region_failure_alert(
-        cfg, "201651295", "00:50:39~00:55:49", "다운로드", IncompleteReadError("60983 bytes read")
-    )
-    assert "201651295" in text
-    assert "00:50:39~00:55:49" in text
-    assert "다운로드" in text
-    assert "60983 bytes read" in text
-    assert "https://vod.sooplive.co.kr/player/201651295" in text
-
-
-
 def test_run_context_alert_stops_at_limit_and_counts_suppressed(monkeypatch):
     sent = []
     monkeypatch.setattr(batch_module, "_notify_slack", lambda text: sent.append(text))
@@ -224,42 +129,24 @@ def test_run_context_alert_stops_at_limit_and_counts_suppressed(monkeypatch):
     assert ctx.alert_suppressed == 2
 
 
-def test_format_detailed_summary_includes_all_sections():
+def test_format_detailed_summary_includes_detection_and_footnotes():
     cfg = Config()
     ctx = RunContext()
     ctx.record(TimelineEvent(
         kind="detection", title_no="201651295",
-        detail="댓글 타임라인 (노래 4곡 파싱됨)", duration_s=1.2,
-    ))
-    ctx.record(TimelineEvent(
-        kind="region", title_no="201651295", label="00:10:00~00:12:00", ok=True,
-        detail="기다리다", duration_s=45.0, clip_duration_s=30.0, stt_duration_s=10.0,
-    ))
-    ctx.record(TimelineEvent(
-        kind="region", title_no="201651295", label="00:50:39~00:55:49", ok=False,
-        detail="다운로드: IncompleteReadError: 60983 bytes read", duration_s=12.0,
-    ))
-    ctx.record(TimelineEvent(
-        kind="region", title_no="201651295", label="01:00:00~01:02:00", ok=None,
-        detail="노래 아님(Groq) — 건너뜀", duration_s=8.0,
+        detail="댓글 타임라인 4곡", duration_s=1.2,
     ))
     ctx.alert_suppressed = 2
-    stats = {"vods": 1, "detected": 1, "auto_matched": 1, "needs_review": 0,
-              "not_song_skipped": 1}
+    stats = {"vods": 1, "detected": 4, "auto_matched": 4, "needs_review": 0,
+             "manual_skipped": 2}
 
     text = format_detailed_summary(cfg, ctx, stats)
 
     assert text.startswith(format_summary(stats))
     assert "201651295" in text
-    assert "댓글 타임라인 (노래 4곡 파싱됨)" in text
-    assert "00:10:00~00:12:00" in text
-    assert "성공" in text
-    assert "실패" in text
-    assert "건너뜀" in text
-    assert "IncompleteReadError" in text
+    assert "댓글 타임라인 4곡" in text
     assert "추가 2건은 이 요약에만 반영" in text
-    assert "'노래 아님'으로 판정해 검수 큐에 올리지 않고 건너뛴 구간: 1건" in text
-
+    assert "'manual'로 표시한 VOD: 2건" in text
 
 
 def test_format_detailed_summary_no_footnotes_when_nothing_suppressed():
@@ -268,7 +155,7 @@ def test_format_detailed_summary_no_footnotes_when_nothing_suppressed():
     stats = {"vods": 0, "detected": 0, "auto_matched": 0, "needs_review": 0}
     text = format_detailed_summary(cfg, ctx, stats)
     assert "이 요약에만 반영" not in text
-    assert "건너뛴 구간" not in text
+    assert "manual'로 표시한 VOD" not in text
 
 
 class _FakeGroqResponse:
@@ -346,60 +233,6 @@ def test_narration_preserves_numbers_ignores_hms_labels():
     narrated = "50분 39초부터 55분 49초 구간에서 실패했습니다."
     assert _narration_preserves_numbers(original, narrated)
 
-
-def test_comment_candidates_caps_at_next_song_start():
-    # "고양이"(10811)와 "Lip"(11139) 사이 간격(328초)이 pad_after_s(300)보다 크지만,
-    # 두 곡이 더 가까이 붙어있는 경우(예: 간격 200초)를 재현 — 다음 곡을 침범하면 안 된다.
-    timeline = [
-        TimelineSong(time_s=10811, title="고양이", artist="선우정아"),
-        TimelineSong(time_s=11011, title="Lip", artist="디어클라우드"),  # 200초 뒤
-    ]
-    candidates = comment_candidates(timeline, pad_before_s=10.0, pad_after_s=300.0)
-    ds0, de0, hint0 = candidates[0]
-    assert hint0.title == "고양이"
-    assert de0 == 11011  # 다음 곡 시작 시각에서 캡핑됨(10811+300=11111이 아니라)
-
-
-def test_comment_candidates_uses_full_pad_when_gap_is_large():
-    timeline = [
-        TimelineSong(time_s=10811, title="고양이", artist="선우정아"),
-        TimelineSong(time_s=99999, title="다음날 곡", artist="누군가"),
-    ]
-    candidates = comment_candidates(timeline, pad_before_s=10.0, pad_after_s=300.0)
-    _, de0, _ = candidates[0]
-    assert de0 == 10811 + 300.0  # 간격이 넉넉하면 그대로 pad_after_s
-
-
-def test_comment_candidates_last_song_uses_full_pad_after():
-    timeline = [TimelineSong(time_s=10811, title="고양이", artist="선우정아")]
-    candidates = comment_candidates(timeline, pad_before_s=10.0, pad_after_s=300.0)
-    ds0, de0, _ = candidates[0]
-    assert ds0 == 10801.0
-    assert de0 == 11111.0
-
-
-def test_comment_candidates_caps_correctly_even_when_list_order_is_not_chronological():
-    # 실제 프로덕션 버그 재현: Groq가 댓글에서 곡을 시간순이 아닌 순서로 추출하면
-    # timeline[i+1] 기반 캡핑이 엉뚱한 값을 참조해 두 구간이 겹치게 된다("크레파스"
-    # 7341~7557과 "이름에게" 7435~7707이 122초 겹친 사례). 리스트 순서를 일부러 뒤섞어도
-    # 실제 시각 기준으로 올바르게 캡핑돼야 한다.
-    timeline = [
-        TimelineSong(time_s=7435, title="이름에게", artist="아이유"),  # 리스트상 먼저 나오지만
-        TimelineSong(time_s=7341, title="크레파스", artist="누군가"),  # 시각은 이게 더 이름
-    ]
-    candidates = comment_candidates(timeline, pad_before_s=10.0, pad_after_s=300.0)
-    by_title = {hint.title: (ds, de) for ds, de, hint in candidates}
-    assert by_title["크레파스"][1] == 7435  # "이름에게" 시작 전까지만
-    assert by_title["이름에게"][1] == 7435 + 300.0  # 그 뒤엔 곡이 없으니 pad_after_s 그대로
-
-
-
-
-
-
-# --------------------------------------------------------------------------- #
-# 품질 게이트 — 조용한 장애를 실패로 드러낸다
-# --------------------------------------------------------------------------- #
 def test_quality_warning_fires_when_stt_fails_wholesale():
     """실제로 있었던 장애: Groq가 413으로 전량 거절하는 동안 실행은 계속 성공으로 끝났다."""
     cfg = Config()

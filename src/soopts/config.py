@@ -84,15 +84,9 @@ class ClipConfig:
 class StationConfig:
     bj_id: str = "singgyul"          # 데일리 배치 대상 스테이션
     daily_vod_count: int = 2         # 하루 처리할 미처리 VOD 수
-    # 무-타임라인 VOD는 전체 오디오를 받아 세그멘테이션하는 full_sweep로 처리한다 — 정확하지만
-    # 전체 다운로드+전체 세그멘테이션이라 길다(9시간 VOD면 러너 타임아웃 위험). 한 런에서
-    # 실행할 신규 sweep 수를 이 값으로 제한한다(재시도 sweep은 우선순위상 항상 실행). 초과분은
-    # 갓 만든 pending 행을 지워 다음 런에 신규로 다시 잡히게 미룬다.
-    sweep_limit: int = 1
-    # 이 길이를 넘는 무-타임라인 VOD는 sweep을 시도조차 않고 실패 처리한다 — 세그멘테이션이
-    # 어떤 timeout에도 안 끝나 3번 헛 타임아웃하는 대신, 몇 초 만에 실패로 사람에게 알려
-    # 수동 CLI로 넘긴다. 0이면 가드 비활성. daily.yml timeout-minutes와 함께 정해야 한다.
-    sweep_max_duration_s: float = 21600.0  # 6시간
+    # 무-타임라인 VOD는 서버에서 처리하지 않는다 — daily가 'manual'로 표시하고, 사람이
+    # 로컬에서 analyze_vod.py 전체 전사로 곡을 뽑아 `soopts ingest`로 기록한다(느리고 부정확한 서버
+    # 전체 오디오 sweep을 없앴다). 로컬 full_sweep 폴백은 `soopts process`.
 
 
 @dataclass

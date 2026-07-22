@@ -129,7 +129,7 @@ def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int
 
 
 def cmd_daily(args) -> int:
-    """스테이션 최신 VOD 자동 처리(감지·식별·클립) — GitHub Actions 배치용."""
+    """스테이션 최신 VOD의 댓글 타임라인(🎤)을 파싱해 곡 식별·DB 기록 — GitHub Actions 배치용."""
     cfg = load_config(
         Path(args.config) if args.config else None,
         work_root=Path(args.work_root) if args.work_root else None,
@@ -145,13 +145,111 @@ def cmd_daily(args) -> int:
     return 0
 
 
-def cmd_process(args) -> int:
-    """단일 VOD를 배치 파이프라인으로 로컬 처리 후 DB 기록 — daily의 러너 제약 우회.
+def cmd_ingest(args) -> int:
+    """로컬 분석(analyze_vod.py)으로 뽑은 곡 목록(JSON)을 DB에 기록 — 무-타임라인 VOD 로컬 처리 경로.
 
-    댓글 타임라인 없는 초장시간 VOD는 daily의 sweep 길이 가드에 걸려 러너에서 실패
-    처리된다(어떤 timeout에도 세그멘테이션이 안 끝나므로). 그런 VOD를 timeout 없는 PC에서
-    이 명령으로 끝까지 처리한다. daily와 동일하게 Supabase에 기록해 딥링크가 생성된다.
-    필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GROQ_API_KEY (SLACK_WEBHOOK_URL 선택).
+    daily가 'manual'로 표시한 무-타임라인 VOD를 사람이 로컬에서 analyze_vod.py 전체 전사로
+    보고 곡 구간·제목을 뽑은 뒤, 그 JSON을 이 명령으로 넣는다. 감지/STT를 돌리지 않고
+    식별(카탈로그 매칭)과 DB 기록만 한다. daily와 동일하게 Supabase에 남아 딥링크가 생성된다.
+    필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GROQ_API_KEY.
+
+    JSON 형식: {"songs": [{"start_s": 1023, "end_s": 1245, "title": "...", "artist": "...",
+    "lyrics": "..."}]} — start_s/end_s만 필수, 나머지는 선택(식별 단서).
+    """
+    import json
+
+    cfg = load_config(
+        Path(args.config) if args.config else None,
+        work_root=Path(args.work_root) if args.work_root else None,
+    )
+    from soopts import batch
+
+    vod_id = extract_vod_id(args.vod)
+    data = json.loads(Path(args.spans).read_text(encoding="utf-8"))
+    songs = data.get("songs") if isinstance(data, dict) else data
+    if not isinstance(songs, list):
+        raise ValueError("spans JSON은 곡 목록이거나 {\"songs\": [...]} 형식이어야 합니다")
+    result = batch.ingest_vod(
+        cfg, title_no=vod_id, bj_id=args.bj or cfg.station.bj_id, songs=songs
+    )
+    print(result["text"])
+    return 0
+
+
+def cmd_vods(args) -> int:
+    """처리된 VOD 목록 + performance 수를 출력 — vod-audit 스킬의 감사 대상 조회용.
+
+    판정을 하지 않는 순수 조회 명령이다(Groq 없음). 어떤 VOD가 잘못 처리됐는지는 스킬
+    안에서 Claude가 `soopts comments`로 원본 댓글을 읽고 정한다. 필요 env: SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY.
+    """
+    import json
+
+    from soopts import db
+
+    statuses = [s.strip() for s in args.status.split(",") if s.strip()]
+    rows = db.fetch_vods_by_status(statuses)
+    out = [
+        {
+            "id": r["id"],
+            "title_no": r["soop_title_no"],
+            "title": r.get("title") or "",
+            "status": r.get("status"),
+            "duration_s": r.get("duration_s"),
+            "note": r.get("error"),  # manual 사유 메모(로컬 처리 우선순위 힌트)
+            "machine_perfs": db.count_machine_performances(r["id"]),
+            "confirmed_perfs": db.count_confirmed_performances(r["id"]),
+        }
+        for r in rows
+    ]
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        print(f"status={statuses} — {len(out)}건")
+        for o in out:
+            note = f" · {o['note']}" if o["note"] else ""
+            print(
+                f"  {o['title_no']} [{o['status']}] {o['title']} "
+                f"— 기계 {o['machine_perfs']} / confirmed {o['confirmed_perfs']}{note}"
+            )
+    return 0
+
+
+def cmd_comments(args) -> int:
+    """VOD 원본 댓글을 출력 — vod-audit 스킬이 노래 타임라인 유무를 Claude로 판정하는 입력.
+
+    Groq를 쓰지 않는 순수 조회다(코드가 노래/게임/티저를 구분하지 않는다 — 그건 스킬 안의
+    Claude 몫). 필요 env: (없음, 공개 댓글 API).
+    """
+    import json
+
+    cfg = load_config(
+        Path(args.config) if args.config else None,
+        work_root=Path(args.work_root) if args.work_root else None,
+    )
+    from soopts.collector.comments import fetch_comments
+
+    vod_id = extract_vod_id(args.vod)
+    comments = fetch_comments(cfg, args.bj or cfg.station.bj_id, vod_id)
+    if args.json:
+        print(json.dumps(
+            {"title_no": vod_id, "count": len(comments), "comments": comments},
+            ensure_ascii=False, indent=2,
+        ))
+    else:
+        print(f"VOD {vod_id} — 댓글 {len(comments)}개")
+        for c in comments:
+            print("---")
+            print(c)
+    return 0
+
+
+def cmd_set_manual(args) -> int:
+    """VOD 하나를 'manual'로 되돌린다 — vod-audit 스킬이 Claude 판정 후 호출하는 적용 명령.
+
+    --clear-machine면 기계 생성 performances를 먼저 지운다(confirmed는 보존). 판정은 스킬
+    안의 Claude가 하고, 이 명령은 결정된 VOD에만 결정론적으로 적용한다. 필요 env:
+    SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
     """
     cfg = load_config(
         Path(args.config) if args.config else None,
@@ -160,10 +258,162 @@ def cmd_process(args) -> int:
     from soopts import batch
 
     vod_id = extract_vod_id(args.vod)
-    result = batch.process_single_vod(
-        cfg, title_no=vod_id, bj_id=args.bj or cfg.station.bj_id
+    result = batch.set_vod_manual(
+        cfg, title_no=vod_id, clear_machine=args.clear_machine
     )
     print(result["text"])
+    return 0
+
+
+def cmd_perfs(args) -> int:
+    """performance 목록을 출력 — perf-review 스킬의 로컬 검증 대상 조회용.
+
+    필터: --identify(identify_status), --local(local_review). 각 행에 title_no·시각·추측제목·
+    lyrics 유무를 얹는다. Groq 없이 순수 조회. 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+    """
+    import json
+
+    from soopts import db
+
+    rows = db.fetch_performances(identify_status=args.identify, local_review=args.local)
+    out = [
+        {
+            "id": p["id"],
+            "title_no": p.get("soop_title_no"),
+            "start_s": p.get("start_s"),
+            "end_s": p.get("end_s"),
+            "title_guess": p.get("title_guess"),
+            "song_id": p.get("song_id"),
+            "identify_status": p.get("identify_status"),
+            "local_review": p.get("local_review"),
+            "has_lyrics": bool((p.get("lyrics_snippet") or "").strip()),
+        }
+        for p in rows
+    ]
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        print(f"performances {len(out)}건 (identify={args.identify}, local={args.local})")
+        for o in out:
+            print(f"  #{o['id']} {o['title_no']} {o['start_s']}~{o['end_s']}s "
+                  f"[{o['identify_status']}/{o['local_review']}] {o['title_guess'] or '(미상)'}")
+    return 0
+
+
+def cmd_set_perf(args) -> int:
+    """performance 한 행을 갱신 — perf-review 스킬이 로컬 검증·보강 결과를 적용.
+
+    보내지 않은 필드는 그대로 둔다. 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+    """
+    from soopts import db
+
+    fields = {
+        "start_s": args.start_s, "end_s": args.end_s, "title_guess": args.title_guess,
+        "lyrics_snippet": args.lyrics, "song_id": args.song_id,
+        "identify_status": args.identify_status, "local_review": args.local_review,
+    }
+    r = db.update_performance(args.perf_id, fields)
+    if r is None:
+        print(f"performance #{args.perf_id}: 갱신할 필드 없음 또는 행 없음")
+        return 1
+    print(f"performance #{args.perf_id} 갱신: "
+          f"identify={r.get('identify_status')} local={r.get('local_review')} song_id={r.get('song_id')}")
+    return 0
+
+
+def cmd_add_song(args) -> int:
+    """songs에 draft 신곡을 삽입하고 song_id를 출력 — 무-카탈로그 곡 등록(perf-review).
+
+    status는 기본 'draft'(검수 UI가 published로 승격 전까지 정식 카탈로그와 구분). 필요 env:
+    SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+    """
+    from soopts import db
+
+    song_id = db.insert_draft_song(
+        title=args.title, artist=args.artist, lyrics=args.lyrics, status=args.status
+    )
+    print(song_id)
+    return 0
+
+
+def cmd_match_song(args) -> int:
+    """제목/가수(+가사)를 카탈로그에 매칭해 결과를 JSON으로 — perf-review가 재식별 후 확인용.
+
+    resolve_song_match(ingest와 동일 로직)를 재사용한다. song_id가 나오면 카탈로그에 있는 것,
+    null이면 신곡(draft 삽입 대상). 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GROQ_API_KEY.
+    """
+    import json
+
+    from soopts import db
+    from soopts.analyzers.identify import resolve_song_match
+
+    catalog = db.load_song_catalog()
+    r = resolve_song_match(args.title, args.artist or "", args.lyrics or "", True, catalog)
+    print(json.dumps({
+        "song_id": r.song_id, "title_guess": r.title_guess,
+        "confidence": round(r.match_confidence, 1), "identify_status": r.identify_status,
+    }, ensure_ascii=False))
+    return 0
+
+
+def cmd_transcribe(args) -> int:
+    """VOD의 [start,end] 구간만 받아 Whisper로 전사·출력 — perf-review 스킬의 검증 입력.
+
+    구간만 받으므로(멀티파트 안전) 긴 VOD도 빠르다. 캐시는 work/{id}/clips/에 남는다.
+    필요 env: GROQ_API_KEY (전사).
+    """
+    import tempfile
+
+    from soopts.analyzers.stt import (
+        _ensure_uploadable,
+        _load_model,
+        _transcribe_best,
+        _transcribe_langs,
+        _transcribe_segments,
+    )
+    from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
+    from soopts.collector.meta import fetch_meta
+
+    cfg = load_config(
+        Path(args.config) if args.config else None,
+        work_root=Path(args.work_root) if args.work_root else None,
+    )
+    vod_id = extract_vod_id(args.vod)
+    work = work_paths(cfg.work_root, vod_id).ensure()
+    work.clips_dir.mkdir(parents=True, exist_ok=True)
+    meta = fetch_meta(cfg, vod_id, work)
+    ds = max(0.0, args.start - args.pad)
+    de = args.end + args.pad
+    m3u8s = resolve_m3u8_list(vod_id, cfg.clip.quality)
+    m3u8, ls, le = map_to_part(ds, de, meta.parts, m3u8s)
+    if m3u8 is None:
+        raise RuntimeError(f"구간 [{ds:.0f},{de:.0f}] 파트 매핑 실패")
+    raw = work.clips_dir / f"seg_{int(ds)}_{int(de)}.mp4"
+    if not raw.exists() or args.force:
+        download_slice(m3u8, ls, le, raw, workers=cfg.collector.segment_workers)
+    model = _load_model(cfg)
+    langs = [args.lang] if args.lang else ([cfg.stt.language] if cfg.stt.language else ["en", "ko"])
+    if args.segments:
+        # 세그먼트별 타임스탬프 JSON — 종료 경계 판정용(가사 끝→아웃트로 잡담 시작 지점 찾기).
+        # 시각은 구간 시작(ds) 오프셋을 더해 VOD 절대초로 환산해 출력한다.
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as td:
+            p = _ensure_uploadable(str(raw), Path(td), 0, le - ls)
+            segs, _ = _transcribe_segments(model, p, cfg.stt, langs) if p else ([], "")
+        out = [
+            {"start": round(ds + s["start"], 1), "end": round(ds + s["end"], 1), "text": s["text"]}
+            for s in segs
+        ]
+        print(_json.dumps(out, ensure_ascii=False))
+        return 0
+    if args.lang:
+        with tempfile.TemporaryDirectory() as td:
+            p = _ensure_uploadable(str(raw), Path(td), 0, le - ls)
+            text, _ = _transcribe_langs(model, p, cfg.stt, [args.lang]) if p else ("", "")
+    else:
+        text, _ = _transcribe_best(model, str(raw), cfg, start=0, dur=le - ls)
+    print(text)
     return 0
 
 
@@ -290,7 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_clips)
 
     sp = sub.add_parser(
-        "daily", help="스테이션 최신 VOD 자동 처리(감지·식별·클립) — GitHub Actions 배치용"
+        "daily", help="스테이션 최신 VOD 댓글 타임라인(🎤) 파싱·식별·DB 기록 — GitHub Actions 배치용"
     )
     sp.add_argument("--count", type=int, help="처리할 미처리 VOD 수(기본: soopts.toml [station] daily_vod_count)")
     sp.add_argument("--bj", help="대상 스테이션 bj_id(기본: soopts.toml [station] bj_id)")
@@ -299,13 +549,87 @@ def build_parser() -> argparse.ArgumentParser:
 
 
     sp = sub.add_parser(
-        "process",
-        help="단일 VOD를 배치 파이프라인으로 로컬 처리 + DB 기록 "
-             "(러너 못 돌리는 초장시간 무-타임라인 VOD용)",
+        "ingest",
+        help="로컬 분석(analyze_vod.py)으로 뽑은 곡 목록(JSON)을 DB에 기록 (무-타임라인 VOD)",
     )
     add_vod(sp)
+    sp.add_argument("spans", help="곡 목록 JSON 파일 경로 ({\"songs\": [{start_s,end_s,title,...}]})")
     sp.add_argument("--bj", help="스테이션 bj_id(기본: soopts.toml [station] bj_id)")
-    sp.set_defaults(func=cmd_process)
+    sp.set_defaults(func=cmd_ingest)
+
+    sp = sub.add_parser(
+        "vods",
+        help="처리된 VOD 목록 + performance 수 조회 (vod-audit 스킬용, 판정 안 함)",
+    )
+    sp.add_argument("--status", default="analyzed,done", help="쉼표구분 status 필터(기본: analyzed,done)")
+    sp.add_argument("--json", action="store_true", help="JSON 출력")
+    sp.set_defaults(func=cmd_vods)
+
+    sp = sub.add_parser(
+        "comments",
+        help="VOD 원본 댓글 출력 (vod-audit 스킬이 노래 타임라인 유무를 판정하는 입력)",
+    )
+    add_vod(sp)
+    sp.add_argument("--json", action="store_true", help="JSON 출력")
+    sp.add_argument("--bj", help="스테이션 bj_id(기본: soopts.toml [station] bj_id)")
+    sp.set_defaults(func=cmd_comments)
+
+    sp = sub.add_parser(
+        "set-manual",
+        help="VOD 하나를 manual로 되돌림 (vod-audit 스킬이 Claude 판정 후 적용)",
+    )
+    add_vod(sp)
+    sp.add_argument("--clear-machine", action="store_true",
+                    help="기계 생성 performances를 먼저 삭제(confirmed는 보존)")
+    sp.set_defaults(func=cmd_set_manual)
+
+    sp = sub.add_parser(
+        "perfs", help="performance 목록 조회 (perf-review 스킬용, 판정 안 함)")
+    sp.add_argument("--identify", help="identify_status 필터(needs_review/auto_matched/confirmed 등)")
+    sp.add_argument("--local", help="local_review 필터(pending/verified/needs_human)")
+    sp.add_argument("--json", action="store_true", help="JSON 출력")
+    sp.set_defaults(func=cmd_perfs)
+
+    sp = sub.add_parser(
+        "set-perf", help="performance 갱신 (perf-review 스킬이 로컬 검증·보강 적용)")
+    sp.add_argument("perf_id", type=int, help="performance id")
+    sp.add_argument("--start-s", type=int, dest="start_s")
+    sp.add_argument("--end-s", type=int, dest="end_s")
+    sp.add_argument("--title-guess", dest="title_guess")
+    sp.add_argument("--lyrics")
+    sp.add_argument("--song-id", dest="song_id")
+    sp.add_argument("--identify-status", dest="identify_status",
+                    help="auto_matched/needs_review/confirmed 등")
+    sp.add_argument("--local-review", dest="local_review",
+                    help="verified/needs_human/pending")
+    sp.set_defaults(func=cmd_set_perf)
+
+    sp = sub.add_parser(
+        "add-song", help="songs에 draft 신곡 삽입 → song_id 출력 (무-카탈로그 곡 등록)")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--artist")
+    sp.add_argument("--lyrics")
+    sp.add_argument("--status", default="draft", help="기본 draft")
+    sp.set_defaults(func=cmd_add_song)
+
+    sp = sub.add_parser(
+        "match-song", help="제목/가수를 카탈로그에 매칭 → song_id JSON (perf-review 재식별용)")
+    sp.add_argument("--title", required=True)
+    sp.add_argument("--artist")
+    sp.add_argument("--lyrics")
+    sp.set_defaults(func=cmd_match_song)
+
+    sp = sub.add_parser(
+        "transcribe", help="VOD의 [start,end] 구간만 받아 Whisper 전사·출력 (perf-review용)")
+    add_vod(sp)
+    sp.add_argument("--start", type=float, required=True, help="시작 초")
+    sp.add_argument("--end", type=float, required=True, help="끝 초")
+    sp.add_argument("--pad", type=float, default=15.0, help="앞뒤 여유 초(기본 15)")
+    sp.add_argument("--lang", help="강제 언어(en/ko). 없으면 자동")
+    sp.add_argument(
+        "--segments", action="store_true",
+        help="텍스트 대신 세그먼트별 [{start,end,text}] 타임스탬프 JSON 출력(종료 경계 판정용)")
+    sp.set_defaults(func=cmd_transcribe)
 
     sp = sub.add_parser("fetch", help="yt-dlp로 전체 오디오 다운로드")
     add_vod(sp)
