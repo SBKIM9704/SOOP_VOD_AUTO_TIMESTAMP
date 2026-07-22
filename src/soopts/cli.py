@@ -67,7 +67,7 @@ def cmd_clips(args) -> int:
 
 def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int:
     from soopts.analyzers.audio_analyzer import sticker_burst_regions
-    from soopts.collector.media import download_slice, resolve_m3u8_list
+    from soopts.collector.media import download_span, resolve_m3u8_list
     from soopts.export.clips import detect_song_span, write_clips
     from soopts.models import read_chat_jsonl
     from soopts.output import fmt_hms
@@ -84,7 +84,7 @@ def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int
     )
     log.info("노래 후보 %d구간 → 1080p 클립 추출(%s)", len(regions), cfg.clip.quality)
 
-    from soopts.collector.media import map_to_part
+    from soopts.collector.media import split_by_part
 
     m3u8s = resolve_m3u8_list(args.vod, cfg.clip.quality)
     parts = meta.parts if meta else []
@@ -94,12 +94,12 @@ def _produce_clips(cfg: Config, vod_id: str, work: WorkPaths, meta, args) -> int
     for s, e in regions:
         ds = max(0.0, s - cfg.clip.dl_pad_before_s)
         de = e + cfg.clip.dl_pad_after_s
-        m3u8, ls, le = map_to_part(ds, de, parts, m3u8s)
-        if m3u8 is None:
+        spans = split_by_part(ds, de, parts, m3u8s)
+        if not spans:
             continue
         raw = work.clips_dir / f"region_{int(ds)}.mp4"
         if not raw.exists() or args.force:
-            download_slice(m3u8, ls, le, raw, workers=cfg.collector.segment_workers)
+            download_span(spans, raw, workers=cfg.collector.segment_workers)
         span = detect_song_span(cfg, str(raw), ds, de, media_offset=ds)
         if span:
             clip, local_start, local_end = span
@@ -371,7 +371,7 @@ def cmd_transcribe(args) -> int:
         _transcribe_langs,
         _transcribe_segments,
     )
-    from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
+    from soopts.collector.media import download_span, resolve_m3u8_list, split_by_part
     from soopts.collector.meta import fetch_meta
 
     cfg = load_config(
@@ -385,12 +385,14 @@ def cmd_transcribe(args) -> int:
     ds = max(0.0, args.start - args.pad)
     de = args.end + args.pad
     m3u8s = resolve_m3u8_list(vod_id, cfg.clip.quality)
-    m3u8, ls, le = map_to_part(ds, de, meta.parts, m3u8s)
-    if m3u8 is None:
+    spans = split_by_part(ds, de, meta.parts, m3u8s)
+    if not spans:
         raise RuntimeError(f"구간 [{ds:.0f},{de:.0f}] 파트 매핑 실패")
     raw = work.clips_dir / f"seg_{int(ds)}_{int(de)}.mp4"
     if not raw.exists() or args.force:
-        download_slice(m3u8, ls, le, raw, workers=cfg.collector.segment_workers)
+        download_span(spans, raw, workers=cfg.collector.segment_workers)
+    # 파트 경계를 넘으면 여러 조각이 이어 붙으므로, 전사 길이는 조각 길이의 합이다.
+    dur = sum(le - ls for _, ls, le in spans)
     model = _load_model(cfg)
     langs = [args.lang] if args.lang else ([cfg.stt.language] if cfg.stt.language else ["en", "ko"])
     if args.segments:
@@ -399,7 +401,7 @@ def cmd_transcribe(args) -> int:
         import json as _json
 
         with tempfile.TemporaryDirectory() as td:
-            p = _ensure_uploadable(str(raw), Path(td), 0, le - ls)
+            p = _ensure_uploadable(str(raw), Path(td), 0, dur)
             segs, _ = _transcribe_segments(model, p, cfg.stt, langs) if p else ([], "")
         out = [
             {"start": round(ds + s["start"], 1), "end": round(ds + s["end"], 1), "text": s["text"]}
@@ -409,10 +411,10 @@ def cmd_transcribe(args) -> int:
         return 0
     if args.lang:
         with tempfile.TemporaryDirectory() as td:
-            p = _ensure_uploadable(str(raw), Path(td), 0, le - ls)
+            p = _ensure_uploadable(str(raw), Path(td), 0, dur)
             text, _ = _transcribe_langs(model, p, cfg.stt, [args.lang]) if p else ("", "")
     else:
-        text, _ = _transcribe_best(model, str(raw), cfg, start=0, dur=le - ls)
+        text, _ = _transcribe_best(model, str(raw), cfg, start=0, dur=dur)
     print(text)
     return 0
 
@@ -468,7 +470,7 @@ def _songs_slice(cfg: Config, vod_id: str, work: WorkPaths, meta, args):
     """
     from soopts.analyzers.audio_analyzer import sticker_burst_regions
     from soopts.analyzers.stt import transcribe_slices
-    from soopts.collector.media import download_slice, map_to_part, resolve_m3u8_list
+    from soopts.collector.media import download_span, resolve_m3u8_list, split_by_part
     from soopts.models import Song, read_chat_jsonl
 
     if not work.chat.exists():
@@ -499,13 +501,13 @@ def _songs_slice(cfg: Config, vod_id: str, work: WorkPaths, meta, args):
 
     pairs = []
     for s, e in regions:
-        m3u8, ls, le = map_to_part(s, e, parts, m3u8s)
-        if m3u8 is None:
+        spans = split_by_part(s, e, parts, m3u8s)
+        if not spans:
             log.warning("구간 %d-%d 파트 매핑 실패 — 건너뜀", int(s), int(e))
             continue
         path = slice_dir / f"slice_{int(s)}_{int(e)}.mp4"
         if not path.exists() or args.force:
-            download_slice(m3u8, ls, le, path, workers=cfg.collector.segment_workers)
+            download_span(spans, path, workers=cfg.collector.segment_workers)
         rate = sum(1 for t in stickers if s <= t <= e) / max((e - s) / 60.0, 1e-6)
         song = Song(t=int(s), end=int(e), duration=int(e - s),
                     sticker_rate=round(rate, 1), song_likely=rate >= cfg.audio.sticker_rate_strong)

@@ -2,7 +2,55 @@ import pytest
 
 import soopts.collector.media as media
 import soopts.collector.media as media_module
-from soopts.collector.media import _fetch
+from soopts.collector.media import _fetch, split_by_part
+from soopts.models import MetaPart
+
+
+def _parts(*durations: int) -> list[MetaPart]:
+    parts, off = [], 0
+    for i, d in enumerate(durations):
+        parts.append(MetaPart(idx=i, file_info_key=f"k{i}", duration=d, offset_s=off))
+        off += d
+    return parts
+
+
+# --------------------------------------------------------------------------- #
+# split_by_part — 파트 경계를 넘는 구간
+# --------------------------------------------------------------------------- #
+def test_split_by_part_without_meta_uses_first_m3u8():
+    assert split_by_part(10, 20, [], ["A"]) == [("A", 10, 20)]
+
+
+def test_split_by_part_within_single_part():
+    assert split_by_part(100, 200, _parts(18000, 300), ["A", "B"]) == [("A", 100, 200)]
+
+
+def test_split_by_part_spanning_boundary_returns_both_parts():
+    """경계를 넘는 구간은 잘리지 않고 양쪽 파트로 쪼개진다 — 예전엔 앞 파트로 클램프돼
+    뒷부분이 조용히 사라졌다(198797609 방종곡이 3초만 받아진 사건)."""
+    assert split_by_part(17950, 18100, _parts(18000, 300), ["A", "B"]) == [
+        ("A", 17950, 18000), ("B", 0, 100)
+    ]
+
+
+def test_split_by_part_start_exactly_on_boundary_uses_next_part():
+    """s == 파트 시작이면 뒤 파트다. 예전 조건(offset <= s < end)에서도 맞았지만, 앞 파트
+    끝(=같은 값)에 먼저 걸려 15초짜리 꼬리만 받아지던 실제 사례가 있었다."""
+    assert split_by_part(18000, 18050, _parts(18000, 300), ["A", "B"]) == [("B", 0, 50)]
+
+
+def test_split_by_part_spanning_three_parts():
+    spans = split_by_part(90, 260, _parts(100, 100, 100), ["A", "B", "C"])
+    assert spans == [("A", 90, 100), ("B", 0, 100), ("C", 0, 60)]
+
+
+def test_split_by_part_skips_parts_without_m3u8():
+    # m3u8이 파트 수보다 적으면(목록 조회 불일치) 받을 수 없는 파트는 빠진다.
+    assert split_by_part(17950, 18100, _parts(18000, 300), ["A"]) == [("A", 17950, 18000)]
+
+
+def test_split_by_part_outside_all_parts_is_empty():
+    assert split_by_part(50000, 50100, _parts(18000, 300), ["A", "B"]) == []
 
 
 class _FakeResponse:
