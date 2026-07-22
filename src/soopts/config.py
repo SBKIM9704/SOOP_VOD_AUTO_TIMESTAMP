@@ -84,6 +84,13 @@ class ClipConfig:
 class StationConfig:
     bj_id: str = "singgyul"          # 데일리 배치 대상 스테이션
     daily_vod_count: int = 2         # 하루 처리할 미처리 VOD 수
+    # 방송 후 이 일수가 지나기 전엔 서버가 손대지 않는다(0=쿨다운 없음). 팬 댓글 타임라인은
+    # 방송 직후엔 없거나 쓰이는 중이라, 일찍 잡으면 되돌릴 수 없는 두 손해가 난다:
+    # 타임라인 0개면 'manual'로 빠져 사람이 전체 전사로 푸는 제일 비싼 큐에 들어가고,
+    # 절반만 쓰인 시점에 잡히면 그만큼만 기록하고 'analyzed'로 끝나 나머지를 조용히 잃는다.
+    # 두 상태 다 자동 재처리 대상이 아니다(fetch_retryable는 failed/pending만 본다).
+    # 쿨다운이 지나도 타임라인이 없으면 그때는 정상적으로 'manual' → 사람이 처리한다.
+    min_vod_age_days: int = 7
     # 무-타임라인 VOD는 서버에서 처리하지 않는다 — daily가 'manual'로 표시하고, 사람이
     # 로컬에서 analyze_vod.py 전체 전사로 곡을 뽑아 `soopts ingest`로 기록한다(느리고 부정확한 서버
     # 전체 오디오 sweep을 없앴다). 로컬 full_sweep 폴백은 `soopts process`.

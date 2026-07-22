@@ -48,6 +48,7 @@ def select_targets(
     candidates: list[dict[str, Any]],
     existing_by_no: dict[str, dict[str, Any]],
     n: int,
+    cutoff_date: str | None = None,
 ) -> list[dict[str, Any]]:
     """순수 함수: 우선순위 **재시도 > 신규 > 백필** 로 최대 n개를 고른다.
 
@@ -59,6 +60,11 @@ def select_targets(
       섞여 있으며, 최신순 순회가 '신규 > 백필' 우선순위를 자동으로 만든다. 처리 완료분
       (existing_by_no에 있고 재시도 대상이 아닌 것)은 건너뛰므로, 신규가 없으면 자연히
       과거로 내려가며 백필한다.
+    - **cutoff_date**: 'YYYY-MM-DD'. broadcast_date가 이보다 나중인 후보는 아직 팬 타임라인이
+      안 달렸을 공산이 커서 제외한다(쿨다운, `station.min_vod_age_days`). 날짜 문자열은
+      고정 폭이라 사전식 비교가 곧 날짜 비교다. broadcast_date가 없으면 판단 근거가 없으니
+      거르지 않는다 — 근거 없이 무기한 보류하느니 처리하는 편이 낫다. **재시도는 면제**다:
+      이미 vods 행이 있는 = 착수한 작업이고, 여기서 막으면 큐가 영영 안 비워진다.
 
     선택 시점에 보이는 pending은 반드시 죽은 실행이 남긴 것이다 — `concurrency: soopts-daily`
     가 동시 실행을 막고, 한 실행 안에서 선택은 처리보다 먼저 한 번만 일어난다.
@@ -88,6 +94,9 @@ def select_targets(
             break
         title_no = str(c["title_no"])
         if title_no in seen or title_no in existing_by_no:
+            continue
+        bdate = c.get("broadcast_date")
+        if cutoff_date and bdate and bdate > cutoff_date:
             continue
         picked.append(_vod_row(title_no, c, {}, 0))
         seen.add(title_no)
