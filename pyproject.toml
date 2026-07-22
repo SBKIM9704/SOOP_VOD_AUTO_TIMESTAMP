@@ -24,6 +24,11 @@ batch = [                        # soopts daily/sync (GitHub Actions 배치)
     "rapidfuzz",
     "groq",
 ]
+youtube = [                      # soopts youtube-upload/publish (노래모음 업로드)
+    "google-api-python-client",
+    "google-auth-oauthlib",
+    "google-auth",
+]
 dev = ["pytest>=7.0", "ruff>=0.4", "pytest-cov", "rapidfuzz", "groq"]
 
 [project.scripts]

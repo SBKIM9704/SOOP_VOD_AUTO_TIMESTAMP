@@ -262,3 +262,75 @@ def test_clear_machine_performances_spares_human_confirmations(monkeypatch):
     assert db.clear_machine_performances(7) == 2
     assert calls["eq"] == [("vod_id", 7)]
     assert calls["neq"] == ("identify_status", "confirmed")
+
+
+# --------------------------------------------------------------------------- #
+# select_youtube_target — "모든 곡이 완결된 VOD"만, 오래된 방송부터
+# --------------------------------------------------------------------------- #
+def _vod(row_id: int, date: str, **over):
+    return {
+        "id": row_id,
+        "soop_title_no": str(200000000 + row_id),
+        "status": "analyzed",
+        "broadcast_date": date,
+        "youtube_status": None,
+        **over,
+    }
+
+
+def _perf(perf_id: int, **over):
+    return {
+        "id": perf_id,
+        "identify_status": "auto_matched",
+        "local_review": "verified",
+        **over,
+    }
+
+
+def test_select_youtube_target_picks_oldest_complete_vod():
+    vods = [_vod(1, "2026-07-19"), _vod(2, "2026-06-25")]
+    perfs = {1: [_perf(10)], 2: [_perf(20), _perf(21)]}
+    assert db.select_youtube_target(vods, perfs)["id"] == 2
+
+
+def test_select_youtube_target_skips_vod_with_any_incomplete_perf():
+    """한 곡이라도 미완이면 그 VOD 전체를 건너뛴다 — 틀린 챕터는 올린 뒤 되돌릴 수 없다."""
+    vods = [_vod(1, "2026-06-25"), _vod(2, "2026-07-19")]
+    perfs = {
+        1: [_perf(10), _perf(11, local_review="pending")],
+        2: [_perf(20)],
+    }
+    assert db.select_youtube_target(vods, perfs)["id"] == 2
+
+
+def test_select_youtube_target_accepts_confirmed_identify():
+    """identify는 auto_matched·confirmed 둘 다 '완료'다(사람이 확정한 쪽 포함)."""
+    vods = [_vod(1, "2026-06-25")]
+    perfs = {1: [_perf(10, identify_status="confirmed")]}
+    assert db.select_youtube_target(vods, perfs)["id"] == 1
+
+
+def test_select_youtube_target_returns_none_when_nothing_qualifies():
+    vods = [_vod(1, "2026-06-25")]
+    assert db.select_youtube_target(vods, {1: []}) is None
+    assert db.select_youtube_target([], {}) is None
+
+
+def test_select_youtube_target_ignores_already_uploaded():
+    vods = [_vod(1, "2026-06-25", youtube_status="uploaded_private"), _vod(2, "2026-07-19")]
+    perfs = {1: [_perf(10)], 2: [_perf(20)]}
+    assert db.select_youtube_target(vods, perfs)["id"] == 2
+
+
+def test_select_youtube_target_sorts_missing_date_last():
+    """방송일이 없는 행이 빈 문자열로 최고참 행세를 하며 큐를 새치기하면 안 된다."""
+    vods = [_vod(1, None), _vod(2, "2026-07-19")]
+    perfs = {1: [_perf(10)], 2: [_perf(20)]}
+    assert db.select_youtube_target(vods, perfs)["id"] == 2
+
+
+def test_youtube_block_reason_explains_rejection():
+    reason = db.youtube_block_reason(_vod(1, "2026-06-25", status="manual"), [_perf(10)])
+    assert "manual" in reason
+    assert db.youtube_block_reason(_vod(1, "2026-06-25"), []) == "performance 없음"
+    assert db.youtube_block_reason(_vod(1, "2026-06-25"), [_perf(10)]) is None

@@ -145,6 +145,28 @@ def cmd_daily(args) -> int:
     return 0
 
 
+def cmd_youtube_upload(args) -> int:
+    """검증 완료 VOD 하나의 노래 구간을 합본 영상으로 만들어 유튜브에 **unlisted** 업로드.
+
+    하루 1건만 돈다(GitHub Actions youtube.yml). 대상은 status가 analyzed/done이고 모든
+    performance의 identify_status·local_review가 완료된 VOD 중 가장 오래된 방송이다.
+    올린 뒤 코드가 영상을 고치거나 지우는 경로는 없다 — 손볼 일은 유튜브 스튜디오에서.
+    필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, (Slack) SLACK_WEBHOOK_URL.
+    OAuth 토큰: [youtube] token_file (러너는 YT_TOKEN 시크릿에서 복원).
+    """
+    cfg = load_config(
+        Path(args.config) if args.config else None,
+        work_root=Path(args.work_root) if args.work_root else None,
+    )
+    from soopts import youtube_pipeline
+
+    return youtube_pipeline.main_upload(
+        cfg,
+        title_no=extract_vod_id(args.title_no) if args.title_no else None,
+        dry_run=args.dry_run,
+    )
+
+
 def cmd_ingest(args) -> int:
     """로컬 분석(analyze_vod.py)으로 뽑은 곡 목록(JSON)을 DB에 기록 — 무-타임라인 VOD 로컬 처리 경로.
 
@@ -552,7 +574,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--bj", help="대상 스테이션 bj_id(기본: soopts.toml [station] bj_id)")
     sp.set_defaults(func=cmd_daily)
 
-
+    sp = sub.add_parser(
+        "youtube-upload",
+        help="검증 완료 VOD 하나의 노래 구간을 합본 영상으로 유튜브 업로드(unlisted, 하루 1건)",
+    )
+    sp.add_argument("--title-no", help="특정 VOD 지정(기본: 가장 오래된 대상 자동 선택)")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="합본 영상·제목·설명만 만들고 업로드하지 않음(산출물 보존)")
+    sp.set_defaults(func=cmd_youtube_upload)
 
     sp = sub.add_parser(
         "ingest",

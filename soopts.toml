@@ -35,6 +35,36 @@ dl_pad_before_s = 120.0    # 경계 탐지 여유 위해 후보 구간 넉넉히
 dl_pad_after_s = 90.0
 min_song_s = 45.0          # 구간 내 최장 음악 블록이 이보다 짧으면 노래 아님(스킵)
 
+[youtube]                  # 노래모음 업로드 (soopts youtube-upload)
+# unlisted(일부 공개)로 한 번에 올린다 — 링크를 아는 사람만 보고 검색·추천에는 안 뜬다.
+# 2026-07-18 계정 정지 이후의 원칙으로 유튜브 API는 업로드 하나만 쓴다: 조회(videos.list)·
+# 수정(videos.update)·삭제(videos.delete)는 구현 자체가 없다. 올린 뒤 손볼 일이 있으면
+# 사람이 스튜디오에서 한다(완전 공개 전환도 마찬가지).
+client_secret = "client_secret.json"          # Google Cloud OAuth 클라이언트(사용자 준비)
+token_file = "~/.config/soopts/yt_token.json" # 최초 동의 후 토큰 저장(이후 자동 갱신)
+privacy = "unlisted"       # 링크로만 시청 가능
+daily_upload_limit = 1     # 하루 1건. 쿼터(1600/10000)보다 "봇 같은 케이던스 회피"가 이유다
+# 치환자: {date}(방송일) {n}(곡 수) / 1곡일 때만 {title} {artist}
+title_template = "{date} 노래 모음 ({n}곡)"
+title_template_single = "{date} {title} - {artist}"
+
+[video]                    # 합본 영상 빌드 (export/video.py)
+# 모든 클립을 같은 파라미터로 재인코딩한다 — concat을 -c copy로 붙이려면 필수이고,
+# 곡 제목 오버레이 때문에 어차피 인코딩을 피할 수 없다.
+quality = "hls-original"   # 1920x1080 8Mbps (yt-dlp -F 실측). 없으면 fallback으로 재시도
+fallback_quality = "hls-hd4k"  # 1280x720 4Mbps
+preset = "veryfast"        # 러너 2코어로 100분짜리를 timeout 안에 끝내려면 이 이상 못 올린다
+# 좌상단 오버레이: 제목(굵게)·아티스트(작게) 리본 2줄 + 왼쪽 액센트 바. 리본 폭은 글자에
+# 맞춰 자동으로 늘어난다(고정 폭 패널은 긴 곡 제목이 삐져나온다). 러너: apt fonts-nanum
+font_file = "/usr/share/fonts/truetype/nanum/NanumSquareR.ttf"
+font_file_bold = "/usr/share/fonts/truetype/nanum/NanumSquareB.ttf"
+title_overlay_font_size = 44
+artist_overlay_font_size = 28
+title_overlay_opacity = 0.6   # 리본 배경 검정 불투명도. 밝은 배경에서 글자가 묻히면 올린다
+accent_color = "0xFFD24A@0.95"
+max_songs = 40             # 러너 시간·디스크 안전판 (실측 최대 30곡/109분)
+max_total_minutes = 150.0
+
 [station]                  # 데일리 배치 대상 (soopts daily)
 bj_id = "singgyul"
 daily_vod_count = 1        # 한 런에서 처리할 미처리 VOD 수. 1개씩 처리해 런 소요시간을
