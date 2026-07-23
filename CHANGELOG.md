@@ -1,5 +1,17 @@
 # Changelog
 
+## [v0.7.4] - 2026-07-23
+
+### Added
+- feat(youtube): 노래모음 합본 영상 일일 유튜브 업로드 파이프라인 (abe122e, #51)
+- feat(youtube): 업로드 대상을 최신 방송부터 선택 (427ec08, #52)
+
+### Fixed
+- fix(youtube): 챕터 타임스탬프를 MM:SS / HH:MM:SS 자리수 고정으로 (cec865e, #54)
+
+### Changed
+- docs(readme): 현재 코드 기준으로 최신화 (198ea77, #53)
+
 ## [v0.7.3] - 2026-07-23
 
 ### Fixed

@@ -23,7 +23,7 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
 
 ## Architecture
 
-### Two entry points into the same lower-level modules
+### Three entry points into the same lower-level modules
 
 - **Manual CLI pipeline** (`cli.py`): a human runs `collect` → `songs`/`clips` one VOD at a time,
   reviewing/editing `clips.json` between steps. `clips.json` holds song spans + lyrics, not files.
@@ -32,7 +32,11 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
   by title/artist against the catalog (`analyzers/identify.py`), and writes `performances` to Supabase
   (`db.py`). It does **not** download HLS, run `inaSpeechSegmenter`, or STT — those live only in the
   manual CLI now. A VOD without a timeline is marked `manual` and left for local processing.
-- Shared low-level helpers that both entry points need (e.g. `collector/media.py`'s `split_by_part`)
+- **YouTube compilation pipeline** (`youtube_pipeline.py`, driven by `soopts youtube-upload`, once a
+  day): the only path that *produces* media. It takes one fully-verified VOD, builds a 1080p
+  compilation of its song spans (`export/video.py`) and uploads it unlisted (`export/youtube.py`).
+  Additive and isolated — `batch.py` is imported one-way for shared helpers and never modified.
+- Shared low-level helpers that these entry points need (e.g. `collector/media.py`'s `split_by_part`)
   live in the module layer, not in `cli.py`. The manual CLI (`songs`/`clips`) still uses the download/
   segment/STT helpers; the batch path no longer touches them.
 - **Local processing of no-timeline VODs** — a `manual` VOD is analyzed locally with
@@ -52,6 +56,7 @@ There is no separate build step — this is a pure-Python package (`setuptools`,
 ### Config system (`config.py`)
 
 One dataclass per concern (`Endpoints`, `CollectorConfig`, `AudioConfig`, `SttConfig`, `ClipConfig`,
+`YouTubeConfig`, `VideoConfig`,
 `StationConfig`, `CommentConfig`), assembled into `Config`. `load_config()` reads `soopts.toml` and
 merges only the keys present per section (`_build_section` drops unknown keys) — so partial overrides
 in `soopts.toml` don't require repeating every field. `work_root` can also be overridden via CLI flag.
@@ -91,10 +96,11 @@ cached.
 
 ### Lazy imports for heavy/optional dependencies
 
-`inaSpeechSegmenter`, `supabase`, `groq`, and `rapidfuzz` are **only imported inside the functions
+`inaSpeechSegmenter`, `supabase`, `groq`, `rapidfuzz`, and the `google-*` YouTube client are
+**only imported inside the functions
 that use them**, never at module top level.
 This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency extras (`audio`, `stt`,
-`batch`) actually be optional — a plain `pip install soopts` with no extras can still run
+`batch`, `youtube`) actually be optional — a plain `pip install soopts` with no extras can still run
 `collect`. Preserve this pattern when adding new functionality that touches one of these libraries.
 
 ### The Supabase boundary (`db.py`)
@@ -111,8 +117,11 @@ relaxed for **one path only**: the `perf-review` skill inserts genuinely-new son
 via `db.insert_draft_song` (the schema already had `songs.status` with a `draft` value). Drafts stay
 distinct from the real catalog until the review UI promotes them to `published`. Nothing else creates
 songs; catalog matching (`resolve_song_match`) still only links existing rows.
-YouTube-era objects were dropped on 2026-07-18 (`performances.youtube_video_id`/`synced_at`/
+The old YouTube-era objects were dropped on 2026-07-18 (`performances.youtube_video_id`/`synced_at`/
 `clip_status`, the `youtube_deletion_queue` table) once both repos had stopped referencing them.
+The 2026-07 compilation-upload path added three *new* columns, unrelated to those:
+`vods.youtube_url`, `vods.youtube_status`, `performances.youtube_url` (all `text`) — see
+"The YouTube compilation path" below.
 `song_performance_counts` was recreated without its `youtube_video_id IS NOT NULL` filter — every
 performance is now reachable via deep link, so the old "only count uploaded ones" condition no longer
 made sense (3 songs → 47).
@@ -266,6 +275,73 @@ and `lyrics_only` stays 0 by design.
   on the exit code to detect failure — any `run:` step doing this **must** start with
   `set -o pipefail`, or a crash in `soopts` gets masked by `tee`'s always-zero exit status (this has
   bitten this repo once already).
+- `youtube.yml`: once a day (01:00 KST) + `workflow_dispatch` (`title_no`, `dry_run`). The **only**
+  workflow that touches media — it installs `ffmpeg`/`fonts-nanum`/`yt-dlp` and builds a 1080p
+  compilation, so it gets `timeout-minutes: 240` and `--work-root "$RUNNER_TEMP/..."` (the runner
+  root's 14 GB is not enough; `$RUNNER_TEMP` has ~70 GB). Separate `concurrency: soopts-youtube` so
+  it never blocks `daily`. Same `set -o pipefail` rule applies.
+
+### The YouTube compilation path (`youtube_pipeline.py`, `export/video.py`, `export/youtube.py`)
+
+One VOD per day is turned into a single compilation video of its song spans and uploaded
+**unlisted** — one shot, no second step. This is a separate track from `daily` — `batch.py` is
+untouched and imported one-way for shared helpers.
+
+**Selection is "every song is finished, or the VOD waits."** `select_youtube_target` (pure) takes
+`analyzed`/`done` VODs with `youtube_status IS NULL` and requires **all** performances to have
+`identify_status in (auto_matched, confirmed)` **and** `local_review = 'verified'`; newest
+`broadcast_date` first (tie broken by larger `soop_title_no`). One unfinished song blocks the whole
+VOD — a wrong title becomes a chapter
+name in a video that cannot be taken down (see below). `youtube_block_reason` returns *why* a VOD was
+rejected, which is what `--title-no` reports.
+
+**`vods.youtube_status` is the queue marker** (`NULL`→`uploaded`, or `no_songs`). Selecting on
+`youtube_url IS NULL` instead would deadlock the queue: a VOD whose build yields zero usable clips
+would stay NULL and be re-picked every day forever. Rows written before 2026-07-23 carry
+`uploaded_private` from the old private-then-publish flow.
+
+**Per-song links.** After upload, each performance gets
+`youtube_url = https://youtu.be/{id}?t={offset in the compilation}`. Offsets exist only on the runner
+that built the video, so they are written immediately after upload. Uploading unlisted (rather than
+private) is what makes that safe: the link is live the moment it is stored, so the consuming app can
+use `performances.youtube_url` directly with no visibility gate.
+
+**Account-suspension defenses are load-bearing, not decoration.** The upload account was suspended
+2026-07-18 (hypothesis: bot-like cadence + read/modify/delete API abuse). So `export/youtube.py`
+calls exactly one YouTube API: `videos.insert`. `videos.list`, `search.list`, `videos.update` and
+`videos.delete` are deliberately absent (`test_youtube.py` asserts they stay absent), there is no
+retry wrapper (failure → Slack + exit; the NULL marker makes tomorrow's run retry), and the workflow
+sleeps a random 10–30 min on schedule. Nothing can be edited or taken down after the fact, so
+"don't upload it wrong" replaces "fix it later" everywhere in this path — that is the reason the
+selection rule is as strict as it is. A human fixes mistakes in YouTube Studio, not through code.
+
+**Video build gotchas** (`export/video.py`):
+- **Never use `download_span` here.** Its multi-part join extracts audio-only ADTS and drops video
+  (that path feeds STT). Use `split_by_part` → `download_slice` per span → re-encode per span →
+  one final concat; re-encoding also resets the fMP4 `baseMediaDecodeTime` that breaks copy-concat.
+- **`-ss` goes after `-i`.** Input-side `-ss` snaps back to a keyframe (≈ file start for a slice), so
+  the segment-boundary `lead` would silently survive and the song would start seconds early.
+- **`build_concat_list` writes absolute paths.** The concat demuxer resolves relative paths against
+  the *list file's* directory, and the list lives next to the clips — so relative entries came out as
+  `work/x/ytbuild/work/x/ytbuild/…` and every input failed to open.
+- **Chapter/link offsets come from `ffprobe`, not from the requested `-t`.** A clip that ends early
+  would otherwise shift every later chapter.
+- **The overlay is two auto-sized ribbons, not a fixed panel.** Song titles vary wildly in length, so
+  each line gets `drawtext`'s own `box` (which hugs the text) instead of a `drawbox` panel with a
+  guessed width. The left accent bar is drawn *after* the ribbons — drawn first, the ribbon boxes
+  cover it. Songs are concatenated back to back; there is no title card, so `ClipPlacement.offset_s`
+  is both the chapter start and the `?t=` target.
+- **`assert_drawtext_available()` + `resolve_font()` run before any download.** Per-song exception
+  handling (one bad song must not kill a 30-song build) otherwise swallows every encode failure and
+  the run looks like "0 songs, no reason". johnvansickle's static ffmpeg advertises
+  `--enable-libfreetype` but ships no `drawtext`; a missing CJK font renders 두부 — both must fail
+  loudly and early, before gigabytes are downloaded.
+
+**Description chapters.** YouTube promotes description timestamps to progress-bar chapters only if
+the first is `0:00`, there are ≥3, and each is ≥10 s (`chapters_valid`). Below that the timestamps
+still work as click-to-seek, so the description is not changed — the check only drives a log line.
+Chapter lines carry `H:MM:SS 제목 - 아티스트` and nothing else; a URL on the same line would become
+part of the chapter name, which is why source deep links live in a section below them.
 
 ### Testing philosophy
 

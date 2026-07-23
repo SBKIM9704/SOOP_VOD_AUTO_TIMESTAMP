@@ -330,6 +330,7 @@ def update_performance(perf_id: int, fields: dict[str, Any]) -> dict[str, Any] |
     allowed = {
         "start_s", "end_s", "title_guess", "lyrics_snippet", "song_id",
         "match_confidence", "identify_status", "local_review", "song_likely",
+        "youtube_url",
     }
     payload = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not payload:
@@ -352,6 +353,143 @@ def insert_draft_song(
     row = {"title": title, "artist": artist, "lyrics": lyrics, "status": status}
     res = _client().table("songs").insert(row).execute().data
     return res[0]["id"]
+
+
+# --------------------------------------------------------------------------- #
+# 유튜브 노래모음 업로드 (soopts youtube-upload)
+#
+# vods.youtube_status가 큐 마커다: NULL=미업로드(대상) / uploaded=올라감(종결)
+# / no_songs=빌드 결과가 0곡이라 종결. youtube_url의 NULL 여부로 고르면 "처리했지만 올릴 게
+# 없었다"를 표현할 수 없어 그 VOD가 매일 다시 뽑히고 큐가 막힌다.
+# (2026-07-23 이전 행에는 'uploaded_private'가 남아 있다 — private 업로드 + 사람이 공개
+#  전환하던 시절의 값이다. 지금은 처음부터 unlisted로 올리므로 그 단계가 없다.)
+# --------------------------------------------------------------------------- #
+COMPLETE_IDENTIFY_STATUSES = frozenset({"auto_matched", "confirmed"})
+COMPLETE_LOCAL_REVIEW = "verified"
+UPLOADABLE_VOD_STATUSES = frozenset({"analyzed", "done"})
+
+
+def youtube_block_reason(vod: dict[str, Any], perfs: list[dict[str, Any]]) -> str | None:
+    """VOD가 업로드 대상이 **못 되는** 이유. None이면 대상이다(순수 함수).
+
+    이유를 문자열로 돌려주는 건 `--title-no`로 특정 VOD를 지정했을 때 왜 걸렀는지 사람에게
+    말해주기 위해서다. 자동 선택은 이유를 버리고 boolean처럼 쓴다.
+
+    기준은 "사람 손을 거쳐 완결된 VOD만 올린다"이다 — identify(어느 카탈로그 곡인지)와
+    local_review(구간·가사가 실제로 맞는지) **양쪽 축이 모든 곡에서** 끝나야 한다. 한 곡이라도
+    미완이면 제목이 틀린 챕터나 노래가 아닌 구간이 그대로 유튜브에 박히고, 올린 뒤에는
+    되돌릴 방법이 사실상 없다(삭제 API를 쓰지 않기로 했다).
+    """
+    if vod.get("status") not in UPLOADABLE_VOD_STATUSES:
+        return f"vods.status={vod.get('status')} (analyzed/done 아님)"
+    if vod.get("youtube_status"):
+        return f"이미 처리됨(youtube_status={vod['youtube_status']})"
+    if not perfs:
+        return "performance 없음"
+    for p in perfs:
+        if p.get("identify_status") not in COMPLETE_IDENTIFY_STATUSES:
+            return f"곡 식별 미완: perf #{p.get('id')} identify_status={p.get('identify_status')}"
+        if p.get("local_review") != COMPLETE_LOCAL_REVIEW:
+            return f"로컬 검증 미완: perf #{p.get('id')} local_review={p.get('local_review')}"
+    return None
+
+
+def select_youtube_target(
+    vods: list[dict[str, Any]], perfs_by_vod: dict[int, list[dict[str, Any]]]
+) -> dict[str, Any] | None:
+    """업로드할 VOD 하나를 고른다 — 최신 방송부터(순수 함수).
+
+    최신 순인 이유: 방금 검증이 끝난 최근 방송을 먼저 올려 채널이 원 방송과 가까운 시점에
+    노출되게 한다. 방송일이 없는 행은 판단 근거가 없으니 맨 뒤로 보낸다(빈 문자열로 두면
+    최신인 척 큐를 새치기한다). tie는 title_no 큰 쪽(더 최근에 올라온 VOD)이 먼저다.
+    """
+    ok = [v for v in vods if youtube_block_reason(v, perfs_by_vod.get(v["id"], [])) is None]
+    if not ok:
+        return None
+    return max(ok, key=lambda v: (v.get("broadcast_date") or "", int(v["soop_title_no"])))
+
+
+def fetch_youtube_candidates() -> list[dict[str, Any]]:
+    """아직 업로드하지 않은 analyzed/done VOD 전부(최신 방송순).
+
+    곡 완결 여부는 여기서 거르지 않는다 — performances를 봐야 알 수 있고, 그 판정은 순수
+    함수(`youtube_block_reason`)로 빼서 테스트할 수 있게 뒀다. 정렬은 참고용이고, 실제
+    선택은 `select_youtube_target`이 최신순으로 다시 한다.
+    """
+    return (
+        _client()
+        .table("vods")
+        .select("*")
+        .in_("status", sorted(UPLOADABLE_VOD_STATUSES))
+        .is_("youtube_status", "null")
+        .order("broadcast_date", desc=True)
+        .execute()
+        .data
+    )
+
+
+def fetch_vod_by_title_no(title_no: str) -> dict[str, Any] | None:
+    """soop_title_no로 vods 단건 조회(--title-no 지정 경로)."""
+    rows = (
+        _client().table("vods").select("*").eq("soop_title_no", str(title_no)).execute().data
+    )
+    return rows[0] if rows else None
+
+
+def fetch_performances_for_vods(vod_row_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+    """여러 VOD의 performances를 vod_id로 묶어 반환한다(각 리스트는 start_s 순).
+
+    곡 제목·아티스트는 songs 조인으로 가져온다 — 영상 오버레이·챕터 제목·설명이 전부 이 값을
+    쓴다(`batch._resolved_title_artist`와 같은 폴백 규칙).
+    """
+    if not vod_row_ids:
+        return {}
+    rows = (
+        _client()
+        .table("performances")
+        .select(
+            "id,vod_id,start_s,end_s,identify_status,local_review,"
+            "title_guess,youtube_url,songs(title,artist)"
+        )
+        .in_("vod_id", vod_row_ids)
+        .order("start_s")
+        .execute()
+        .data
+    )
+    out: dict[int, list[dict[str, Any]]] = {}
+    for r in rows:
+        out.setdefault(r["vod_id"], []).append(r)
+    return out
+
+
+def mark_youtube_uploaded(title_no: str, url: str) -> None:
+    """업로드 직후 — 링크와 'uploaded' 마커를 기록한다. 큐에서는 이걸로 종결이다."""
+    _client().table("vods").update(
+        {"youtube_url": url, "youtube_status": "uploaded"}
+    ).eq("soop_title_no", str(title_no)).execute()
+
+
+def mark_youtube_no_songs(title_no: str) -> None:
+    """빌드 결과가 0곡이라 올릴 게 없을 때의 **종결 마커**.
+
+    이걸 안 찍으면 youtube_status가 NULL로 남아 같은 VOD가 매일 다시 뽑히고 큐가 데드락된다.
+    """
+    _client().table("vods").update({"youtube_status": "no_songs"}).eq(
+        "soop_title_no", str(title_no)
+    ).execute()
+
+
+def set_performance_youtube_urls(pairs: list[tuple[int, str]]) -> int:
+    """performance마다 '그 곡부터 재생되는' 유튜브 링크를 기록하고 건수를 반환한다.
+
+    합본 안의 오프셋은 빌드한 러너에서만 알 수 있으므로 **업로드 직후** 기록한다. 업로드가
+    곧바로 unlisted라 이 링크는 기록되는 순간부터 살아있다 — 소비 앱이 공개 상태를 따로
+    걸러낼 필요가 없다(private으로 올리던 시절엔 그 게이트가 필요했다).
+    """
+    client = _client()
+    for perf_id, url in pairs:
+        client.table("performances").update({"youtube_url": url}).eq("id", perf_id).execute()
+    return len(pairs)
 
 
 # --------------------------------------------------------------------------- #
