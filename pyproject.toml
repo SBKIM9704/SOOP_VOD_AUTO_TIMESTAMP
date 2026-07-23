@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "soopts"
-version = "0.7.3"
+version = "0.7.4"
 description = "SOOP VOD 노래 하이라이트 추출·식별기"
 readme = "README.md"
 requires-python = ">=3.10"
