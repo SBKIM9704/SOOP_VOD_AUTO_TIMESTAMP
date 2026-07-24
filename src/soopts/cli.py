@@ -199,7 +199,7 @@ def cmd_ingest(args) -> int:
 
 
 def cmd_vods(args) -> int:
-    """처리된 VOD 목록 + performance 수를 출력 — vod-audit 스킬의 감사 대상 조회용.
+    """처리된 VOD 목록 + performance 수를 출력 — vod-review(audit 단계)의 감사 대상 조회용.
 
     판정을 하지 않는 순수 조회 명령이다(Groq 없음). 어떤 VOD가 잘못 처리됐는지는 스킬
     안에서 Claude가 `soopts comments`로 원본 댓글을 읽고 정한다. 필요 env: SUPABASE_URL,
@@ -238,7 +238,7 @@ def cmd_vods(args) -> int:
 
 
 def cmd_comments(args) -> int:
-    """VOD 원본 댓글을 출력 — vod-audit 스킬이 노래 타임라인 유무를 Claude로 판정하는 입력.
+    """VOD 원본 댓글을 출력 — vod-review(audit 단계)가 노래 타임라인 유무를 Claude로 판정하는 입력.
 
     Groq를 쓰지 않는 순수 조회다(코드가 노래/게임/티저를 구분하지 않는다 — 그건 스킬 안의
     Claude 몫). 필요 env: (없음, 공개 댓글 API).
@@ -267,7 +267,7 @@ def cmd_comments(args) -> int:
 
 
 def cmd_set_manual(args) -> int:
-    """VOD 하나를 'manual'로 되돌린다 — vod-audit 스킬이 Claude 판정 후 호출하는 적용 명령.
+    """VOD 하나를 'manual'로 되돌린다 — vod-review(audit 단계)가 Claude 판정 후 호출하는 적용 명령.
 
     --clear-machine면 기계 생성 performances를 먼저 지운다(confirmed는 보존). 판정은 스킬
     안의 Claude가 하고, 이 명령은 결정된 VOD에만 결정론적으로 적용한다. 필요 env:
@@ -288,7 +288,7 @@ def cmd_set_manual(args) -> int:
 
 
 def cmd_perfs(args) -> int:
-    """performance 목록을 출력 — perf-review 스킬의 로컬 검증 대상 조회용.
+    """performance 목록을 출력 — vod-review(perf 단계)의 로컬 검증 대상 조회용.
 
     필터: --identify(identify_status), --local(local_review). 각 행에 title_no·시각·추측제목·
     lyrics 유무를 얹는다. Groq 없이 순수 조회. 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
@@ -323,7 +323,7 @@ def cmd_perfs(args) -> int:
 
 
 def cmd_set_perf(args) -> int:
-    """performance 한 행을 갱신 — perf-review 스킬이 로컬 검증·보강 결과를 적용.
+    """performance 한 행을 갱신 — vod-review(perf 단계)가 로컬 검증·보강 결과를 적용.
 
     보내지 않은 필드는 그대로 둔다. 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
     """
@@ -344,7 +344,7 @@ def cmd_set_perf(args) -> int:
 
 
 def cmd_add_song(args) -> int:
-    """songs에 draft 신곡을 삽입하고 song_id를 출력 — 무-카탈로그 곡 등록(perf-review).
+    """songs에 draft 신곡을 삽입하고 song_id를 출력 — 무-카탈로그 곡 등록(vod-review perf 단계).
 
     status는 기본 'draft'(검수 UI가 published로 승격 전까지 정식 카탈로그와 구분). 필요 env:
     SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
@@ -359,7 +359,7 @@ def cmd_add_song(args) -> int:
 
 
 def cmd_match_song(args) -> int:
-    """제목/가수(+가사)를 카탈로그에 매칭해 결과를 JSON으로 — perf-review가 재식별 후 확인용.
+    """제목/가수(+가사)를 카탈로그에 매칭해 결과를 JSON으로 — vod-review(perf 단계)가 재식별 후 확인용.
 
     resolve_song_match(ingest와 동일 로직)를 재사용한다. song_id가 나오면 카탈로그에 있는 것,
     null이면 신곡(draft 삽입 대상). 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GROQ_API_KEY.
@@ -379,7 +379,7 @@ def cmd_match_song(args) -> int:
 
 
 def cmd_transcribe(args) -> int:
-    """VOD의 [start,end] 구간만 받아 Whisper로 전사·출력 — perf-review 스킬의 검증 입력.
+    """VOD의 [start,end] 구간만 받아 Whisper로 전사·출력 — vod-review(perf 단계)의 검증 입력.
 
     구간만 받으므로(멀티파트 안전) 긴 VOD도 빠르다. 캐시는 work/{id}/clips/에 남는다.
     필요 env: GROQ_API_KEY (전사).
@@ -594,7 +594,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "vods",
-        help="처리된 VOD 목록 + performance 수 조회 (vod-audit 스킬용, 판정 안 함)",
+        help="처리된 VOD 목록 + performance 수 조회 (vod-review(audit 단계)용, 판정 안 함)",
     )
     sp.add_argument("--status", default="analyzed,done", help="쉼표구분 status 필터(기본: analyzed,done)")
     sp.add_argument("--json", action="store_true", help="JSON 출력")
@@ -602,7 +602,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "comments",
-        help="VOD 원본 댓글 출력 (vod-audit 스킬이 노래 타임라인 유무를 판정하는 입력)",
+        help="VOD 원본 댓글 출력 (vod-review(audit 단계)가 노래 타임라인 유무를 판정하는 입력)",
     )
     add_vod(sp)
     sp.add_argument("--json", action="store_true", help="JSON 출력")
@@ -611,7 +611,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "set-manual",
-        help="VOD 하나를 manual로 되돌림 (vod-audit 스킬이 Claude 판정 후 적용)",
+        help="VOD 하나를 manual로 되돌림 (vod-review(audit 단계)가 Claude 판정 후 적용)",
     )
     add_vod(sp)
     sp.add_argument("--clear-machine", action="store_true",
@@ -619,14 +619,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_set_manual)
 
     sp = sub.add_parser(
-        "perfs", help="performance 목록 조회 (perf-review 스킬용, 판정 안 함)")
+        "perfs", help="performance 목록 조회 (vod-review(perf 단계)용, 판정 안 함)")
     sp.add_argument("--identify", help="identify_status 필터(needs_review/auto_matched/confirmed 등)")
     sp.add_argument("--local", help="local_review 필터(pending/verified/needs_human)")
     sp.add_argument("--json", action="store_true", help="JSON 출력")
     sp.set_defaults(func=cmd_perfs)
 
     sp = sub.add_parser(
-        "set-perf", help="performance 갱신 (perf-review 스킬이 로컬 검증·보강 적용)")
+        "set-perf", help="performance 갱신 (vod-review(perf 단계)가 로컬 검증·보강 적용)")
     sp.add_argument("perf_id", type=int, help="performance id")
     sp.add_argument("--start-s", type=int, dest="start_s")
     sp.add_argument("--end-s", type=int, dest="end_s")
@@ -648,14 +648,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_add_song)
 
     sp = sub.add_parser(
-        "match-song", help="제목/가수를 카탈로그에 매칭 → song_id JSON (perf-review 재식별용)")
+        "match-song", help="제목/가수를 카탈로그에 매칭 → song_id JSON (vod-review perf 재식별용)")
     sp.add_argument("--title", required=True)
     sp.add_argument("--artist")
     sp.add_argument("--lyrics")
     sp.set_defaults(func=cmd_match_song)
 
     sp = sub.add_parser(
-        "transcribe", help="VOD의 [start,end] 구간만 받아 Whisper 전사·출력 (perf-review용)")
+        "transcribe", help="VOD의 [start,end] 구간만 받아 Whisper 전사·출력 (vod-review perf 단계용)")
     add_vod(sp)
     sp.add_argument("--start", type=float, required=True, help="시작 초")
     sp.add_argument("--end", type=float, required=True, help="끝 초")

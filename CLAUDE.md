@@ -109,11 +109,11 @@ This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency
 and the `songs` catalog) is owned by a separate private repo (`singgyul_sing_book`) — this codebase
 consumes it and never creates migrations. **Two DB axes on `performances`:** `identify_status` (which
 catalog song: `auto_matched`/`needs_review`/`confirmed`) and `local_review` (local verification state:
-`pending`/`verified`/`needs_human`, added 2026-07 for the `perf-review` skill). `vods.status` and these
+`pending`/`verified`/`needs_human`, added 2026-07 for the `vod-review` skill's `perf` stage). `vods.status` and these
 two are the state machine — the source of truth, not local files.
 
 Historically this repo never created `songs` rows (unmatched → `needs_review` for a human). That's now
-relaxed for **one path only**: the `perf-review` skill inserts genuinely-new songs as `status='draft'`
+relaxed for **one path only**: the `vod-review` skill's `perf` stage inserts genuinely-new songs as `status='draft'`
 via `db.insert_draft_song` (the schema already had `songs.status` with a `draft` value). Drafts stay
 distinct from the real catalog until the review UI promotes them to `published`. Nothing else creates
 songs; catalog matching (`resolve_song_match`) still only links existing rows.
@@ -183,7 +183,7 @@ that the crew performed it. (The artist slot itself means different things per m
 whose *version* the BJ covered, under 🎵 it is the person who performed — `🎵 베베리 - 메가피스
 하모니(하데스)` is another streamer's guest spot, which never reaches this check.) Keep the list to stable
 team names; ad-hoc concert permutations (`챈솜초띵`/`솜띵`) are unbounded and are written 🎵 anyway.
-A new crew leaks group songs until it's added here — `vod-audit` is the backstop. The reverse error
+A new crew leaks group songs until it's added here — `vod-review`'s `audit` stage is the backstop. The reverse error
 (BJ solo-covering a crew's own song gets dropped) is accepted: this repo consistently prefers
 missing a song over recording a wrong one.
 
@@ -202,10 +202,10 @@ or re-picked. A human processes it locally (`analyze_vod.py` → `soopts ingest`
 Reprocessing is idempotent: `clear_machine_performances()` drops the prior run's rows (sparing
 `confirmed`) before re-inserting.
 
-**Auditing processed VODs — the `vod-audit` skill, not code.** The 🎤-only rule is safe (no false
-positives) but incomplete: a 🎤+🎵 mixed VOD records only its 🎤 songs and is marked `analyzed`, so the
-🎵 ones are silently missed. Deciding whether such a VOD (or a game/chat/teaser timeline) was handled
-right is a judgment call, so it lives in `.claude/skills/vod-audit/`, where **Claude reads the raw
+**Auditing processed VODs — the `vod-review` skill's `audit` stage, not code.** The 🎤-only rule is
+safe (no false positives) but incomplete: a 🎤+🎵 mixed VOD records only its 🎤 songs and is marked
+`analyzed`, so the 🎵 ones are silently missed. Deciding whether such a VOD (or a game/chat/teaser
+timeline) was handled right is a judgment call, so it lives in the skill, where **Claude reads the raw
 comments and decides**. Code only exposes deterministic primitives the skill orchestrates:
 - `soopts vods --status analyzed,done --json` (`db.fetch_vods_by_status` + perf counts) — worklist.
 - `soopts comments <id> --json` (`fetch_comments`, no Groq) — raw comments, the judgment input.
@@ -215,17 +215,25 @@ comments and decides**. Code only exposes deterministic primitives the skill orc
 The skill never applies destructive changes without user approval. Don't re-add a code-based `recheck`
 that auto-judges and deletes — that's what this replaced.
 
-**Local skills (three).** All human-run; the headless `daily` runner can't call skills.
-- `.claude/skills/manual-ingest/` — process `manual` VODs: `analyze_vod.py` full transcript → Claude
-  picks BJ solo full songs → `soopts ingest`.
-- `.claude/skills/perf-review/` — **re-verify + enrich recorded performances** (the `local_review`
-  axis). Per performance it re-transcribes the `[start_s, end_s]` segment and Claude checks: real song?
-  BJ solo? boundaries right? then fills accurate lyrics/title, links `song_id` (or inserts a `draft`
-  song), and sets `local_review = verified` (all good) or `needs_human` (real-song/BJ doubt or
-  unidentifiable). Same code-does-I/O, Claude-decides split as vod-audit.
-- `.claude/skills/vod-audit/` — audit VOD-level classification against comments (above).
+**Local review — one skill, `.claude/skills/vod-review/`, three stages.** All human-run; the headless
+`daily` runner can't call skills. A single router skill (`/vod-review`) shows the queue and dispatches
+by DB state to one of three stage files (progressive disclosure: `SKILL.md` holds the router +
+shared "what is a BJ solo full song" judgment rule; each stage's procedure lives in its own file):
+- `audit.md` — audit VOD-level classification against raw comments (above); no media. `analyzed/done`
+  VODs → catches missed songs / crew false-positives / misclassification → `keep` or `to-manual`.
+- `ingest.md` — process `manual` VODs: `analyze_vod.py` full transcript → Claude picks BJ solo full
+  songs → `soopts ingest`. The heavy stage (full-VOD transcription).
+- `perf.md` — **re-verify + enrich recorded performances** (the `local_review` axis). Per performance
+  it re-transcribes the `[start_s, end_s]` segment and Claude checks: real song? BJ solo? boundaries
+  right? then fills accurate lyrics/title, links `song_id` (or inserts a `draft` song), and sets
+  `local_review = verified` (all good) or escalates via `identify_status = needs_review` (real-song/BJ
+  doubt or unidentifiable). Same code-does-I/O, Claude-decides split across all three stages.
 
-Primitives these skills orchestrate (all in `cli.py`/`db.py`, no Groq except match/transcribe):
+These stages form one pipeline: `daily` output → audit triages `analyzed/done` (may push to `manual`)
+→ ingest recovers `manual` into `analyzed` → perf verifies every `local_review = pending` performance.
+Consolidated 2026-07-23 from three separate skills (`vod-audit`/`manual-ingest`/`perf-review`).
+
+Primitives these stages orchestrate (all in `cli.py`/`db.py`, no Groq except match/transcribe):
 - `soopts perfs [--identify S] [--local S] --json` (`db.fetch_performances`) — performance worklist.
 - `soopts transcribe <vod> --start --end [--lang]` — download+Whisper just that segment.
 - `soopts match-song --title --artist [--lyrics]` (`resolve_song_match`) — catalog lookup → song_id/null.

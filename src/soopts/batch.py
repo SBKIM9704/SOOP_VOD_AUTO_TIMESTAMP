@@ -474,7 +474,7 @@ def _record_songs(
 
 
 def set_vod_manual(cfg: Config, *, title_no: str, clear_machine: bool) -> dict[str, Any]:
-    """VOD 하나를 'manual'로 되돌린다 — vod-audit 스킬이 Claude 판정 후 호출하는 적용 함수.
+    """VOD 하나를 'manual'로 되돌린다 — vod-review(audit 단계)가 Claude 판정 후 호출하는 적용 함수.
 
     clear_machine=True면 기계 생성 performances를 먼저 지운다(confirmed는 보존). 판정 자체는
     코드가 하지 않는다 — 어떤 VOD를 넘길지는 스킬 안에서 Claude가 원본 댓글을 읽고 정한다.
