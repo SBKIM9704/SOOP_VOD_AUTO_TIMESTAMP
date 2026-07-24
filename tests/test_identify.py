@@ -111,6 +111,32 @@ def test_match_catalog_artist_only_tiebreaks_between_equal_titles():
     assert score < MATCH_THRESHOLD
 
 
+def test_match_catalog_prefers_full_title_over_subset():
+    """실제 프로덕션 버그 재현(2026-07-24, VOD 201651295): token_set_ratio는 여분 토큰을
+    무시해 부분집합 제목에도 100을 준다. "애타는 마음"이 카탈로그의 "마음"과 "애타는 마음"
+    양쪽에 100으로 걸리고 artist("울랄라세션, 아이유" 대 "아이유")까지 100 동점이라, 승자가
+    카탈로그 순서로 정해져 잘못된 곡명이 유튜브 합본 오버레이에 박혔다."""
+    wrong = CatalogEntry(song_id="mind", title="마음", artist="아이유")
+    right = CatalogEntry(song_id="aetaneun", title="애타는 마음", artist="울랄라세션, 아이유")
+    # 카탈로그 순서가 결과를 바꾸지 못해야 한다.
+    for catalog in ([wrong, right], [right, wrong]):
+        entry, score = match_catalog("애타는 마음", "울랄라세션, 아이유", catalog)
+        assert entry.song_id == "aetaneun"
+        assert score >= MATCH_THRESHOLD
+    # 반대 방향도 성립한다 — 짧은 쪽이 정답이면 짧은 쪽이 이긴다.
+    entry, _ = match_catalog("마음", "아이유", [right, wrong])
+    assert entry.song_id == "mind"
+
+
+def test_match_catalog_subset_title_still_matches_when_alone():
+    """부분집합이라고 매칭 자체를 막지는 않는다 — 동점자를 가를 때만 뒤로 밀린다.
+    카탈로그에 "마음"밖에 없으면 "애타는 마음"은 여전히 거기에 붙어야 한다(관대함 유지)."""
+    catalog = [CatalogEntry(song_id="mind", title="마음", artist="아이유")]
+    entry, score = match_catalog("애타는 마음", "아이유", catalog)
+    assert entry.song_id == "mind"
+    assert score >= MATCH_THRESHOLD
+
+
 def test_build_disambiguation_shortlist_excludes_zero_title_score():
     # 실제 버그 패턴: artist는 완벽히 일치하지만 title은 0점 — 절대 후보에 들면 안 된다.
     bug_pattern = ScoredEntry(CatalogEntry(song_id="x", title="unlucky"), 0.0, 100.0)
