@@ -80,4 +80,4 @@ min_vod_age_days = 7       # 방송 후 이 일수 전까지는 서버가 손대
                            # 쿨다운 중 슬롯은 백필이 채우므로 처리량 손해는 없다.
 # 서버(daily)는 댓글 타임라인의 🎤 마커만 파싱해 DB에 기록한다(다운로드·STT·세그멘테이션 없음).
 # 🎤가 없는 VOD(게임 방송·🎵 합방·옛 아이콘 없는 타임라인)는 'manual'로 표시하고, 사람이 로컬에서
-# `scripts/analyze_vod.py`로 전체 전사해 솔로곡을 찾아 `soopts ingest`로 기록한다. 과거 처리분 검증은 vod-audit 스킬.
+# `scripts/analyze_vod.py`로 전체 전사해 솔로곡을 찾아 `soopts ingest`로 기록한다. 과거 처리분 검증은 vod-review(audit 단계).
