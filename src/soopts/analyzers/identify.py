@@ -62,6 +62,11 @@ class ScoredEntry:
     entry: CatalogEntry
     title_score: float
     artist_score: float
+    # token_set_ratio는 "여분 토큰"을 무시하므로 부분집합 제목이 만점을 받는다("애타는 마음"
+    # 대 "마음" = 100). 판정 기준은 그대로 두되(장식이 붙은 제목을 관대하게 받아야 한다),
+    # **동점자 사이의 순서**를 정할 때 전체 토큰을 보는 sort 점수로 가른다. 기본값 0.0은
+    # ScoredEntry를 직접 만드는 호출부(테스트 포함) 호환용.
+    title_sort: float = 0.0
 
 
 @dataclass
@@ -146,6 +151,14 @@ def _score_catalog(title: str, artist: str, catalog: list[CatalogEntry]) -> list
 
     title_score: 추측 title을 카탈로그 항목의 title/original_title/alias에만 비교.
     artist_score: 추측 artist를 카탈로그 항목의 artist에만 비교.
+    title_sort:   같은 후보 문자열에 대한 token_sort_ratio — 동점 해소 전용(아래 참조).
+
+    token_set_ratio는 교집합이 완전히 일치하면 여분 토큰을 무시하고 100을 준다. 그래서
+    부분집합 제목이 정답과 똑같이 만점을 받는다(`"애타는 마음"` 대 카탈로그 `"마음"` = 100).
+    임계값 판정에는 이 관대함이 필요하지만(장식·부제가 붙은 제목도 받아야 한다), 그 상태로
+    동점이 되면 승자가 카탈로그 순서로 정해진다. 전체 토큰을 보는 token_sort_ratio를 같이
+    들고 다니며(`"애타는 마음"` 대 `"마음"` = 50, 대 `"애타는 마음"` = 100) match_catalog가
+    동점자를 가를 때 쓴다.
     """
     from rapidfuzz import fuzz
 
@@ -153,15 +166,24 @@ def _score_catalog(title: str, artist: str, catalog: list[CatalogEntry]) -> list
     scored: list[ScoredEntry] = []
     for entry in catalog:
         title_candidates = [entry.title, entry.original_title, *(entry.aliases or [])]
-        title_score = (
-            max((fuzz.token_set_ratio(title, c) for c in title_candidates if c), default=0.0)
+        # (set, sort) 튜플의 max — set이 최고인 후보를 고르되, set이 같으면 sort가 높은 쪽을
+        # 대표로 삼는다. 두 점수가 서로 다른 후보 문자열에서 나오면 안 되므로 함께 뽑는다.
+        title_score, title_sort = (
+            max(
+                (
+                    (float(fuzz.token_set_ratio(title, c)), float(fuzz.token_sort_ratio(title, c)))
+                    for c in title_candidates
+                    if c
+                ),
+                default=(0.0, 0.0),
+            )
             if title
-            else 0.0
+            else (0.0, 0.0)
         )
         artist_score = (
             fuzz.token_set_ratio(artist, entry.artist) if artist and entry.artist else 0.0
         )
-        scored.append(ScoredEntry(entry, title_score, artist_score))
+        scored.append(ScoredEntry(entry, title_score, artist_score, title_sort))
     return scored
 
 
@@ -169,13 +191,21 @@ def match_catalog(
     title: str, artist: str, catalog: list[CatalogEntry]
 ) -> tuple[CatalogEntry | None, float]:
     """카탈로그에서 title 유사도가 최고인 항목을 찾는다. artist는 title_score가 근소하게
-    동률인 후보들 사이의 tiebreak로만 쓰인다 — 단독으로 점수를 좌우하지 못한다."""
+    동률인 후보들 사이의 tiebreak로만 쓰인다 — 단독으로 점수를 좌우하지 못한다.
+
+    동점자는 **title_sort 우선, 그다음 artist_score**로 가른다. title_score(token_set_ratio)는
+    부분집합 제목에 만점을 주므로 "애타는 마음"이 카탈로그의 "마음"과 "애타는 마음" 양쪽에
+    100으로 걸린다. artist까지 동점이면(추측 `"울랄라세션, 아이유"`는 카탈로그 `"아이유"`와도
+    token_set 100이다) 승자가 카탈로그 순서로 정해져, 실제로 `애타는 마음`이 `마음/아이유`에
+    연결돼 유튜브 합본 오버레이에 잘못된 곡명이 박혔다. 전체 토큰을 보는 title_sort를 첫 키로
+    두면 부분집합 후보가 뒤로 밀린다(50 대 100).
+    """
     scored = _score_catalog(title, artist, catalog)
     if not scored:
         return None, 0.0
     top = max(s.title_score for s in scored)
     tied = [s for s in scored if top - s.title_score <= TIEBREAK_MARGIN]
-    tied.sort(key=lambda s: s.artist_score, reverse=True)
+    tied.sort(key=lambda s: (s.title_sort, s.artist_score), reverse=True)
     best = tied[0]
     return best.entry, best.title_score
 
