@@ -1,6 +1,7 @@
 import json
 
 import soopts.collector.comments as comments_module
+import soopts.collector.http as http_module
 from soopts.collector.comments import extract_comments, fetch_comments
 from soopts.config import Config
 
@@ -23,8 +24,9 @@ def test_extract_comments_no_data_key():
 
 
 class _FakeResponse:
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, status_code: int = 200):
         self._data = data
+        self.status_code = status_code
 
     def raise_for_status(self):
         pass
@@ -47,11 +49,11 @@ def test_fetch_comments_walks_all_pages(monkeypatch):
     }
     requested_pages = []
 
-    def fake_get(url, params, headers, timeout):
+    def fake_request(method, url, params=None, data=None, headers=None, timeout=None):
         requested_pages.append(params["page"])
         return _FakeResponse(pages[params["page"]])
 
-    monkeypatch.setattr(comments_module.requests, "get", fake_get)
+    monkeypatch.setattr(http_module.requests, "request", fake_request)
     result = fetch_comments(Config(), "bj", "12345")
     assert result == ["최신 댓글", "오래된 타임라인 댓글"]
     assert requested_pages == [1, 2]
@@ -60,11 +62,11 @@ def test_fetch_comments_walks_all_pages(monkeypatch):
 def test_fetch_comments_stops_at_max_pages_safety_cap(monkeypatch):
     requested_pages = []
 
-    def fake_get(url, params, headers, timeout):
+    def fake_request(method, url, params=None, data=None, headers=None, timeout=None):
         requested_pages.append(params["page"])
         # last_page가 비정상적으로 크게 와도(폭주 방지) _MAX_PAGES에서 멈춰야 한다.
         return _FakeResponse(_page([f"p{params['page']}"], page=params["page"], last_page=9999))
 
-    monkeypatch.setattr(comments_module.requests, "get", fake_get)
+    monkeypatch.setattr(http_module.requests, "request", fake_request)
     fetch_comments(Config(), "bj", "12345")
     assert len(requested_pages) == comments_module._MAX_PAGES
