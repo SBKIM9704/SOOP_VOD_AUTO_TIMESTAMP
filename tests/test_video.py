@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from soopts.config import Config
-from soopts.export.video import build_concat_list, plan_songs
+from soopts.export.video import build_concat_list, padded_bounds, plan_songs
 
 
 def _cfg(**over) -> Config:
@@ -44,6 +44,25 @@ def test_plan_songs_respects_total_minutes():
     kept, dropped = plan_songs(_cfg(max_total_minutes=25.0), perfs)
     assert [p["id"] for p in kept] == [1, 2]
     assert [p["id"] for p in dropped] == [3]
+
+
+def test_padded_bounds_adds_lead_and_tail():
+    """전주 여백만큼 앞으로, 여운만큼 뒤로 — DB 값은 안 건드리고 빌드 클립만 늘린다."""
+    s, e = padded_bounds(_cfg(intro_lead_s=10.0, outro_tail_s=4.0), _perf(1, 100, 250))
+    assert (s, e) == (90.0, 254.0)
+
+
+def test_padded_bounds_clamps_lead_at_zero():
+    """VOD 시작 근처 곡은 여백이 0 밑으로 내려가지 않는다."""
+    s, e = padded_bounds(_cfg(intro_lead_s=10.0, outro_tail_s=4.0), _perf(1, 5, 200))
+    assert s == 0.0
+    assert e == 204.0
+
+
+def test_padded_bounds_zero_padding_is_identity():
+    """여백을 0으로 두면 원래 경계 그대로 — 패딩 기능을 끌 수 있다."""
+    s, e = padded_bounds(_cfg(intro_lead_s=0.0, outro_tail_s=0.0), _perf(1, 100, 250))
+    assert (s, e) == (100.0, 250.0)
 
 
 def test_build_concat_list_format():
