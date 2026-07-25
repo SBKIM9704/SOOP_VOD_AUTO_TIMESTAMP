@@ -35,9 +35,10 @@ class ClipPlacement:
     perf_id: int
     title: str
     artist: str
-    source_start_s: float     # 원본 VOD 절대초(설명의 원본 딥링크용)
-    # 곡이 곧바로 시작하므로 챕터 시작과 노래 시작이 같다. 둘을 나눠 두었던 건 곡 앞에 제목
-    # 카드를 3초 붙이던 시절의 흔적인데, 카드를 없애면서 구분할 이유가 사라졌다.
+    source_start_s: float     # 원본 VOD 절대초(설명의 원본 딥링크용) — 여백 없는 보컬 진입점
+    # 클립은 intro_lead_s만큼 전주부터 시작하므로 챕터·?t=는 자연히 전주 시작에 놓인다
+    # (챕터 마커와 클립 경계가 어긋나지 않게 clip 시작 그대로 쓴다). source_start_s와 달리
+    # 여백이 포함된 값 — 설명의 SOOP 딥링크는 여백 없는 source_start_s를 따로 쓴다.
     offset_s: float           # 합본 내 시작초 = 챕터 시작 = performances.youtube_url의 ?t=
     duration_s: float
 
@@ -70,6 +71,19 @@ def plan_songs(cfg: Config, perfs: list[dict]) -> tuple[list[dict], list[dict]]:
         kept.append(p)
         total += dur
     return kept, dropped
+
+
+def padded_bounds(cfg: Config, perf: dict) -> tuple[float, float]:
+    """연출 여백을 준 합본 클립의 (시작, 끝) 절대초 — 순수 함수.
+
+    `start_s`를 `intro_lead_s`만큼 앞으로(0 밑으로는 안 감), `end_s`를 `outro_tail_s`만큼
+    뒤로 민다. DB의 start_s/end_s는 건드리지 않는다 — 이건 영상용 여백일 뿐이고, 딥링크·
+    식별의 진실은 그대로다. 파트 끝을 넘는 tail은 split_by_part가 파트 끝으로 클램프한다.
+    """
+    v = cfg.video
+    s = max(0.0, float(perf["start_s"]) - v.intro_lead_s)
+    e = float(perf["end_s"]) + v.outro_tail_s
+    return s, e
 
 
 def build_concat_list(paths: list[Path]) -> str:
@@ -280,7 +294,7 @@ def _download_song_pieces(
     """
     from soopts.collector.media import download_slice, slice_lead_s, split_by_part
 
-    s, e = float(perf["start_s"]), float(perf["end_s"])
+    s, e = padded_bounds(cfg, perf)   # 전주·여운 여백 포함(빌드 전용, DB는 그대로)
     spans = split_by_part(s, e, parts, m3u8s)
     if not spans:
         return []

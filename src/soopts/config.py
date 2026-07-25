@@ -156,6 +156,13 @@ class VideoConfig:
     overlay_y: int = 40
     accent_bar_w: int = 7
     accent_color: str = "0xFFD24A@0.95"
+    # 연출 여백 — **빌드 시점에만** 적용하는 코스메틱 패딩이지 곡의 정확성 경계가 아니다.
+    # 팬 타임라인 시각(start_s)은 본질적으로 **보컬 진입**에 찍혀 전주가 없다. DB의 start_s/
+    # end_s(딥링크·식별의 진실)는 그대로 두고, 합본 클립만 앞으로 lead·뒤로 tail만큼 늘려
+    # 전주를 살리고 마지막 음이 뚝 끊기지 않게 한다. VOD 시작·파트 경계는 split_by_part가
+    # 클램프하므로 넘겨도 안전하다. 곡 성향 보며 soopts.toml에서 조정 가능.
+    intro_lead_s: float = 10.0
+    outro_tail_s: float = 4.0
     # 상한 — 러너 시간·디스크 예산의 안전판. 실측 최대가 30곡/109분이라 여유를 두고 잡았다.
     max_songs: int = 40
     max_total_minutes: float = 150.0
