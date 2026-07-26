@@ -24,11 +24,16 @@ daily 러너 결과
  ├─ status=manual (🎤 없음)        → [ingest]   전체 전사 → 솔로 풀곡 → ingest → analyzed
  │                                                 ↓ (perf 생성, local_review=pending)
  └─ status=analyzed/done (🎤 있음)  → [audit]    댓글 대조: 놓친 곡·오탐·오분류 없나?
-                                       │ keep ────↓
+                                       │ keep ────↓ (comment 곡은 daily가 이미 verified)
                                        └ to-manual → (manual 큐로 반환 → ingest)
                                                      ↓
  performances.local_review=pending   → [perf]    구간 재전사 → 검증·보강 → verified
+ (= ingest로 들어온 로컬 곡만. comment 곡은 여기 안 옴)
 ```
+
+**North Star — 댓글 타임라인은 진실이다.** 댓글 곡은 daily가 `local_review=verified`로 바로 기록한다
+(팬이 직접 쓴 시각 신뢰, 교정 없음). 그래서 **comment VOD는 audit 전용**이고 perf 대상이 아니다 —
+`perf`가 보는 `pending`은 전부 `ingest`로 들어온 로컬(댓글 없는) 곡이다.
 
 비용 프로파일이 크게 다르므로(단계별로 문을 나눠 둔 이유) **싼 것부터**가 기본 순서다:
 

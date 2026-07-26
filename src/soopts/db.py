@@ -262,11 +262,16 @@ def insert_performances(
     vod_row_id: str,
     songs: list[Song],
     identify_results: list[IdentifyResult | None] | None = None,
+    local_review: str | None = None,
 ) -> list[dict[str, Any]]:
     """Song(+identify 결과)을 performances에 1:1 매핑해 insert한다.
 
     identify_results를 생략하면 song_id=NULL, identify_status='needs_review'로 남는다.
     songs 테이블에 신곡 행을 만들지 않는다 — song_id는 기존 카탈로그 매칭 결과만 연결한다.
+
+    local_review를 주면 각 행에 그 값을 기록한다(생략 시 컬럼 기본=pending). 댓글 타임라인
+    경로는 'verified'를 넘긴다 — 사람이 직접 쓴 시각이라 경계를 신뢰한다(North Star). 곡
+    매칭이 안 된 needs_review 행은 verified여도 identify 미완이라 youtube 게이트에서 막힌다.
 
     clip_status는 쓰지 않는다. 업로드 큐가 사라진 뒤로 이 컬럼은 전 행이 'clipped'인
     상수가 되어 아무 정보도 담지 않는다(예전엔 'none'으로 넣고 곧바로 'clipped'로
@@ -289,6 +294,7 @@ def insert_performances(
             "match_confidence": r.match_confidence if r else None,
             "song_id": r.song_id if r else None,
             "identify_status": r.identify_status if r else "needs_review",
+            **({"local_review": local_review} if local_review else {}),
         }
         for s, r in zip(songs, results, strict=True)
     ]
@@ -456,7 +462,7 @@ def fetch_performances_for_vods(vod_row_ids: list[int]) -> dict[int, list[dict[s
         _client()
         .table("performances")
         .select(
-            "id,vod_id,start_s,end_s,youtube_start_s,identify_status,local_review,"
+            "id,vod_id,start_s,end_s,identify_status,local_review,"
             "title_guess,youtube_url,songs(title,artist)"
         )
         .in_("vod_id", vod_row_ids)

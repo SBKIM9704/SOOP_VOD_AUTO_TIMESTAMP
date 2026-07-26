@@ -440,13 +440,17 @@ def ingest_vod(
 
 
 def _record_songs(
-    vod_row_id: int, song_objs: list, artists: list[str], catalog: list
+    vod_row_id: int, song_objs: list, artists: list[str], catalog: list,
+    *, local_review: str | None = None,
 ) -> dict[str, Any]:
     """Song 목록을 식별(카탈로그 매칭) 후 performances에 기록하고 stats를 반환한다(상태 마킹은 호출부).
 
     댓글 타임라인 처리(_process_vod)와 로컬 ingest(ingest_vod)가 공유하는 코어다.
     제목이 있으면 `resolve_song_match`(가사 추측 생략), 제목 없이 가사만 있으면 `identify_song`,
     둘 다 없으면 needs_review(None)로 남긴다. 감지된 노래 수만큼 hint_available로 센다.
+
+    local_review는 그대로 insert_performances로 넘긴다 — 댓글 경로는 'verified'(팬 시각 신뢰),
+    로컬 ingest는 None(기본 pending, perf 검증 대상).
     """
     from soopts import db
     from soopts.analyzers.identify import identify_song, resolve_song_match
@@ -464,7 +468,7 @@ def _record_songs(
         if r is not None and r.identify_status == "auto_matched":
             auto_matched += 1
 
-    db.insert_performances(vod_row_id, song_objs, results)
+    db.insert_performances(vod_row_id, song_objs, results, local_review=local_review)
     return {
         "detected": len(song_objs), "auto_matched": auto_matched,
         "needs_review": len(song_objs) - auto_matched,
@@ -544,7 +548,11 @@ def _process_vod(
     spans = timeline_songs_to_spans(timeline, meta.total_duration)
     song_objs = [span_to_song(sp) for sp in spans]
     artists = [sp["artist"] for sp in spans]
-    stats = _record_songs(vod_row["id"], song_objs, artists, db.load_song_catalog())
+    # 댓글 타임라인은 사람이 직접 쓴 값 → 경계를 신뢰해 local_review=verified로 기록한다(North Star).
+    # 사람 검토는 audit(누락·오탐 곡)만 사후로 하고, perf 구간검증은 로컬 ingest 전용이다.
+    stats = _record_songs(
+        vod_row["id"], song_objs, artists, db.load_song_catalog(), local_review="verified"
+    )
     stats["mode"] = "comment_timeline"
     return stats
 
