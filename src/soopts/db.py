@@ -205,9 +205,17 @@ def count_confirmed_performances(vod_row_id: int) -> int:
     return len(rows or [])
 
 
-def mark_vod(title_no: str, status: str, error: str | None = None) -> None:
-    """vods.status 갱신. failed면 retry_count를 1 증가시킨다."""
+def mark_vod(
+    title_no: str, status: str, error: str | None = None, source: str | None = None
+) -> None:
+    """vods.status 갱신. failed면 retry_count를 1 증가시킨다.
+
+    source는 performances의 출처 라벨('comment'=댓글 타임라인/'local'=로컬 전사 ingest)이다.
+    라벨 전용이라 게이팅에 쓰지 않는다 — 사람이 "댓글 아닌 것"만 골라 검토하는 필터용. 주면
+    같이 기록하고, None이면 건드리지 않는다(manual/failed 전이 등 출처가 무의미한 경우)."""
     fields: dict[str, Any] = {"status": status, "error": error}
+    if source is not None:
+        fields["source"] = source
     if status in ("analyzed", "done"):
         fields["processed_at"] = _now_iso()
     client = _client()
