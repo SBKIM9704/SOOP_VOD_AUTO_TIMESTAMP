@@ -73,15 +73,29 @@ def plan_songs(cfg: Config, perfs: list[dict]) -> tuple[list[dict], list[dict]]:
     return kept, dropped
 
 
+def clip_start_s(perf: dict) -> float:
+    """합본 클립을 자를 원본 VOD 시작초. 순수 함수.
+
+    `youtube_start_s`(곡 실제 시작)가 있으면 그걸, 없으면 `start_s`(팬 댓글값)를 쓴다.
+    팬은 곡의 훅/후렴 지점에 타임라인을 찍는 일이 잦아(특히 멀티파트 뒤 파트) `start_s`가
+    곡 한참 중간을 가리킬 수 있는데, 그 값을 그대로 자르면 클립이 곡 중간부터 시작한다.
+    `youtube_start_s`는 그걸 곡 실제 시작으로 되돌리는 영상 전용 오버라이드다 — `start_s`
+    (딥링크·검증의 진실=팬 댓글)는 건드리지 않고 클립 시작만 바꾼다.
+    """
+    v = perf.get("youtube_start_s")
+    return float(v if v is not None else perf["start_s"])
+
+
 def padded_bounds(cfg: Config, perf: dict) -> tuple[float, float]:
     """연출 여백을 준 합본 클립의 (시작, 끝) 절대초 — 순수 함수.
 
-    `start_s`를 `intro_lead_s`만큼 앞으로(0 밑으로는 안 감), `end_s`를 `outro_tail_s`만큼
-    뒤로 민다. DB의 start_s/end_s는 건드리지 않는다 — 이건 영상용 여백일 뿐이고, 딥링크·
-    식별의 진실은 그대로다. 파트 끝을 넘는 tail은 split_by_part가 파트 끝으로 클램프한다.
+    시작은 `clip_start_s`(youtube_start_s ?? start_s)에서 `intro_lead_s`만큼 앞으로(0 밑으로는
+    안 감), 끝은 `end_s`에서 `outro_tail_s`만큼 뒤로 민다. DB의 start_s/end_s는 건드리지 않는다
+    — 여백도 youtube_start_s도 영상용일 뿐이고, 딥링크·식별의 진실은 그대로다. 파트 끝을 넘는
+    tail은 split_by_part가 파트 끝으로 클램프한다.
     """
     v = cfg.video
-    s = max(0.0, float(perf["start_s"]) - v.intro_lead_s)
+    s = max(0.0, clip_start_s(perf) - v.intro_lead_s)
     e = float(perf["end_s"]) + v.outro_tail_s
     return s, e
 

@@ -456,7 +456,7 @@ def fetch_performances_for_vods(vod_row_ids: list[int]) -> dict[int, list[dict[s
         _client()
         .table("performances")
         .select(
-            "id,vod_id,start_s,end_s,identify_status,local_review,"
+            "id,vod_id,start_s,end_s,youtube_start_s,identify_status,local_review,"
             "title_guess,youtube_url,songs(title,artist)"
         )
         .in_("vod_id", vod_row_ids)

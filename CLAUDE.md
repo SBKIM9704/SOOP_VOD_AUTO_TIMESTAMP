@@ -121,7 +121,8 @@ The old YouTube-era objects were dropped on 2026-07-18 (`performances.youtube_vi
 `clip_status`, the `youtube_deletion_queue` table) once both repos had stopped referencing them.
 The 2026-07 compilation-upload path added three *new* columns, unrelated to those:
 `vods.youtube_url`, `vods.youtube_status`, `performances.youtube_url` (all `text`) — see
-"The YouTube compilation path" below.
+"The YouTube compilation path" below. A later addition, `performances.youtube_start_s` (`integer`,
+nullable), is a video-only clip-start override — see `clip_start_s` under "Video build gotchas".
 `song_performance_counts` was recreated without its `youtube_video_id IS NOT NULL` filter — every
 performance is now reachable via deep link, so the old "only count uploaded ones" condition no longer
 made sense (3 songs → 47).
@@ -334,16 +335,24 @@ selection rule is as strict as it is. A human fixes mistakes in YouTube Studio, 
   `work/x/ytbuild/work/x/ytbuild/…` and every input failed to open.
 - **Chapter/link offsets come from `ffprobe`, not from the requested `-t`.** A clip that ends early
   would otherwise shift every later chapter.
+- **Clip start = `youtube_start_s ?? start_s` (`clip_start_s`), never `start_s` alone.** The fan marks
+  a song's timeline at its *hook/recognizable* point, not its start — often deep into the song on a
+  multi-part VOD's later parts (measured: part-1 songs sat 45–133 s past their first vocal, while
+  part-0 songs were fine). Cutting the clip at `start_s` there starts the video mid-song. `youtube_start_s`
+  (nullable, `performances`) is a **video-only override** holding the song's real start; the build cuts
+  from it when set, else falls back to `start_s`. `start_s` stays the fan-comment value — it is the
+  deep-link + verification truth and the description's `source_start_s`, both unchanged. So the SOOP
+  deep link matches the fan timeline while the compilation clip starts at the song. Populating it
+  accurately is per-song transcription work (error-prone — a masked first line behind vocal warm-up
+  fooled one pass), so verify each build locally before upload.
 - **Intro/outro padding (`video.intro_lead_s`/`outro_tail_s`) is build-only cosmetics, not the span.**
   `padded_bounds` widens each clip by `intro_lead_s` up front (clamped at 0) and `outro_tail_s` at the
-  end — `split_by_part` clamps a tail past the VOD/part end. **`intro_lead_s` defaults to 0**: the fan
-  timeline `start_s` pins the song start accurately for this station (verified against source VODs), so
-  no artificial intro is added — widening the front only drags in the previous song's chatter. Only
-  `outro_tail_s` (default 7) is on, so a `perf`-tightened `end_s` doesn't clip the final note. The DB
-  `performances.start_s`/`end_s` stay untouched (deep-link + `perf` verification truth), and the
-  description's source deep link uses the unpadded `source_start_s`; only the video clip and its
-  `?t=`/chapter (the padded clip start) get the tail. Keep presentation padding out of the verification
-  stages — `daily`/`vod-review perf` own *correctness* boundaries, the render layer owns aesthetics.
+  end — `split_by_part` clamps a tail past the VOD/part end. **`intro_lead_s` defaults to 0** and
+  `outro_tail_s` to 7, so a `perf`-tightened `end_s` doesn't clip the final note but no artificial intro
+  is added. The DB `performances.start_s`/`end_s` stay untouched; only the video clip and its
+  `?t=`/chapter (the padded clip start, based on `clip_start_s`) get the tail. Keep presentation padding
+  out of the verification stages — `daily`/`vod-review perf` own *correctness* boundaries, the render
+  layer owns aesthetics.
 - **The overlay is two auto-sized ribbons, not a fixed panel.** Song titles vary wildly in length, so
   each line gets `drawtext`'s own `box` (which hugs the text) instead of a `drawbox` panel with a
   guessed width. The left accent bar is drawn *after* the ribbons — drawn first, the ribbon boxes
