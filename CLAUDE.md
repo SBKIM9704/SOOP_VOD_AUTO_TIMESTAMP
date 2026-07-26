@@ -110,9 +110,9 @@ and the `songs` catalog) is owned by a separate private repo (`singgyul_sing_boo
 consumes it and never creates migrations. **Two DB axes on `performances`:** `identify_status` (which
 catalog song: `auto_matched`/`needs_review`/`confirmed`) and `local_review` (local verification state:
 `pending`/`verified`/`needs_human`, added 2026-07 for the `vod-review` skill's `perf` stage). `vods.status` and these
-two are the state machine — the source of truth, not local files. Comment-path performances are written
-`local_review = 'verified'` at `daily` time (fan timeline trusted — North Star); only local-ingest ones
-start `pending` and pass through `perf`.
+two are the state machine — the source of truth, not local files. All machine performances (comment or
+local) start `local_review = 'pending'` and pass through `perf` — for comment VODs `perf`'s job is to
+fill the song **end** (`daily` writes only the trusted `start`; see North Star below).
 
 Historically this repo never created `songs` rows (unmatched → `needs_review` for a human). That's now
 relaxed for **one path only**: the `vod-review` skill's `perf` stage inserts genuinely-new songs as `status='draft'`
@@ -189,23 +189,24 @@ A new crew leaks group songs until it's added here — `vod-review`'s `audit` st
 (BJ solo-covering a crew's own song gets dropped) is accepted: this repo consistently prefers
 missing a song over recording a wrong one.
 
-`timeline_songs_to_spans()` turns each 🎤 song into a span: `start = timestamp`, `end = next song's
-start` capped at 6 min (deep-links only need the start; the cap keeps inter-song talk out of the
-"length"). `_record_songs()` then matches each by title/artist (`resolve_song_match`) and writes
-`performances`. This replaced the old Groq `extract_song_timeline` (missed songs — 201933359 got 2 of
-12) + per-region download + `inaSpeechSegmenter` + Whisper + Groq lyric-guess pipeline.
+`timeline_songs_to_spans()` turns each 🎤 song into a span with `start = timestamp` and **`end = start`
+(a 0-length sentinel meaning "end undetermined")**. `_record_songs()` matches each by title/artist
+(`resolve_song_match`) and writes `performances` with `local_review = 'pending'`. This replaced the old
+Groq `extract_song_timeline` (missed songs — 201933359 got 2 of 12) + per-region download +
+`inaSpeechSegmenter` + Whisper + Groq lyric-guess pipeline.
 
-**North Star — the fan comment timeline is the truth.** `start = timestamp` is used verbatim and is
-*never* corrected (no transcription, no `youtube_start_s`-style override — an abandoned 2026-07
-experiment). A human wrote the timeline, so it is treated as always accurate, even where the fan marked
-a song's hook rather than its first note (so a compilation clip can start mid-song — accepted). Because
-of this, comment-path performances are recorded `local_review = 'verified'` right away (`_process_vod`
-passes `local_review="verified"` into `_record_songs`/`insert_performances`): the boundary is trusted,
-so there is **no per-performance `perf` verification for comment VODs** — human review of a comment VOD
-is `audit` only (missed/wrong songs), after the fact. A comment song whose title didn't match the
-catalog is still `identify_status = needs_review` (verified boundary, unknown catalog link) and stays
-blocked at the YouTube gate until a human resolves the match. The `perf` stage is now **local-ingest
-VODs only** (no comment to trust — see below).
+**North Star — `start` is the truth (comment/`daily`), `end` is decided locally (`perf`).** The fan's
+`start = timestamp` is used verbatim and *never* corrected (a human wrote it — always accurate, even
+where they marked a song's hook rather than its first note, so a clip may start mid-song — accepted).
+But the **end** of a song can't be known from the comment: the old "next song start, capped 6 min" was a
+bad clip boundary (whole inter-song chatter). So `daily` writes only `start`, leaving `end_s = start_s`
+(sentinel), and the real end is filled by the **`perf` stage** (transcribe forward from `start`, find
+where the vocals stop). `end_s` is `NOT NULL`, so the sentinel is `start_s` rather than NULL;
+`plan_songs` drops `dur <= 0`, so a sentinel-end performance is never buildable until `perf` fills the
+end — a **pull model**: only VODs a human has finished (end set → `local_review = 'verified'`) reach the
+YouTube gate. A comment song whose title didn't match the catalog is `identify_status = needs_review`
+and also stays blocked until a human resolves the match. So `perf` now runs for **all** pending
+performances — comment VODs (to fill the end) and local-ingest VODs (to confirm the human's span).
 
 **No timeline (0 🎤 songs) → `manual`, not processed.** `_process_vod` returns `{"no_timeline": True}`
 and `run_daily` marks `vods.status = 'manual'`. This covers game-only streams, all-🎵 concert VODs,
@@ -246,8 +247,9 @@ shared "what is a BJ solo full song" judgment rule; each stage's procedure lives
 These stages form one pipeline: `daily` output → audit triages `analyzed/done` (may push to `manual`)
 → ingest recovers `manual` into `analyzed` → perf verifies every `local_review = pending` performance.
 Consolidated 2026-07-23 from three separate skills (`vod-audit`/`manual-ingest`/`perf-review`).
-**Only local-ingest performances reach `perf`** — comment-path performances are born `verified` (fan
-timeline trusted), so a comment VOD is `audit`-only; the `pending` rows `perf` sees come from `ingest`.
+**`perf` runs for every pending performance** — for comment VODs its main job is filling the song `end`
+(`daily` left it as the `start_s` sentinel); for ingest VODs it confirms the human's span. `start` is
+never moved on a comment VOD (it's the trusted fan value).
 
 Primitives these stages orchestrate (all in `cli.py`/`db.py`, no Groq except match/transcribe):
 - `soopts perfs [--identify S] [--local S] --json` (`db.fetch_performances`) — performance worklist.
@@ -358,6 +360,10 @@ selection rule is as strict as it is. A human fixes mistakes in YouTube Studio, 
   onset detection was error-prone (a masked first line behind a vocal warm-up fooled it) and the firm rule
   is that a human-written timeline is always correct. So a compilation clip may begin mid-song where the fan
   marked the hook — that is accepted, not a bug.
+- **Clip end = the `perf`-filled `end_s`, never the `daily` sentinel.** `daily` writes `end_s = start_s`
+  (comment can't tell where a song ends); `plan_songs` drops `dur <= 0`, so a comment VOD is unbuildable
+  until the `perf` stage transcribes forward and sets the real end. Only fully-`perf`'d VODs (every song
+  `verified` with a real end) pass the YouTube gate — a **pull model**, no auto-rollout.
 - **Intro/outro padding (`video.intro_lead_s`/`outro_tail_s`) is build-only cosmetics, not the span.**
   `padded_bounds` widens each clip by `intro_lead_s` up front (clamped at 0) and `outro_tail_s` at the
   end — `split_by_part` clamps a tail past the VOD/part end. **`intro_lead_s` defaults to 0** and

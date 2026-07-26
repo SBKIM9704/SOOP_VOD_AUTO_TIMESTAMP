@@ -115,30 +115,35 @@ def test_nested_lines_and_sorting():
 
 
 # --------------------------------------------------------------------------- #
-# timeline_songs_to_spans — 시작=시각, 끝=다음 곡(6분 캡)
+# timeline_songs_to_spans — 시작=댓글 시각, 끝은 미정(센티넬 end_s=start_s)
 # --------------------------------------------------------------------------- #
-def test_spans_end_at_next_song():
+def test_spans_use_comment_time_as_start():
     songs = [
         TimelineSong(time_s=100, title="A", artist="x"),
-        TimelineSong(time_s=250, title="B", artist="y"),  # 150초 뒤 → end=250
+        TimelineSong(time_s=250, title="B", artist="y"),
     ]
     spans = timeline_songs_to_spans(songs, duration_s=10000)
-    assert spans[0] == {"start_s": 100, "end_s": 250, "title": "A", "artist": "x"}
+    assert spans[0] == {"start_s": 100, "end_s": 100, "title": "A", "artist": "x"}
+    assert spans[1] == {"start_s": 250, "end_s": 250, "title": "B", "artist": "y"}
 
 
-def test_spans_cap_at_max_song_length():
+def test_spans_end_is_sentinel_equal_to_start():
+    """end는 daily가 정하지 않는다 — end_s=start_s(0길이 미정), 로컬 perf가 채운다."""
     songs = [
         TimelineSong(time_s=100, title="A", artist="x"),
-        TimelineSong(time_s=100 + 3600, title="B", artist="y"),  # 1시간 뒤(사이 잡담)
+        TimelineSong(time_s=100 + 3600, title="B", artist="y"),  # 다음 곡이 멀어도 무관
     ]
-    spans = timeline_songs_to_spans(songs, duration_s=10000, max_song_s=360)
-    assert spans[0]["end_s"] == 100 + 360  # 6분 캡
+    spans = timeline_songs_to_spans(songs, duration_s=10000)
+    assert all(s["end_s"] == s["start_s"] for s in spans)
 
 
-def test_spans_last_song_uses_cap_and_duration():
-    songs = [TimelineSong(time_s=9800, title="끝곡", artist="z")]
-    spans = timeline_songs_to_spans(songs, duration_s=9900, max_song_s=360)
-    assert spans[0]["end_s"] == 9900  # start+360=10160 이지만 VOD 길이로 캡
+def test_spans_sorted_by_time():
+    songs = [
+        TimelineSong(time_s=300, title="늦곡", artist="z"),
+        TimelineSong(time_s=100, title="첫곡", artist="a"),
+    ]
+    spans = timeline_songs_to_spans(songs)
+    assert [s["start_s"] for s in spans] == [100, 300]
 
 
 # --------------------------------------------------------------------------- #

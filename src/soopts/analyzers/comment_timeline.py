@@ -127,25 +127,22 @@ def no_timeline_note(comments: list[str]) -> str:
 
 
 def timeline_songs_to_spans(
-    songs: list[TimelineSong], duration_s: int | None = None, *, max_song_s: int = 360
+    songs: list[TimelineSong], duration_s: int | None = None
 ) -> list[dict]:
-    """TimelineSong 목록 → ingest용 span dict 목록. 순수 함수.
+    """TimelineSong 목록 → span dict 목록. 순수 함수.
 
-    타임라인은 곡 **시작 시각**만 주므로 끝은 추정한다: `end = 다음 곡 시작`, 단 최대 곡
-    길이(기본 6분)로 캡한다 — 곡 사이 잡담 구간이 end로 과대 반영되는 걸 막는다. 마지막 곡은
-    `start + max_song_s`(VOD 길이로 캡). 산출물은 곡 시작 딥링크라 끝 정밀도는 부차적이다.
+    타임라인은 곡 **시작 시각**만 주고, 끝은 미디어를 봐야 알 수 있다(다음 곡 시작은 곡 사이
+    잡담이 통째로 물려 클립 경계로 나쁘다). 그래서 `end_s = start_s`(0길이 = "end 미정") 센티넬로
+    두고, 실제 끝은 로컬 `perf` 검증에서 채운다. `plan_songs`가 dur<=0을 드롭하므로 end가 채워지기
+    전까진 영상 빌드 대상이 아니다(pull 방식). 딥링크는 start만 쓰므로 여기선 start만이 진실이다.
+
+    `duration_s`는 시그니처 호환용으로 받되 쓰지 않는다(end를 추정하지 않으므로).
     """
     ordered = sorted(songs, key=lambda s: s.time_s)
-    spans: list[dict] = []
-    for i, s in enumerate(ordered):
-        nxt = ordered[i + 1].time_s if i + 1 < len(ordered) else (duration_s or s.time_s + max_song_s)
-        end = min(nxt, s.time_s + max_song_s)
-        if duration_s:
-            end = min(end, duration_s)
-        if end <= s.time_s:  # 같은 시각 중복 등 — 최소 길이 보장
-            end = s.time_s + max_song_s
-        spans.append({"start_s": s.time_s, "end_s": end, "title": s.title, "artist": s.artist or ""})
-    return spans
+    return [
+        {"start_s": s.time_s, "end_s": s.time_s, "title": s.title, "artist": s.artist or ""}
+        for s in ordered
+    ]
 
 
 # 예전 이름 호환 — batch.py는 이 이름으로 호출한다.

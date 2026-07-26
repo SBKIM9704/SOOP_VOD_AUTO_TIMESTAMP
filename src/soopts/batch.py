@@ -1,8 +1,9 @@
 """`soopts daily` 오케스트레이션 — GitHub Actions 무인 배치.
 
-스테이션 최신 VOD 중 미처리분 → 댓글 타임라인(🎤/🎵)을 마커로 파싱 → 곡별 span(시작=시각,
-끝=다음 곡 6분 캡) → 제목/가수로 카탈로그 매칭 → DB(performances)에 노래 구간 기록.
-다운로드·세그멘테이션·STT 없이 수 초에 끝난다(초경량). 댓글 타임라인이 없는 VOD는
+스테이션 최신 VOD 중 미처리분 → 댓글 타임라인(🎤/🎵)을 마커로 파싱 → 곡별 span(**시작=댓글 시각만,
+끝은 미정=start 센티넬**) → 제목/가수로 카탈로그 매칭 → DB(performances, local_review=pending) 기록.
+곡 끝은 로컬 `perf`가 채운다(pull 방식). 다운로드·세그멘테이션·STT 없이 수 초에 끝난다(초경량).
+댓글 타임라인이 없는 VOD는
 'manual'로 표시만 하고, 사람이 로컬에서 analyze_vod.py 전체 전사 후 `soopts ingest`로 처리한다.
 
 산출물은 **타임스탬프**다. 시청은 SOOP 원본 딥링크(`song_link()`)로 연결하며,
@@ -388,6 +389,24 @@ def span_to_song(span: dict[str, Any]):
     )
 
 
+def comment_span_to_song(span: dict[str, Any]):
+    """댓글 타임라인 span(dict) → Song. start만 진실이고 end는 **미정(=start, 0길이 센티넬)**.
+
+    `span_to_song`(ingest용)은 end>start를 강제하지만, 댓글 경로는 end를 daily에서 정하지 않는다
+    — 실제 끝은 로컬 `perf`가 채운다. 그래서 여기선 `end == start`를 허용한다. `plan_songs`가
+    dur<=0을 드롭하므로 end가 채워지기 전엔 영상 빌드 대상이 아니다.
+    """
+    from soopts.models import Song
+
+    start = int(span["start_s"])
+    return Song(
+        t=start, end=start, duration=0,
+        sticker_rate=0.0, song_likely=True,
+        lyrics=(span.get("lyrics") or ""),
+        title=(span.get("title") or None),
+    )
+
+
 def ingest_vod(
     cfg: Config, *, title_no: str, bj_id: str, songs: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -440,8 +459,7 @@ def ingest_vod(
 
 
 def _record_songs(
-    vod_row_id: int, song_objs: list, artists: list[str], catalog: list,
-    *, local_review: str | None = None,
+    vod_row_id: int, song_objs: list, artists: list[str], catalog: list
 ) -> dict[str, Any]:
     """Song 목록을 식별(카탈로그 매칭) 후 performances에 기록하고 stats를 반환한다(상태 마킹은 호출부).
 
@@ -449,8 +467,8 @@ def _record_songs(
     제목이 있으면 `resolve_song_match`(가사 추측 생략), 제목 없이 가사만 있으면 `identify_song`,
     둘 다 없으면 needs_review(None)로 남긴다. 감지된 노래 수만큼 hint_available로 센다.
 
-    local_review는 그대로 insert_performances로 넘긴다 — 댓글 경로는 'verified'(팬 시각 신뢰),
-    로컬 ingest는 None(기본 pending, perf 검증 대상).
+    performances는 `local_review` 기본 pending으로 들어간다 — 댓글이든 로컬이든 실제 end/경계는
+    로컬 `perf`가 검증한 뒤 verified로 승격한다(pull 방식).
     """
     from soopts import db
     from soopts.analyzers.identify import identify_song, resolve_song_match
@@ -468,7 +486,7 @@ def _record_songs(
         if r is not None and r.identify_status == "auto_matched":
             auto_matched += 1
 
-    db.insert_performances(vod_row_id, song_objs, results, local_review=local_review)
+    db.insert_performances(vod_row_id, song_objs, results)
     return {
         "detected": len(song_objs), "auto_matched": auto_matched,
         "needs_review": len(song_objs) - auto_matched,
@@ -505,10 +523,10 @@ def _process_vod(
 ) -> dict[str, Any]:
     """댓글 타임라인 → 곡별 span → 식별 → DB 기록. 초경량(다운로드·STT·세그멘테이션 없음).
 
-    타임라인의 🎤/🎵 항목이 시각·제목·가수를 모두 주므로, 시작=시각·끝=다음 곡(6분 캡)으로
-    span을 만들고 제목/가수로 카탈로그를 매칭해 기록한다 — 예전의 구간 다운로드·경계 탐지·
-    Whisper 전사·Groq 가사추측을 전부 없앴다(VOD당 수 초). 타임라인이 없으면(게임 방송 등)
-    {"no_timeline": True}를 돌려 호출부가 'manual'로 표시한다(로컬 처리 대상).
+    타임라인의 🎤/🎵 항목이 시각·제목·가수를 주므로, **시작=댓글 시각만** 쓰고 **끝은 미정(=start
+    센티넬)** 으로 span을 만들어(comment_span_to_song) 제목/가수 카탈로그 매칭 후 기록한다 — 곡 끝은
+    로컬 perf가 채운다(North Star). 예전의 구간 다운로드·경계 탐지·Whisper·Groq 가사추측은 다 없앴다
+    (VOD당 수 초). 타임라인이 없으면(게임 방송 등) {"no_timeline": True}로 호출부가 'manual' 표시.
 
     재처리는 멱등하다: clear_machine_performances로 이전 기계 생성분을 지우고 다시 넣되
     사람 확정(confirmed)분은 보존한다. 상태 마킹은 호출부(run_daily)가 한다.
@@ -546,13 +564,11 @@ def _process_vod(
 
     db.clear_machine_performances(vod_row["id"])
     spans = timeline_songs_to_spans(timeline, meta.total_duration)
-    song_objs = [span_to_song(sp) for sp in spans]
+    # 댓글은 start만 진실(North Star). end는 미정(=start 센티넬)이라 comment_span_to_song을 쓴다 —
+    # 실제 곡 끝은 로컬 perf가 채운다. local_review는 기본 pending으로 남겨 perf 대상이 되게 한다.
+    song_objs = [comment_span_to_song(sp) for sp in spans]
     artists = [sp["artist"] for sp in spans]
-    # 댓글 타임라인은 사람이 직접 쓴 값 → 경계를 신뢰해 local_review=verified로 기록한다(North Star).
-    # 사람 검토는 audit(누락·오탐 곡)만 사후로 하고, perf 구간검증은 로컬 ingest 전용이다.
-    stats = _record_songs(
-        vod_row["id"], song_objs, artists, db.load_song_catalog(), local_review="verified"
-    )
+    stats = _record_songs(vod_row["id"], song_objs, artists, db.load_song_catalog())
     stats["mode"] = "comment_timeline"
     return stats
 
