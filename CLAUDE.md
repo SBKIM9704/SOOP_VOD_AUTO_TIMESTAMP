@@ -335,13 +335,15 @@ selection rule is as strict as it is. A human fixes mistakes in YouTube Studio, 
 - **Chapter/link offsets come from `ffprobe`, not from the requested `-t`.** A clip that ends early
   would otherwise shift every later chapter.
 - **Intro/outro padding (`video.intro_lead_s`/`outro_tail_s`) is build-only cosmetics, not the span.**
-  Fan-timeline `start_s` sits at the *vocal entry* (no intro), so `padded_bounds` widens each clip by
-  `intro_lead_s` up front (clamped at 0) and `outro_tail_s` at the end — `split_by_part` clamps a tail
-  past the VOD/part end. The DB `performances.start_s`/`end_s` stay untouched (deep-link + `perf`
-  verification truth), and the description's source deep link uses the unpadded `source_start_s`; only
-  the video clip and its `?t=`/chapter (which is the padded clip start) get the breathing room. Keep
-  presentation padding out of the verification stages — `daily`/`vod-review perf` own *correctness*
-  boundaries, the render layer owns aesthetics.
+  `padded_bounds` widens each clip by `intro_lead_s` up front (clamped at 0) and `outro_tail_s` at the
+  end — `split_by_part` clamps a tail past the VOD/part end. **`intro_lead_s` defaults to 0**: the fan
+  timeline `start_s` pins the song start accurately for this station (verified against source VODs), so
+  no artificial intro is added — widening the front only drags in the previous song's chatter. Only
+  `outro_tail_s` (default 7) is on, so a `perf`-tightened `end_s` doesn't clip the final note. The DB
+  `performances.start_s`/`end_s` stay untouched (deep-link + `perf` verification truth), and the
+  description's source deep link uses the unpadded `source_start_s`; only the video clip and its
+  `?t=`/chapter (the padded clip start) get the tail. Keep presentation padding out of the verification
+  stages — `daily`/`vod-review perf` own *correctness* boundaries, the render layer owns aesthetics.
 - **The overlay is two auto-sized ribbons, not a fixed panel.** Song titles vary wildly in length, so
   each line gets `drawtext`'s own `box` (which hugs the text) instead of a `drawbox` panel with a
   guessed width. The left accent bar is drawn *after* the ribbons — drawn first, the ribbon boxes
