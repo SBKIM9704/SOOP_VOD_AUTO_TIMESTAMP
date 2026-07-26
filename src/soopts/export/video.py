@@ -35,10 +35,10 @@ class ClipPlacement:
     perf_id: int
     title: str
     artist: str
-    source_start_s: float     # 원본 VOD 절대초(설명의 원본 딥링크용) — 여백 없는 보컬 진입점
-    # 클립은 intro_lead_s만큼 전주부터 시작하므로 챕터·?t=는 자연히 전주 시작에 놓인다
-    # (챕터 마커와 클립 경계가 어긋나지 않게 clip 시작 그대로 쓴다). source_start_s와 달리
-    # 여백이 포함된 값 — 설명의 SOOP 딥링크는 여백 없는 source_start_s를 따로 쓴다.
+    source_start_s: float     # 원본 VOD 절대초(=start_s, 팬 댓글 시각) — 설명의 원본 딥링크용
+    # offset_s는 합본 안에서 이 클립이 놓인 위치 = 챕터 시작 = ?t= 타깃. intro_lead_s(기본 0)만큼
+    # 앞당긴 클립 시작을 그대로 쓴다(챕터 마커와 클립 경계가 어긋나지 않게). 딥링크는 여백과
+    # 무관한 원본 시각이 필요하므로 source_start_s를 따로 둔다.
     offset_s: float           # 합본 내 시작초 = 챕터 시작 = performances.youtube_url의 ?t=
     duration_s: float
 
@@ -73,29 +73,16 @@ def plan_songs(cfg: Config, perfs: list[dict]) -> tuple[list[dict], list[dict]]:
     return kept, dropped
 
 
-def clip_start_s(perf: dict) -> float:
-    """합본 클립을 자를 원본 VOD 시작초. 순수 함수.
-
-    `youtube_start_s`(곡 실제 시작)가 있으면 그걸, 없으면 `start_s`(팬 댓글값)를 쓴다.
-    팬은 곡의 훅/후렴 지점에 타임라인을 찍는 일이 잦아(특히 멀티파트 뒤 파트) `start_s`가
-    곡 한참 중간을 가리킬 수 있는데, 그 값을 그대로 자르면 클립이 곡 중간부터 시작한다.
-    `youtube_start_s`는 그걸 곡 실제 시작으로 되돌리는 영상 전용 오버라이드다 — `start_s`
-    (딥링크·검증의 진실=팬 댓글)는 건드리지 않고 클립 시작만 바꾼다.
-    """
-    v = perf.get("youtube_start_s")
-    return float(v if v is not None else perf["start_s"])
-
-
 def padded_bounds(cfg: Config, perf: dict) -> tuple[float, float]:
     """연출 여백을 준 합본 클립의 (시작, 끝) 절대초 — 순수 함수.
 
-    시작은 `clip_start_s`(youtube_start_s ?? start_s)에서 `intro_lead_s`만큼 앞으로(0 밑으로는
-    안 감), 끝은 `end_s`에서 `outro_tail_s`만큼 뒤로 민다. DB의 start_s/end_s는 건드리지 않는다
-    — 여백도 youtube_start_s도 영상용일 뿐이고, 딥링크·식별의 진실은 그대로다. 파트 끝을 넘는
-    tail은 split_by_part가 파트 끝으로 클램프한다.
+    시작은 `start_s`(=팬 댓글 시각, 진실)에서 `intro_lead_s`만큼 앞으로(0 밑으로는 안 감), 끝은
+    `end_s`에서 `outro_tail_s`만큼 뒤로 민다. 댓글 타임라인이 곧 시작의 진실이므로 전사·오버라이드로
+    시작을 바꾸지 않는다 — 여백만 붙일 뿐 DB의 start_s/end_s는 그대로다. 파트 끝을 넘는 tail은
+    split_by_part가 파트 끝으로 클램프한다.
     """
     v = cfg.video
-    s = max(0.0, clip_start_s(perf) - v.intro_lead_s)
+    s = max(0.0, float(perf["start_s"]) - v.intro_lead_s)
     e = float(perf["end_s"]) + v.outro_tail_s
     return s, e
 
