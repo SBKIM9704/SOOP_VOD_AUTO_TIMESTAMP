@@ -211,12 +211,15 @@ def cmd_vods(args) -> int:
 
     statuses = [s.strip() for s in args.status.split(",") if s.strip()]
     rows = db.fetch_vods_by_status(statuses)
+    if args.source:  # 출처 라벨 필터 — "댓글 아닌 것(local)만 내가 검토" 같은 용도
+        rows = [r for r in rows if r.get("source") == args.source]
     out = [
         {
             "id": r["id"],
             "title_no": r["soop_title_no"],
             "title": r.get("title") or "",
             "status": r.get("status"),
+            "source": r.get("source"),  # comment=댓글 타임라인 / local=로컬 전사 ingest
             "duration_s": r.get("duration_s"),
             "note": r.get("error"),  # manual 사유 메모(로컬 처리 우선순위 힌트)
             "machine_perfs": db.count_machine_performances(r["id"]),
@@ -227,11 +230,12 @@ def cmd_vods(args) -> int:
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
-        print(f"status={statuses} — {len(out)}건")
+        print(f"status={statuses}{f' source={args.source}' if args.source else ''} — {len(out)}건")
         for o in out:
             note = f" · {o['note']}" if o["note"] else ""
+            src = f" <{o['source']}>" if o["source"] else ""
             print(
-                f"  {o['title_no']} [{o['status']}] {o['title']} "
+                f"  {o['title_no']} [{o['status']}]{src} {o['title']} "
                 f"— 기계 {o['machine_perfs']} / confirmed {o['confirmed_perfs']}{note}"
             )
     return 0
@@ -597,6 +601,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="처리된 VOD 목록 + performance 수 조회 (vod-review(audit 단계)용, 판정 안 함)",
     )
     sp.add_argument("--status", default="analyzed,done", help="쉼표구분 status 필터(기본: analyzed,done)")
+    sp.add_argument("--source", choices=["comment", "local"], default=None,
+                    help="출처 라벨 필터(comment=댓글 타임라인 / local=로컬 전사 ingest)")
     sp.add_argument("--json", action="store_true", help="JSON 출력")
     sp.set_defaults(func=cmd_vods)
 

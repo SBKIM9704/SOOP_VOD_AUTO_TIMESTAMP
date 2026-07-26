@@ -342,7 +342,7 @@ def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
             stats["needs_review"] += vod_stats["needs_review"]
             for k in ("stt_attempted", "stt_ok", "hint_available", "lyrics_only"):
                 stats[k] += vod_stats.get(k, 0)
-            db.mark_vod(title_no, next_vod_status(vod_stats["detected"]))
+            db.mark_vod(title_no, next_vod_status(vod_stats["detected"]), source="comment")
             _notify_slack(format_vod_result(cfg, title_no, vod_stats))
         except Exception as e:  # noqa: BLE001
             log.error("VOD %s 처리 실패: %s", title_no, e)
@@ -428,7 +428,7 @@ def ingest_vod(
     song_objs = [span_to_song(sp) for sp in songs]
     artists = [sp.get("artist") or "" for sp in songs]
     stats = _record_songs(vod_row["id"], song_objs, artists, db.load_song_catalog())
-    db.mark_vod(title_no, next_vod_status(stats["detected"]))
+    db.mark_vod(title_no, next_vod_status(stats["detected"]), source="local")
 
     text = (
         f"VOD {title_no} ingest 완료 — {stats['detected']}곡 기록 "
