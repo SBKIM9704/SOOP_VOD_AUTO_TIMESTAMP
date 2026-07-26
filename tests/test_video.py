@@ -3,7 +3,12 @@
 from pathlib import Path
 
 from soopts.config import Config
-from soopts.export.video import build_concat_list, padded_bounds, plan_songs
+from soopts.export.video import (
+    build_concat_list,
+    clip_start_s,
+    padded_bounds,
+    plan_songs,
+)
 
 
 def _cfg(**over) -> Config:
@@ -63,6 +68,24 @@ def test_padded_bounds_zero_padding_is_identity():
     """여백을 0으로 두면 원래 경계 그대로 — 패딩 기능을 끌 수 있다."""
     s, e = padded_bounds(_cfg(intro_lead_s=0.0, outro_tail_s=0.0), _perf(1, 100, 250))
     assert (s, e) == (100.0, 250.0)
+
+
+def test_clip_start_s_falls_back_to_start_s():
+    """youtube_start_s가 없으면 start_s(팬 댓글값)를 그대로 쓴다."""
+    assert clip_start_s(_perf(1, 100, 250)) == 100.0
+
+
+def test_clip_start_s_prefers_youtube_start_s():
+    """youtube_start_s가 있으면 그 값(곡 실제 시작)으로 자른다 — start_s는 딥링크용."""
+    p = {"id": 1, "start_s": 200, "end_s": 400, "youtube_start_s": 130}
+    assert clip_start_s(p) == 130.0
+
+
+def test_padded_bounds_uses_youtube_start_s_override():
+    """영상 클립은 youtube_start_s에서 시작하되 end_s/여백은 그대로 적용된다."""
+    p = {"id": 1, "start_s": 200, "end_s": 400, "youtube_start_s": 130}
+    s, e = padded_bounds(_cfg(intro_lead_s=0.0, outro_tail_s=7.0), p)
+    assert (s, e) == (130.0, 407.0)
 
 
 def test_build_concat_list_format():
