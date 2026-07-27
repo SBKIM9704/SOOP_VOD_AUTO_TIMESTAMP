@@ -282,3 +282,33 @@ def test_covering_idxs_excludes_segment_that_only_touches_start():
 def test_covering_idxs_handles_segments_longer_than_six_seconds():
     # 길이가 6초보다 길면 예전 조건은 요청 시각을 품은 세그먼트를 빠뜨려 앞부분이 잘렸다.
     assert media._covering_idxs([0.0, 10.0, 20.0], 8.0, 12.0) == [0, 1]
+
+
+# --------------------------------------------------------------------------- #
+# part_duration_mismatches — SOOP 보고 duration vs 실제 m3u8 길이
+# --------------------------------------------------------------------------- #
+def test_part_duration_mismatches_all_match_returns_empty():
+    parts = _parts(8068, 11918)
+    assert media.part_duration_mismatches(parts, [8068.0, 11918.0]) == []
+
+
+def test_part_duration_mismatches_within_tolerance_ignored():
+    parts = _parts(8068, 11918)
+    assert media.part_duration_mismatches(parts, [8069.5, 11916.5]) == []
+
+
+def test_part_duration_mismatches_nonlast_shifts_offsets():
+    # part0 보고 8068인데 실제 8180 → 뒤 파트 전역 offset이 112초 밀린다(딥링크 오염).
+    out = media.part_duration_mismatches(_parts(8068, 11918), [8180.0, 11918.0])
+    assert len(out) == 1
+    assert out[0]["idx"] == 0
+    assert out[0]["diff"] == 112.0
+    assert out[0]["shifts_offsets"] is True
+
+
+def test_part_duration_mismatches_last_part_is_offset_safe():
+    # 마지막 파트만 틀리면 total_duration만 부정확하고 offset은 안전하다.
+    out = media.part_duration_mismatches(_parts(8068, 11918), [8068.0, 12000.0])
+    assert len(out) == 1
+    assert out[0]["idx"] == 1
+    assert out[0]["shifts_offsets"] is False

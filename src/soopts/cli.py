@@ -270,6 +270,51 @@ def cmd_comments(args) -> int:
     return 0
 
 
+def cmd_verify_parts(args) -> int:
+    """멀티파트 VOD의 SOOP 보고 duration을 실제 m3u8 길이와 대조 — 오프셋/딥링크 오염 감사.
+
+    daily는 미디어를 안 만지므로(yt-dlp 없음) 이 로컬 audit에 둔다. 앞 파트 duration이 실제와
+    어긋나면 뒤 파트 전역 offset이 통째로 밀려, 댓글 🎤 start_s가 엉뚱한 오디오를 가리키고
+    딥링크가 조용히 틀어진다. 종료코드 1 = offset을 미는 mismatch 있음.
+    """
+    import json as _json
+
+    from soopts.collector.media import (
+        part_duration_mismatches,
+        playlist_total_s,
+        resolve_m3u8_list,
+    )
+    from soopts.collector.meta import fetch_meta
+
+    cfg, vod_id, work = _ctx(args)
+    meta = fetch_meta(cfg, vod_id, work, force=args.force)
+    if len(meta.parts) < 2:
+        print(f"VOD {vod_id}: 단일 파트 — offset 오염 위험 없음")
+        return 0
+    m3u8s = resolve_m3u8_list(args.vod, cfg.clip.quality)
+    reals = [playlist_total_s(u) for u in m3u8s[:len(meta.parts)]]
+    mism = part_duration_mismatches(meta.parts, reals)
+    if args.json:
+        print(_json.dumps({
+            "title_no": vod_id,
+            "parts": [{"idx": p.idx, "offset_s": p.offset_s, "reported": p.duration,
+                       "real": r} for p, r in zip(meta.parts, reals, strict=False)],
+            "mismatches": mism,
+        }, ensure_ascii=False, indent=2))
+        return 1 if any(m["shifts_offsets"] for m in mism) else 0
+    for p, r in zip(meta.parts, reals, strict=False):
+        print(f"part{p.idx} offset={p.offset_s:>6} 보고={p.duration:>6} 실제={r:>7.0f}")
+    if not mism:
+        print("✓ 모든 파트 duration 일치 — 전역 offset·딥링크 안전")
+        return 0
+    for m in mism:
+        tag = ("⚠️ 뒤 파트 offset 오염 → 댓글 start_s/딥링크 틀어짐"
+               if m["shifts_offsets"] else "총길이만 부정확(offset 안전)")
+        print(f"✗ part{m['idx']}: 보고 {m['reported']:.0f}s vs 실제 {m['real']:.0f}s "
+              f"(Δ{m['diff']:+.0f}s) — {tag}")
+    return 1 if any(m["shifts_offsets"] for m in mism) else 0
+
+
 def cmd_set_manual(args) -> int:
     """VOD 하나를 'manual'로 되돌린다 — vod-review(audit 단계)가 Claude 판정 후 호출하는 적용 명령.
 
@@ -614,6 +659,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true", help="JSON 출력")
     sp.add_argument("--bj", help="스테이션 bj_id(기본: soopts.toml [station] bj_id)")
     sp.set_defaults(func=cmd_comments)
+
+    sp = sub.add_parser(
+        "verify-parts",
+        help="멀티파트 VOD의 SOOP 보고 duration을 실제 m3u8과 대조 (오프셋/딥링크 오염 감사)",
+    )
+    add_vod(sp)
+    sp.add_argument("--json", action="store_true", help="JSON 출력")
+    sp.add_argument("--force", action="store_true", help="meta 캐시 무시하고 재조회")
+    sp.set_defaults(func=cmd_verify_parts)
 
     sp = sub.add_parser(
         "set-manual",

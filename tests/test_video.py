@@ -2,8 +2,27 @@
 
 from pathlib import Path
 
+import pytest
+
+import soopts.collector.media as media
 from soopts.config import Config
-from soopts.export.video import build_concat_list, padded_bounds, plan_songs
+from soopts.export.video import (
+    assert_parts_aligned,
+    build_concat_list,
+    padded_bounds,
+    plan_songs,
+)
+from soopts.models import MetaPart
+
+
+class _Meta:
+    """parts만 있는 최소 meta 스텁 — assert_parts_aligned 테스트용."""
+
+    def __init__(self, *durations: int):
+        off, self.parts = 0, []
+        for i, d in enumerate(durations):
+            self.parts.append(MetaPart(idx=i, file_info_key=f"k{i}", duration=d, offset_s=off))
+            off += d
 
 
 def _cfg(**over) -> Config:
@@ -87,3 +106,31 @@ def test_build_concat_list_makes_paths_absolute():
     body = build_concat_list([Path("ytbuild/clip.mp4")])
     assert body.startswith("file '/")
     assert body.rstrip().endswith("ytbuild/clip.mp4'")
+
+
+# --------------------------------------------------------------------------- #
+# assert_parts_aligned — 파트 offset 오염 게이트 (playlist_total_s만 monkeypatch)
+# --------------------------------------------------------------------------- #
+def test_assert_parts_aligned_passes_when_durations_match(monkeypatch):
+    monkeypatch.setattr(media, "playlist_total_s", lambda u: {"u0": 8068.0, "u1": 11918.0}[u])
+    assert_parts_aligned(_Meta(8068, 11918), ["u0", "u1"])   # raise 없음
+
+
+def test_assert_parts_aligned_single_part_skips_network(monkeypatch):
+    called = []
+    monkeypatch.setattr(media, "playlist_total_s", lambda u: called.append(u) or 0.0)
+    assert_parts_aligned(_Meta(18000), ["u0"])
+    assert called == []   # 단일 파트면 m3u8도 안 읽는다
+
+
+def test_assert_parts_aligned_raises_on_offset_shift(monkeypatch):
+    # part0 보고 8068인데 실제 8180 → 뒤 파트 offset 밀림 → 전체 중단
+    monkeypatch.setattr(media, "playlist_total_s", lambda u: {"u0": 8180.0, "u1": 11918.0}[u])
+    with pytest.raises(RuntimeError, match="offset"):
+        assert_parts_aligned(_Meta(8068, 11918), ["u0", "u1"])
+
+
+def test_assert_parts_aligned_last_part_mismatch_passes(monkeypatch):
+    # 마지막 파트만 틀리면 어떤 곡의 offset도 안 미므로 통과
+    monkeypatch.setattr(media, "playlist_total_s", lambda u: {"u0": 8068.0, "u1": 12500.0}[u])
+    assert_parts_aligned(_Meta(8068, 11918), ["u0", "u1"])   # raise 없음
