@@ -114,6 +114,39 @@ def split_by_part(
     return spans
 
 
+def part_duration_mismatches(
+    parts: list[MetaPart], real_durations: list[float], *, tol_s: float = 2.0
+) -> list[dict]:
+    """SOOP 보고 duration이 실제 m3u8 길이와 tol_s 넘게 다른 파트를 찾는다(순수 함수).
+
+    파트 전역 offset은 앞 파트 duration의 누적합이라(`meta.parse_meta_response`), **마지막이
+    아닌** 파트의 duration이 틀리면 그 뒤 모든 파트의 offset이 통째로 밀린다 — 그러면 댓글
+    🎤 시각(전역 초)이 엉뚱한 오디오를 가리켜 딥링크가 조용히 틀어진다. 그래서 offset을
+    미는 mismatch(`shifts_offsets=True`)를 따로 표시한다. 마지막 파트만 틀리면 total_duration만
+    부정확하고(뒤에 파트가 없어) offset은 안전하다. 내부 정합(offset=누적합)은 구성상 항상
+    참이라 검사 의미가 없어, 여기선 SOOP 보고값 vs 실제 재생길이를 대조한다.
+    """
+    n = len(parts)
+    out: list[dict] = []
+    for p, real in zip(parts, real_durations, strict=False):
+        diff = real - float(p.duration)
+        if abs(diff) > tol_s:
+            out.append({
+                "idx": p.idx, "reported": float(p.duration), "real": round(real, 1),
+                "diff": round(diff, 1), "shifts_offsets": p.idx < n - 1,
+            })
+    return out
+
+
+def playlist_total_s(m3u8_url: str) -> float:
+    """m3u8의 #EXTINF 합 = 이 파트의 실제 재생 길이(초). 세그먼트는 안 받고 플레이리스트만 읽는다."""
+    text = _read_url(m3u8_url, timeout=15, min_bytes=1).decode("utf-8", "replace")
+    return round(sum(
+        float(line[len("#EXTINF:"):].split(",")[0])
+        for line in text.splitlines() if line.strip().startswith("#EXTINF:")
+    ), 1)
+
+
 def download_span(
     spans: list[tuple[str, float, float]], out_path: Path,
     *, workers: int = 4, force: bool = False,
