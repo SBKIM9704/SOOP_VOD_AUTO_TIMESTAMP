@@ -286,6 +286,33 @@ def resolve_playlists(cfg: Config, title_no: str) -> list[str]:
         return resolve_m3u8_list(title_no, cfg.video.fallback_quality)
 
 
+def assert_parts_aligned(meta, m3u8s: list[str]) -> None:
+    """멀티파트 VOD의 SOOP 보고 duration이 실제 m3u8과 맞는지 확인 — 다운로드 전 하드 게이트.
+
+    앞 파트 duration이 실제와 어긋나면 뒤 파트 전역 offset이 통째로 밀려, 모든 곡 구간이
+    엉뚱한 오디오로 받아진다(딥링크/챕터는 맞는데 오디오만 틀린 합본). 되돌릴 수 없는
+    업로드라 한 곡만 건너뛰는 게 아니라 **VOD 전체 빌드를 중단**한다 — 호출부(run_youtube_upload)
+    의 except가 Slack로 알리고 종료하며, youtube_status는 NULL로 남아 다음 날 재시도된다.
+    단일 파트면 offset 위험이 없어 통과. (마지막 파트만 틀리면 total_duration만 부정확하고
+    어떤 곡의 offset도 안 미므로 통과 — `shifts_offsets`로 거른다.)
+    """
+    if len(meta.parts) < 2:
+        return
+    from soopts.collector.media import part_duration_mismatches, playlist_total_s
+
+    reals = [playlist_total_s(u) for u in m3u8s[:len(meta.parts)]]
+    shifted = [m for m in part_duration_mismatches(meta.parts, reals) if m["shifts_offsets"]]
+    if shifted:
+        detail = ", ".join(
+            f"part{m['idx']} 보고{m['reported']:.0f}≠실제{m['real']:.0f}(Δ{m['diff']:+.0f}s)"
+            for m in shifted
+        )
+        raise RuntimeError(
+            "멀티파트 duration 불일치 → 곡 구간 offset이 밀려 틀린 오디오가 합본에 들어감. "
+            f"빌드 중단: {detail}"
+        )
+
+
 def _download_song_pieces(
     cfg: Config, perf: dict, m3u8s: list[str], parts, out_dir: Path, idx: int
 ) -> list[tuple[Path, float, float]]:
@@ -332,6 +359,7 @@ def build_vod_video(
         log.warning("상한/구간 문제로 제외된 곡 %d개 (max_songs=%d, max_total_minutes=%.0f)",
                     len(dropped), cfg.video.max_songs, cfg.video.max_total_minutes)
     m3u8s = resolve_playlists(cfg, title_no)
+    assert_parts_aligned(meta, m3u8s)   # 파트 offset이 밀리면 여기서 전체 중단(틀린 오디오 업로드 방지)
 
     segments: list[Path] = []       # concat에 들어갈 클립(파트에 걸친 곡은 2개 이상)
     placements: list[ClipPlacement] = []
