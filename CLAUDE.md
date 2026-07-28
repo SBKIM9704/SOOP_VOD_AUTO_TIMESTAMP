@@ -296,12 +296,16 @@ and `lyrics_only` stays 0 by design.
 - `verify-env.yml` (manual): confirms SOOP's API/streams are reachable from a hosted-runner IP before
   relying on `daily.yml`. If it starts failing, only `runs-on` needs to change to a
   self-hosted runner — nothing else.
-- `daily.yml`: scheduled every 6h (04/10/16/22 KST) + `workflow_dispatch`. It pipes
+- `daily.yml`: scheduled every 6h — 4×/day (10/16/22/04 KST) — + `workflow_dispatch`. One VOD per
+  run (`daily_vod_count = 1`); throughput is raised by narrowing the schedule, not by bumping the
+  count, so the "one VOD per run" failure isolation (a killed run costs at most one VOD) holds. It pipes
   `soopts ... | tee *.log` and relies
   on the exit code to detect failure — any `run:` step doing this **must** start with
   `set -o pipefail`, or a crash in `soopts` gets masked by `tee`'s always-zero exit status (this has
   bitten this repo once already).
-- `youtube.yml`: once a day (01:00 KST) + `workflow_dispatch` (`title_no`, `dry_run`). The **only**
+- `youtube.yml`: twice a day, 12h apart (01/13 KST) + `workflow_dispatch` (`title_no`, `dry_run`).
+  Two runs kept far apart (plus the per-run random 10–30 min jitter) to avoid a bot-like upload
+  cadence; a run with no eligible target just idles, so the ceiling stays 2 uploads/day. The **only**
   workflow that touches media — it installs `ffmpeg`/`fonts-nanum`/`yt-dlp` and builds a 1080p
   compilation, so it gets `timeout-minutes: 240` and `--work-root "$RUNNER_TEMP/..."` (the runner
   root's 14 GB is not enough; `$RUNNER_TEMP` has ~70 GB). Separate `concurrency: soopts-youtube` so
