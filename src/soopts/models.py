@@ -24,7 +24,8 @@ class MetaPart:
     idx: int
     file_info_key: str
     duration: int      # 파트 길이(초)
-    offset_s: int      # 전역 타임라인 시작 오프셋(초)
+    offset_s: int      # 전역 타임라인 시작 오프셋(초) — SOOP 플레이어/팬 타임라인 기준
+    file_order: int = 0  # SOOP file_order(1-base). 반환 파트 사이 빈 번호 = 응답에서 누락된 파트
 
 
 @dataclass

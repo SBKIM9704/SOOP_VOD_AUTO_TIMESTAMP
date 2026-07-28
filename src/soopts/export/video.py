@@ -296,10 +296,22 @@ def assert_parts_aligned(meta, m3u8s: list[str]) -> None:
     단일 파트면 offset 위험이 없어 통과. (마지막 파트만 틀리면 total_duration만 부정확하고
     어떤 곡의 offset도 안 미므로 통과 — `shifts_offsets`로 거른다.)
     """
+    from soopts.collector.media import (
+        omitted_parts_gap,
+        part_duration_mismatches,
+        playlist_total_s,
+    )
+
+    # 누락 파트 offset 분배가 모호하면(빈 자리 2곳 이상) 뒤 파트가 틀린 오디오일 수 있어 중단.
+    gap = omitted_parts_gap(meta.parts, meta.total_duration)
+    if gap and gap["ambiguous"]:
+        raise RuntimeError(
+            f"누락 파트 {gap['omitted_s']:.0f}s인데 빈 자리 {gap['gap_slots']}곳(order "
+            f"{gap['file_orders']}) → offset 자동 보정 불가, 곡 구간이 틀린 오디오일 위험. "
+            "빌드 중단(사람 확인 필요)."
+        )
     if len(meta.parts) < 2:
         return
-    from soopts.collector.media import part_duration_mismatches, playlist_total_s
-
     reals = [playlist_total_s(u) for u in m3u8s[:len(meta.parts)]]
     shifted = [m for m in part_duration_mismatches(meta.parts, reals) if m["shifts_offsets"]]
     if shifted:
