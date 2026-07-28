@@ -156,6 +156,17 @@ class VideoConfig:
     overlay_y: int = 40
     accent_bar_w: int = 7
     accent_color: str = "0xFFD24A@0.95"
+    # 연출 여백 — **빌드 시점에만** 적용하는 코스메틱 패딩이지 곡의 정확성 경계가 아니다.
+    # DB의 start_s/end_s(딥링크·식별의 진실)는 그대로 두고, 합본 클립만 앞으로 lead·뒤로
+    # tail만큼 늘린다. VOD 시작·파트 경계는 split_by_part가 클램프하므로 넘겨도 안전하다.
+    #
+    # **앞(intro_lead_s)은 기본 0이다.** 팬 타임라인 시각(start_s)은 이 스테이션에선 곡
+    # 시작을 정확히 짚는다고 판단해(원본 VOD 대조 확인) 인위적 전주 여백을 두지 않는다 —
+    # 앞으로 당기면 이전 곡 잡담이 물려 오히려 지저분해진다. 대신 뒤(outro_tail_s)만 줘서
+    # perf 검증에서 end_s를 곡 끝에 타이트하게 잡았을 때 마지막 음이 뚝 끊기지 않게 한다.
+    # 곡 성향 보며 soopts.toml에서 조정 가능(전주 여백이 필요하면 intro_lead_s만 올리면 됨).
+    intro_lead_s: float = 0.0
+    outro_tail_s: float = 7.0
     # 상한 — 러너 시간·디스크 예산의 안전판. 실측 최대가 30곡/109분이라 여유를 두고 잡았다.
     max_songs: int = 40
     max_total_minutes: float = 150.0

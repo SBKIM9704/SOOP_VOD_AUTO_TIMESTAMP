@@ -10,8 +10,7 @@ chapi.sooplive.co.kr의 비공식 댓글 API. 실제 캡처로 검증됐다(2026
 
 from __future__ import annotations
 
-import requests
-
+from soopts.collector.http import get_with_retry
 from soopts.config import Config
 from soopts.log import get_logger
 
@@ -31,11 +30,8 @@ def fetch_comments(cfg: Config, bj_id: str, title_no: str) -> list[str]:
     comments: list[str] = []
     page = 1
     while True:
-        resp = requests.get(
-            _COMMENT_URL.format(bj_id=bj_id, title_no=title_no),
-            params={"page": page},
-            headers={"User-Agent": cfg.collector.user_agent},
-            timeout=cfg.collector.timeout_s,
+        resp = get_with_retry(
+            cfg, _COMMENT_URL.format(bj_id=bj_id, title_no=title_no), params={"page": page}
         )
         resp.raise_for_status()
         data = resp.json()

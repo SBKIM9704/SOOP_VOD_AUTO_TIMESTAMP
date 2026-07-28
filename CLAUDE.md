@@ -109,11 +109,13 @@ This keeps `import soopts` cheap and lets `pyproject.toml`'s optional-dependency
 and the `songs` catalog) is owned by a separate private repo (`singgyul_sing_book`) — this codebase
 consumes it and never creates migrations. **Two DB axes on `performances`:** `identify_status` (which
 catalog song: `auto_matched`/`needs_review`/`confirmed`) and `local_review` (local verification state:
-`pending`/`verified`/`needs_human`, added 2026-07 for the `perf-review` skill). `vods.status` and these
-two are the state machine — the source of truth, not local files.
+`pending`/`verified`/`needs_human`, added 2026-07 for the `vod-review` skill's `perf` stage). `vods.status` and these
+two are the state machine — the source of truth, not local files. All machine performances (comment or
+local) start `local_review = 'pending'` and pass through `perf` — for comment VODs `perf`'s job is to
+fill the song **end** (`daily` writes only the trusted `start`; see North Star below).
 
 Historically this repo never created `songs` rows (unmatched → `needs_review` for a human). That's now
-relaxed for **one path only**: the `perf-review` skill inserts genuinely-new songs as `status='draft'`
+relaxed for **one path only**: the `vod-review` skill's `perf` stage inserts genuinely-new songs as `status='draft'`
 via `db.insert_draft_song` (the schema already had `songs.status` with a `draft` value). Drafts stay
 distinct from the real catalog until the review UI promotes them to `published`. Nothing else creates
 songs; catalog matching (`resolve_song_match`) still only links existing rows.
@@ -183,15 +185,28 @@ that the crew performed it. (The artist slot itself means different things per m
 whose *version* the BJ covered, under 🎵 it is the person who performed — `🎵 베베리 - 메가피스
 하모니(하데스)` is another streamer's guest spot, which never reaches this check.) Keep the list to stable
 team names; ad-hoc concert permutations (`챈솜초띵`/`솜띵`) are unbounded and are written 🎵 anyway.
-A new crew leaks group songs until it's added here — `vod-audit` is the backstop. The reverse error
+A new crew leaks group songs until it's added here — `vod-review`'s `audit` stage is the backstop. The reverse error
 (BJ solo-covering a crew's own song gets dropped) is accepted: this repo consistently prefers
 missing a song over recording a wrong one.
 
-`timeline_songs_to_spans()` turns each 🎤 song into a span: `start = timestamp`, `end = next song's
-start` capped at 6 min (deep-links only need the start; the cap keeps inter-song talk out of the
-"length"). `_record_songs()` then matches each by title/artist (`resolve_song_match`) and writes
-`performances`. This replaced the old Groq `extract_song_timeline` (missed songs — 201933359 got 2 of
-12) + per-region download + `inaSpeechSegmenter` + Whisper + Groq lyric-guess pipeline.
+`timeline_songs_to_spans()` turns each 🎤 song into a span with `start = timestamp` and **`end = start`
+(a 0-length sentinel meaning "end undetermined")**. `_record_songs()` matches each by title/artist
+(`resolve_song_match`) and writes `performances` with `local_review = 'pending'`. This replaced the old
+Groq `extract_song_timeline` (missed songs — 201933359 got 2 of 12) + per-region download +
+`inaSpeechSegmenter` + Whisper + Groq lyric-guess pipeline.
+
+**North Star — `start` is the truth (comment/`daily`), `end` is decided locally (`perf`).** The fan's
+`start = timestamp` is used verbatim and *never* corrected (a human wrote it — always accurate, even
+where they marked a song's hook rather than its first note, so a clip may start mid-song — accepted).
+But the **end** of a song can't be known from the comment: the old "next song start, capped 6 min" was a
+bad clip boundary (whole inter-song chatter). So `daily` writes only `start`, leaving `end_s = start_s`
+(sentinel), and the real end is filled by the **`perf` stage** (transcribe forward from `start`, find
+where the vocals stop). `end_s` is `NOT NULL`, so the sentinel is `start_s` rather than NULL;
+`plan_songs` drops `dur <= 0`, so a sentinel-end performance is never buildable until `perf` fills the
+end — a **pull model**: only VODs a human has finished (end set → `local_review = 'verified'`) reach the
+YouTube gate. A comment song whose title didn't match the catalog is `identify_status = needs_review`
+and also stays blocked until a human resolves the match. So `perf` now runs for **all** pending
+performances — comment VODs (to fill the end) and local-ingest VODs (to confirm the human's span).
 
 **No timeline (0 🎤 songs) → `manual`, not processed.** `_process_vod` returns `{"no_timeline": True}`
 and `run_daily` marks `vods.status = 'manual'`. This covers game-only streams, all-🎵 concert VODs,
@@ -202,10 +217,10 @@ or re-picked. A human processes it locally (`analyze_vod.py` → `soopts ingest`
 Reprocessing is idempotent: `clear_machine_performances()` drops the prior run's rows (sparing
 `confirmed`) before re-inserting.
 
-**Auditing processed VODs — the `vod-audit` skill, not code.** The 🎤-only rule is safe (no false
-positives) but incomplete: a 🎤+🎵 mixed VOD records only its 🎤 songs and is marked `analyzed`, so the
-🎵 ones are silently missed. Deciding whether such a VOD (or a game/chat/teaser timeline) was handled
-right is a judgment call, so it lives in `.claude/skills/vod-audit/`, where **Claude reads the raw
+**Auditing processed VODs — the `vod-review` skill's `audit` stage, not code.** The 🎤-only rule is
+safe (no false positives) but incomplete: a 🎤+🎵 mixed VOD records only its 🎤 songs and is marked
+`analyzed`, so the 🎵 ones are silently missed. Deciding whether such a VOD (or a game/chat/teaser
+timeline) was handled right is a judgment call, so it lives in the skill, where **Claude reads the raw
 comments and decides**. Code only exposes deterministic primitives the skill orchestrates:
 - `soopts vods --status analyzed,done --json` (`db.fetch_vods_by_status` + perf counts) — worklist.
 - `soopts comments <id> --json` (`fetch_comments`, no Groq) — raw comments, the judgment input.
@@ -215,17 +230,28 @@ comments and decides**. Code only exposes deterministic primitives the skill orc
 The skill never applies destructive changes without user approval. Don't re-add a code-based `recheck`
 that auto-judges and deletes — that's what this replaced.
 
-**Local skills (three).** All human-run; the headless `daily` runner can't call skills.
-- `.claude/skills/manual-ingest/` — process `manual` VODs: `analyze_vod.py` full transcript → Claude
-  picks BJ solo full songs → `soopts ingest`.
-- `.claude/skills/perf-review/` — **re-verify + enrich recorded performances** (the `local_review`
-  axis). Per performance it re-transcribes the `[start_s, end_s]` segment and Claude checks: real song?
-  BJ solo? boundaries right? then fills accurate lyrics/title, links `song_id` (or inserts a `draft`
-  song), and sets `local_review = verified` (all good) or `needs_human` (real-song/BJ doubt or
-  unidentifiable). Same code-does-I/O, Claude-decides split as vod-audit.
-- `.claude/skills/vod-audit/` — audit VOD-level classification against comments (above).
+**Local review — one skill, `.claude/skills/vod-review/`, three stages.** All human-run; the headless
+`daily` runner can't call skills. A single router skill (`/vod-review`) shows the queue and dispatches
+by DB state to one of three stage files (progressive disclosure: `SKILL.md` holds the router +
+shared "what is a BJ solo full song" judgment rule; each stage's procedure lives in its own file):
+- `audit.md` — audit VOD-level classification against raw comments (above); no media. `analyzed/done`
+  VODs → catches missed songs / crew false-positives / misclassification → `keep` or `to-manual`.
+- `ingest.md` — process `manual` VODs: `analyze_vod.py` full transcript → Claude picks BJ solo full
+  songs → `soopts ingest`. The heavy stage (full-VOD transcription).
+- `perf.md` — **re-verify + enrich recorded performances** (the `local_review` axis). Per performance
+  it re-transcribes the `[start_s, end_s]` segment and Claude checks: real song? BJ solo? boundaries
+  right? then fills accurate lyrics/title, links `song_id` (or inserts a `draft` song), and sets
+  `local_review = verified` (all good) or escalates via `identify_status = needs_review` (real-song/BJ
+  doubt or unidentifiable). Same code-does-I/O, Claude-decides split across all three stages.
 
-Primitives these skills orchestrate (all in `cli.py`/`db.py`, no Groq except match/transcribe):
+These stages form one pipeline: `daily` output → audit triages `analyzed/done` (may push to `manual`)
+→ ingest recovers `manual` into `analyzed` → perf verifies every `local_review = pending` performance.
+Consolidated 2026-07-23 from three separate skills (`vod-audit`/`manual-ingest`/`perf-review`).
+**`perf` runs for every pending performance** — for comment VODs its main job is filling the song `end`
+(`daily` left it as the `start_s` sentinel); for ingest VODs it confirms the human's span. `start` is
+never moved on a comment VOD (it's the trusted fan value).
+
+Primitives these stages orchestrate (all in `cli.py`/`db.py`, no Groq except match/transcribe):
 - `soopts perfs [--identify S] [--local S] --json` (`db.fetch_performances`) — performance worklist.
 - `soopts transcribe <vod> --start --end [--lang]` — download+Whisper just that segment.
 - `soopts match-song --title --artist [--lyrics]` (`resolve_song_match`) — catalog lookup → song_id/null.
@@ -270,12 +296,16 @@ and `lyrics_only` stays 0 by design.
 - `verify-env.yml` (manual): confirms SOOP's API/streams are reachable from a hosted-runner IP before
   relying on `daily.yml`. If it starts failing, only `runs-on` needs to change to a
   self-hosted runner — nothing else.
-- `daily.yml`: scheduled every 6h (04/10/16/22 KST) + `workflow_dispatch`. It pipes
+- `daily.yml`: scheduled every 6h — 4×/day (10/16/22/04 KST) — + `workflow_dispatch`. One VOD per
+  run (`daily_vod_count = 1`); throughput is raised by narrowing the schedule, not by bumping the
+  count, so the "one VOD per run" failure isolation (a killed run costs at most one VOD) holds. It pipes
   `soopts ... | tee *.log` and relies
   on the exit code to detect failure — any `run:` step doing this **must** start with
   `set -o pipefail`, or a crash in `soopts` gets masked by `tee`'s always-zero exit status (this has
   bitten this repo once already).
-- `youtube.yml`: once a day (01:00 KST) + `workflow_dispatch` (`title_no`, `dry_run`). The **only**
+- `youtube.yml`: twice a day, 12h apart (01/13 KST) + `workflow_dispatch` (`title_no`, `dry_run`).
+  Two runs kept far apart (plus the per-run random 10–30 min jitter) to avoid a bot-like upload
+  cadence; a run with no eligible target just idles, so the ceiling stays 2 uploads/day. The **only**
   workflow that touches media — it installs `ffmpeg`/`fonts-nanum`/`yt-dlp` and builds a 1080p
   compilation, so it gets `timeout-minutes: 240` and `--work-root "$RUNNER_TEMP/..."` (the runner
   root's 14 GB is not enough; `$RUNNER_TEMP` has ~70 GB). Separate `concurrency: soopts-youtube` so
@@ -326,6 +356,25 @@ selection rule is as strict as it is. A human fixes mistakes in YouTube Studio, 
   `work/x/ytbuild/work/x/ytbuild/…` and every input failed to open.
 - **Chapter/link offsets come from `ffprobe`, not from the requested `-t`.** A clip that ends early
   would otherwise shift every later chapter.
+- **Clip start = `start_s`, always — the fan comment timeline is the truth.** `start_s` is the fan-written
+  timestamp; the build cuts there and never second-guesses it. A 2026-07 experiment stored a per-song
+  `youtube_start_s` override (the "real" vocal onset found by transcription, since the fan often marks a
+  song's *hook* deep into it — part-1 songs of multi-part VODs sat 45–133 s past their first vocal) so the
+  video could start at the song while the deep link kept the comment time. It was reverted: transcription
+  onset detection was error-prone (a masked first line behind a vocal warm-up fooled it) and the firm rule
+  is that a human-written timeline is always correct. So a compilation clip may begin mid-song where the fan
+  marked the hook — that is accepted, not a bug.
+- **Clip end = the `perf`-filled `end_s`, never the `daily` sentinel.** `daily` writes `end_s = start_s`
+  (comment can't tell where a song ends); `plan_songs` drops `dur <= 0`, so a comment VOD is unbuildable
+  until the `perf` stage transcribes forward and sets the real end. Only fully-`perf`'d VODs (every song
+  `verified` with a real end) pass the YouTube gate — a **pull model**, no auto-rollout.
+- **Intro/outro padding (`video.intro_lead_s`/`outro_tail_s`) is build-only cosmetics, not the span.**
+  `padded_bounds` widens each clip by `intro_lead_s` up front (clamped at 0) and `outro_tail_s` at the
+  end — `split_by_part` clamps a tail past the VOD/part end. **`intro_lead_s` defaults to 0** and
+  `outro_tail_s` to 7, so a `perf`-tightened `end_s` doesn't clip the final note but no artificial intro
+  is added. The DB `performances.start_s`/`end_s` stay untouched; only the video clip and its
+  `?t=`/chapter (the padded clip start) get the tail. Keep presentation padding out of the verification
+  stages — the render layer owns aesthetics, not correctness boundaries.
 - **The overlay is two auto-sized ribbons, not a fixed panel.** Song titles vary wildly in length, so
   each line gets `drawtext`'s own `box` (which hugs the text) instead of a `drawbox` panel with a
   guessed width. The left accent bar is drawn *after* the ribbons — drawn first, the ribbon boxes

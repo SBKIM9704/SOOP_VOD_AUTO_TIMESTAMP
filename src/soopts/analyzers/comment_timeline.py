@@ -7,7 +7,7 @@
 🎤가 없는 항목(옛 포맷의 아이콘 없는 곡, 🎵로 적힌 게스트/합방 공연 등)은 서버에서 세지 않는다
 — "노래인지" 코드가 확신할 수 없어서다. 그런 VOD(🎤가 하나도 없음)는 타임라인 없음으로 취급돼
 manual→로컬 처리로 넘어가고, analyze_vod.py 전체 전사로 판단한다. 놓치거나 잘못 잡은 건
-`vod-audit` 스킬(Claude가 원본 댓글 판정)이 사후 교정한다.
+`vod-review`의 audit 단계(Claude가 원본 댓글을 판정)가 사후 교정한다.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ _REF_KEYWORDS = ("편집본", "클립이슈", "틀어놓", "티저", "뮤비", "
 #
 # 넣고 빼는 기준: 이 스테이션에서 반복 등장하는 **고정 팀명**만 넣는다. 콘서트 즉석 조합
 # (`챈솜초띵`/`솜띵` 같은 순열)은 무한하고 애초에 🎵로 적혀 파싱되지 않으므로 넣지 않는다.
-# 새 크루가 생기면 여기 추가하기 전까지 그룹곡이 섞일 수 있는데, 그건 `vod-audit`이 잡는다.
+# 새 크루가 생기면 여기 추가하기 전까지 그룹곡이 섞일 수 있는데, 그건 `vod-review`(audit 단계)가 잡는다.
 # 반대 방향 오류(크루 자작곡을 BJ가 솔로로 불렀는데 제외됨)도 가능하지만, 이 저장소는
 # 일관되게 **놓치는 쪽**을 택한다 — 잘못 기록된 딥링크(혼자 안 부른 곡)가 더 나쁘다.
 _CREW_NAMES = ("바보즈", "하데스", "키띵초")
@@ -127,25 +127,22 @@ def no_timeline_note(comments: list[str]) -> str:
 
 
 def timeline_songs_to_spans(
-    songs: list[TimelineSong], duration_s: int | None = None, *, max_song_s: int = 360
+    songs: list[TimelineSong], duration_s: int | None = None
 ) -> list[dict]:
-    """TimelineSong 목록 → ingest용 span dict 목록. 순수 함수.
+    """TimelineSong 목록 → span dict 목록. 순수 함수.
 
-    타임라인은 곡 **시작 시각**만 주므로 끝은 추정한다: `end = 다음 곡 시작`, 단 최대 곡
-    길이(기본 6분)로 캡한다 — 곡 사이 잡담 구간이 end로 과대 반영되는 걸 막는다. 마지막 곡은
-    `start + max_song_s`(VOD 길이로 캡). 산출물은 곡 시작 딥링크라 끝 정밀도는 부차적이다.
+    타임라인은 곡 **시작 시각**만 주고, 끝은 미디어를 봐야 알 수 있다(다음 곡 시작은 곡 사이
+    잡담이 통째로 물려 클립 경계로 나쁘다). 그래서 `end_s = start_s`(0길이 = "end 미정") 센티넬로
+    두고, 실제 끝은 로컬 `perf` 검증에서 채운다. `plan_songs`가 dur<=0을 드롭하므로 end가 채워지기
+    전까진 영상 빌드 대상이 아니다(pull 방식). 딥링크는 start만 쓰므로 여기선 start만이 진실이다.
+
+    `duration_s`는 시그니처 호환용으로 받되 쓰지 않는다(end를 추정하지 않으므로).
     """
     ordered = sorted(songs, key=lambda s: s.time_s)
-    spans: list[dict] = []
-    for i, s in enumerate(ordered):
-        nxt = ordered[i + 1].time_s if i + 1 < len(ordered) else (duration_s or s.time_s + max_song_s)
-        end = min(nxt, s.time_s + max_song_s)
-        if duration_s:
-            end = min(end, duration_s)
-        if end <= s.time_s:  # 같은 시각 중복 등 — 최소 길이 보장
-            end = s.time_s + max_song_s
-        spans.append({"start_s": s.time_s, "end_s": end, "title": s.title, "artist": s.artist or ""})
-    return spans
+    return [
+        {"start_s": s.time_s, "end_s": s.time_s, "title": s.title, "artist": s.artist or ""}
+        for s in ordered
+    ]
 
 
 # 예전 이름 호환 — batch.py는 이 이름으로 호출한다.

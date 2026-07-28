@@ -199,7 +199,7 @@ def cmd_ingest(args) -> int:
 
 
 def cmd_vods(args) -> int:
-    """처리된 VOD 목록 + performance 수를 출력 — vod-audit 스킬의 감사 대상 조회용.
+    """처리된 VOD 목록 + performance 수를 출력 — vod-review(audit 단계)의 감사 대상 조회용.
 
     판정을 하지 않는 순수 조회 명령이다(Groq 없음). 어떤 VOD가 잘못 처리됐는지는 스킬
     안에서 Claude가 `soopts comments`로 원본 댓글을 읽고 정한다. 필요 env: SUPABASE_URL,
@@ -211,12 +211,15 @@ def cmd_vods(args) -> int:
 
     statuses = [s.strip() for s in args.status.split(",") if s.strip()]
     rows = db.fetch_vods_by_status(statuses)
+    if args.source:  # 출처 라벨 필터 — "댓글 아닌 것(local)만 내가 검토" 같은 용도
+        rows = [r for r in rows if r.get("source") == args.source]
     out = [
         {
             "id": r["id"],
             "title_no": r["soop_title_no"],
             "title": r.get("title") or "",
             "status": r.get("status"),
+            "source": r.get("source"),  # comment=댓글 타임라인 / local=로컬 전사 ingest
             "duration_s": r.get("duration_s"),
             "note": r.get("error"),  # manual 사유 메모(로컬 처리 우선순위 힌트)
             "machine_perfs": db.count_machine_performances(r["id"]),
@@ -227,18 +230,19 @@ def cmd_vods(args) -> int:
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
-        print(f"status={statuses} — {len(out)}건")
+        print(f"status={statuses}{f' source={args.source}' if args.source else ''} — {len(out)}건")
         for o in out:
             note = f" · {o['note']}" if o["note"] else ""
+            src = f" <{o['source']}>" if o["source"] else ""
             print(
-                f"  {o['title_no']} [{o['status']}] {o['title']} "
+                f"  {o['title_no']} [{o['status']}]{src} {o['title']} "
                 f"— 기계 {o['machine_perfs']} / confirmed {o['confirmed_perfs']}{note}"
             )
     return 0
 
 
 def cmd_comments(args) -> int:
-    """VOD 원본 댓글을 출력 — vod-audit 스킬이 노래 타임라인 유무를 Claude로 판정하는 입력.
+    """VOD 원본 댓글을 출력 — vod-review(audit 단계)가 노래 타임라인 유무를 Claude로 판정하는 입력.
 
     Groq를 쓰지 않는 순수 조회다(코드가 노래/게임/티저를 구분하지 않는다 — 그건 스킬 안의
     Claude 몫). 필요 env: (없음, 공개 댓글 API).
@@ -266,8 +270,53 @@ def cmd_comments(args) -> int:
     return 0
 
 
+def cmd_verify_parts(args) -> int:
+    """멀티파트 VOD의 SOOP 보고 duration을 실제 m3u8 길이와 대조 — 오프셋/딥링크 오염 감사.
+
+    daily는 미디어를 안 만지므로(yt-dlp 없음) 이 로컬 audit에 둔다. 앞 파트 duration이 실제와
+    어긋나면 뒤 파트 전역 offset이 통째로 밀려, 댓글 🎤 start_s가 엉뚱한 오디오를 가리키고
+    딥링크가 조용히 틀어진다. 종료코드 1 = offset을 미는 mismatch 있음.
+    """
+    import json as _json
+
+    from soopts.collector.media import (
+        part_duration_mismatches,
+        playlist_total_s,
+        resolve_m3u8_list,
+    )
+    from soopts.collector.meta import fetch_meta
+
+    cfg, vod_id, work = _ctx(args)
+    meta = fetch_meta(cfg, vod_id, work, force=args.force)
+    if len(meta.parts) < 2:
+        print(f"VOD {vod_id}: 단일 파트 — offset 오염 위험 없음")
+        return 0
+    m3u8s = resolve_m3u8_list(args.vod, cfg.clip.quality)
+    reals = [playlist_total_s(u) for u in m3u8s[:len(meta.parts)]]
+    mism = part_duration_mismatches(meta.parts, reals)
+    if args.json:
+        print(_json.dumps({
+            "title_no": vod_id,
+            "parts": [{"idx": p.idx, "offset_s": p.offset_s, "reported": p.duration,
+                       "real": r} for p, r in zip(meta.parts, reals, strict=False)],
+            "mismatches": mism,
+        }, ensure_ascii=False, indent=2))
+        return 1 if any(m["shifts_offsets"] for m in mism) else 0
+    for p, r in zip(meta.parts, reals, strict=False):
+        print(f"part{p.idx} offset={p.offset_s:>6} 보고={p.duration:>6} 실제={r:>7.0f}")
+    if not mism:
+        print("✓ 모든 파트 duration 일치 — 전역 offset·딥링크 안전")
+        return 0
+    for m in mism:
+        tag = ("⚠️ 뒤 파트 offset 오염 → 댓글 start_s/딥링크 틀어짐"
+               if m["shifts_offsets"] else "총길이만 부정확(offset 안전)")
+        print(f"✗ part{m['idx']}: 보고 {m['reported']:.0f}s vs 실제 {m['real']:.0f}s "
+              f"(Δ{m['diff']:+.0f}s) — {tag}")
+    return 1 if any(m["shifts_offsets"] for m in mism) else 0
+
+
 def cmd_set_manual(args) -> int:
-    """VOD 하나를 'manual'로 되돌린다 — vod-audit 스킬이 Claude 판정 후 호출하는 적용 명령.
+    """VOD 하나를 'manual'로 되돌린다 — vod-review(audit 단계)가 Claude 판정 후 호출하는 적용 명령.
 
     --clear-machine면 기계 생성 performances를 먼저 지운다(confirmed는 보존). 판정은 스킬
     안의 Claude가 하고, 이 명령은 결정된 VOD에만 결정론적으로 적용한다. 필요 env:
@@ -288,7 +337,7 @@ def cmd_set_manual(args) -> int:
 
 
 def cmd_perfs(args) -> int:
-    """performance 목록을 출력 — perf-review 스킬의 로컬 검증 대상 조회용.
+    """performance 목록을 출력 — vod-review(perf 단계)의 로컬 검증 대상 조회용.
 
     필터: --identify(identify_status), --local(local_review). 각 행에 title_no·시각·추측제목·
     lyrics 유무를 얹는다. Groq 없이 순수 조회. 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
@@ -323,7 +372,7 @@ def cmd_perfs(args) -> int:
 
 
 def cmd_set_perf(args) -> int:
-    """performance 한 행을 갱신 — perf-review 스킬이 로컬 검증·보강 결과를 적용.
+    """performance 한 행을 갱신 — vod-review(perf 단계)가 로컬 검증·보강 결과를 적용.
 
     보내지 않은 필드는 그대로 둔다. 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
     """
@@ -344,7 +393,7 @@ def cmd_set_perf(args) -> int:
 
 
 def cmd_add_song(args) -> int:
-    """songs에 draft 신곡을 삽입하고 song_id를 출력 — 무-카탈로그 곡 등록(perf-review).
+    """songs에 draft 신곡을 삽입하고 song_id를 출력 — 무-카탈로그 곡 등록(vod-review perf 단계).
 
     status는 기본 'draft'(검수 UI가 published로 승격 전까지 정식 카탈로그와 구분). 필요 env:
     SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
@@ -359,7 +408,7 @@ def cmd_add_song(args) -> int:
 
 
 def cmd_match_song(args) -> int:
-    """제목/가수(+가사)를 카탈로그에 매칭해 결과를 JSON으로 — perf-review가 재식별 후 확인용.
+    """제목/가수(+가사)를 카탈로그에 매칭해 결과를 JSON으로 — vod-review(perf 단계)가 재식별 후 확인용.
 
     resolve_song_match(ingest와 동일 로직)를 재사용한다. song_id가 나오면 카탈로그에 있는 것,
     null이면 신곡(draft 삽입 대상). 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GROQ_API_KEY.
@@ -379,7 +428,7 @@ def cmd_match_song(args) -> int:
 
 
 def cmd_transcribe(args) -> int:
-    """VOD의 [start,end] 구간만 받아 Whisper로 전사·출력 — perf-review 스킬의 검증 입력.
+    """VOD의 [start,end] 구간만 받아 Whisper로 전사·출력 — vod-review(perf 단계)의 검증 입력.
 
     구간만 받으므로(멀티파트 안전) 긴 VOD도 빠르다. 캐시는 work/{id}/clips/에 남는다.
     필요 env: GROQ_API_KEY (전사).
@@ -594,15 +643,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "vods",
-        help="처리된 VOD 목록 + performance 수 조회 (vod-audit 스킬용, 판정 안 함)",
+        help="처리된 VOD 목록 + performance 수 조회 (vod-review(audit 단계)용, 판정 안 함)",
     )
     sp.add_argument("--status", default="analyzed,done", help="쉼표구분 status 필터(기본: analyzed,done)")
+    sp.add_argument("--source", choices=["comment", "local"], default=None,
+                    help="출처 라벨 필터(comment=댓글 타임라인 / local=로컬 전사 ingest)")
     sp.add_argument("--json", action="store_true", help="JSON 출력")
     sp.set_defaults(func=cmd_vods)
 
     sp = sub.add_parser(
         "comments",
-        help="VOD 원본 댓글 출력 (vod-audit 스킬이 노래 타임라인 유무를 판정하는 입력)",
+        help="VOD 원본 댓글 출력 (vod-review(audit 단계)가 노래 타임라인 유무를 판정하는 입력)",
     )
     add_vod(sp)
     sp.add_argument("--json", action="store_true", help="JSON 출력")
@@ -610,8 +661,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_comments)
 
     sp = sub.add_parser(
+        "verify-parts",
+        help="멀티파트 VOD의 SOOP 보고 duration을 실제 m3u8과 대조 (오프셋/딥링크 오염 감사)",
+    )
+    add_vod(sp)
+    sp.add_argument("--json", action="store_true", help="JSON 출력")
+    sp.add_argument("--force", action="store_true", help="meta 캐시 무시하고 재조회")
+    sp.set_defaults(func=cmd_verify_parts)
+
+    sp = sub.add_parser(
         "set-manual",
-        help="VOD 하나를 manual로 되돌림 (vod-audit 스킬이 Claude 판정 후 적용)",
+        help="VOD 하나를 manual로 되돌림 (vod-review(audit 단계)가 Claude 판정 후 적용)",
     )
     add_vod(sp)
     sp.add_argument("--clear-machine", action="store_true",
@@ -619,14 +679,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_set_manual)
 
     sp = sub.add_parser(
-        "perfs", help="performance 목록 조회 (perf-review 스킬용, 판정 안 함)")
+        "perfs", help="performance 목록 조회 (vod-review(perf 단계)용, 판정 안 함)")
     sp.add_argument("--identify", help="identify_status 필터(needs_review/auto_matched/confirmed 등)")
     sp.add_argument("--local", help="local_review 필터(pending/verified/needs_human)")
     sp.add_argument("--json", action="store_true", help="JSON 출력")
     sp.set_defaults(func=cmd_perfs)
 
     sp = sub.add_parser(
-        "set-perf", help="performance 갱신 (perf-review 스킬이 로컬 검증·보강 적용)")
+        "set-perf", help="performance 갱신 (vod-review(perf 단계)가 로컬 검증·보강 적용)")
     sp.add_argument("perf_id", type=int, help="performance id")
     sp.add_argument("--start-s", type=int, dest="start_s")
     sp.add_argument("--end-s", type=int, dest="end_s")
@@ -648,14 +708,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_add_song)
 
     sp = sub.add_parser(
-        "match-song", help="제목/가수를 카탈로그에 매칭 → song_id JSON (perf-review 재식별용)")
+        "match-song", help="제목/가수를 카탈로그에 매칭 → song_id JSON (vod-review perf 재식별용)")
     sp.add_argument("--title", required=True)
     sp.add_argument("--artist")
     sp.add_argument("--lyrics")
     sp.set_defaults(func=cmd_match_song)
 
     sp = sub.add_parser(
-        "transcribe", help="VOD의 [start,end] 구간만 받아 Whisper 전사·출력 (perf-review용)")
+        "transcribe", help="VOD의 [start,end] 구간만 받아 Whisper 전사·출력 (vod-review perf 단계용)")
     add_vod(sp)
     sp.add_argument("--start", type=float, required=True, help="시작 초")
     sp.add_argument("--end", type=float, required=True, help="끝 초")

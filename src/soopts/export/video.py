@@ -35,9 +35,10 @@ class ClipPlacement:
     perf_id: int
     title: str
     artist: str
-    source_start_s: float     # 원본 VOD 절대초(설명의 원본 딥링크용)
-    # 곡이 곧바로 시작하므로 챕터 시작과 노래 시작이 같다. 둘을 나눠 두었던 건 곡 앞에 제목
-    # 카드를 3초 붙이던 시절의 흔적인데, 카드를 없애면서 구분할 이유가 사라졌다.
+    source_start_s: float     # 원본 VOD 절대초(=start_s, 팬 댓글 시각) — 설명의 원본 딥링크용
+    # offset_s는 합본 안에서 이 클립이 놓인 위치 = 챕터 시작 = ?t= 타깃. intro_lead_s(기본 0)만큼
+    # 앞당긴 클립 시작을 그대로 쓴다(챕터 마커와 클립 경계가 어긋나지 않게). 딥링크는 여백과
+    # 무관한 원본 시각이 필요하므로 source_start_s를 따로 둔다.
     offset_s: float           # 합본 내 시작초 = 챕터 시작 = performances.youtube_url의 ?t=
     duration_s: float
 
@@ -70,6 +71,20 @@ def plan_songs(cfg: Config, perfs: list[dict]) -> tuple[list[dict], list[dict]]:
         kept.append(p)
         total += dur
     return kept, dropped
+
+
+def padded_bounds(cfg: Config, perf: dict) -> tuple[float, float]:
+    """연출 여백을 준 합본 클립의 (시작, 끝) 절대초 — 순수 함수.
+
+    시작은 `start_s`(=팬 댓글 시각, 진실)에서 `intro_lead_s`만큼 앞으로(0 밑으로는 안 감), 끝은
+    `end_s`에서 `outro_tail_s`만큼 뒤로 민다. 댓글 타임라인이 곧 시작의 진실이므로 전사·오버라이드로
+    시작을 바꾸지 않는다 — 여백만 붙일 뿐 DB의 start_s/end_s는 그대로다. 파트 끝을 넘는 tail은
+    split_by_part가 파트 끝으로 클램프한다.
+    """
+    v = cfg.video
+    s = max(0.0, float(perf["start_s"]) - v.intro_lead_s)
+    e = float(perf["end_s"]) + v.outro_tail_s
+    return s, e
 
 
 def build_concat_list(paths: list[Path]) -> str:
@@ -271,6 +286,33 @@ def resolve_playlists(cfg: Config, title_no: str) -> list[str]:
         return resolve_m3u8_list(title_no, cfg.video.fallback_quality)
 
 
+def assert_parts_aligned(meta, m3u8s: list[str]) -> None:
+    """멀티파트 VOD의 SOOP 보고 duration이 실제 m3u8과 맞는지 확인 — 다운로드 전 하드 게이트.
+
+    앞 파트 duration이 실제와 어긋나면 뒤 파트 전역 offset이 통째로 밀려, 모든 곡 구간이
+    엉뚱한 오디오로 받아진다(딥링크/챕터는 맞는데 오디오만 틀린 합본). 되돌릴 수 없는
+    업로드라 한 곡만 건너뛰는 게 아니라 **VOD 전체 빌드를 중단**한다 — 호출부(run_youtube_upload)
+    의 except가 Slack로 알리고 종료하며, youtube_status는 NULL로 남아 다음 날 재시도된다.
+    단일 파트면 offset 위험이 없어 통과. (마지막 파트만 틀리면 total_duration만 부정확하고
+    어떤 곡의 offset도 안 미므로 통과 — `shifts_offsets`로 거른다.)
+    """
+    if len(meta.parts) < 2:
+        return
+    from soopts.collector.media import part_duration_mismatches, playlist_total_s
+
+    reals = [playlist_total_s(u) for u in m3u8s[:len(meta.parts)]]
+    shifted = [m for m in part_duration_mismatches(meta.parts, reals) if m["shifts_offsets"]]
+    if shifted:
+        detail = ", ".join(
+            f"part{m['idx']} 보고{m['reported']:.0f}≠실제{m['real']:.0f}(Δ{m['diff']:+.0f}s)"
+            for m in shifted
+        )
+        raise RuntimeError(
+            "멀티파트 duration 불일치 → 곡 구간 offset이 밀려 틀린 오디오가 합본에 들어감. "
+            f"빌드 중단: {detail}"
+        )
+
+
 def _download_song_pieces(
     cfg: Config, perf: dict, m3u8s: list[str], parts, out_dir: Path, idx: int
 ) -> list[tuple[Path, float, float]]:
@@ -280,7 +322,7 @@ def _download_song_pieces(
     """
     from soopts.collector.media import download_slice, slice_lead_s, split_by_part
 
-    s, e = float(perf["start_s"]), float(perf["end_s"])
+    s, e = padded_bounds(cfg, perf)   # 전주·여운 여백 포함(빌드 전용, DB는 그대로)
     spans = split_by_part(s, e, parts, m3u8s)
     if not spans:
         return []
@@ -317,6 +359,7 @@ def build_vod_video(
         log.warning("상한/구간 문제로 제외된 곡 %d개 (max_songs=%d, max_total_minutes=%.0f)",
                     len(dropped), cfg.video.max_songs, cfg.video.max_total_minutes)
     m3u8s = resolve_playlists(cfg, title_no)
+    assert_parts_aligned(meta, m3u8s)   # 파트 offset이 밀리면 여기서 전체 중단(틀린 오디오 업로드 방지)
 
     segments: list[Path] = []       # concat에 들어갈 클립(파트에 걸친 곡은 2개 이상)
     placements: list[ClipPlacement] = []

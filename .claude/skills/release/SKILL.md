@@ -200,4 +200,28 @@ git branch -f main origin/main
 
 - 검증: `git show main:pyproject.toml | grep -m1 '^version'` 이 `version = "$VERSION"` 인지,
   `git rev-list -n1 v$VERSION`가 `origin/main` HEAD와 같은지 확인한다.
-- 최종적으로 PR URL, 버전(`v$VERSION`), 태그 커밋 해시를 출력한다. 현재 브랜치는 `develop` 유지.
+
+### 9. GitHub Release 생성
+
+**8단계에서 태그가 `origin/main`을 정확히 가리킨다고 검증된 뒤에만** 실행한다(잘못된 태그에
+릴리즈가 붙는 것을 방지). 릴리즈 노트는 **3단계에서 만든 CHANGELOG의 `v$VERSION` 섹션 본문을
+그대로 재사용**한다(PR 본문과 동일 소스).
+
+이미 릴리즈가 있는지 확인한다(멱등성 — 재실행 안전):
+
+```bash
+gh release view "v$VERSION" >/dev/null 2>&1 && echo EXISTS || echo NONE
+```
+
+- `NONE`이면 생성한다. 이미 push된 태그를 그대로 쓰도록 `--verify-tag`를 붙이고, 노트는
+  CHANGELOG 섹션을 파일로 넘긴다(따옴표·이스케이프 문제 회피):
+  ```bash
+  # CHANGELOG.md에서 v$VERSION 섹션만 추출해 임시 파일에 쓴 뒤(헤더 다음 줄부터 다음 "## " 전까지),
+  awk '/^## \[v'"$VERSION"'\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > /tmp/relnotes-$VERSION.md
+  gh release create "v$VERSION" --title "v$VERSION" --notes-file /tmp/relnotes-$VERSION.md --verify-tag --latest
+  ```
+- `EXISTS`이면 생성을 건너뛴다(덮어쓰지 않는다). 노트를 갱신하려면 사용자에게 알린 뒤
+  `gh release edit "v$VERSION" --notes-file ...`로만 수정한다.
+
+- 최종적으로 PR URL, 버전(`v$VERSION`), 태그 커밋 해시, **릴리즈 URL**을 출력한다.
+  현재 브랜치는 `develop` 유지.

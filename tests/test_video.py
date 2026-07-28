@@ -2,8 +2,27 @@
 
 from pathlib import Path
 
+import pytest
+
+import soopts.collector.media as media
 from soopts.config import Config
-from soopts.export.video import build_concat_list, plan_songs
+from soopts.export.video import (
+    assert_parts_aligned,
+    build_concat_list,
+    padded_bounds,
+    plan_songs,
+)
+from soopts.models import MetaPart
+
+
+class _Meta:
+    """parts만 있는 최소 meta 스텁 — assert_parts_aligned 테스트용."""
+
+    def __init__(self, *durations: int):
+        off, self.parts = 0, []
+        for i, d in enumerate(durations):
+            self.parts.append(MetaPart(idx=i, file_info_key=f"k{i}", duration=d, offset_s=off))
+            off += d
 
 
 def _cfg(**over) -> Config:
@@ -46,6 +65,31 @@ def test_plan_songs_respects_total_minutes():
     assert [p["id"] for p in dropped] == [3]
 
 
+def test_padded_bounds_adds_lead_and_tail():
+    """전주 여백만큼 앞으로, 여운만큼 뒤로 — DB 값은 안 건드리고 빌드 클립만 늘린다."""
+    s, e = padded_bounds(_cfg(intro_lead_s=10.0, outro_tail_s=4.0), _perf(1, 100, 250))
+    assert (s, e) == (90.0, 254.0)
+
+
+def test_padded_bounds_clamps_lead_at_zero():
+    """VOD 시작 근처 곡은 여백이 0 밑으로 내려가지 않는다."""
+    s, e = padded_bounds(_cfg(intro_lead_s=10.0, outro_tail_s=4.0), _perf(1, 5, 200))
+    assert s == 0.0
+    assert e == 204.0
+
+
+def test_padded_bounds_zero_padding_is_identity():
+    """여백을 0으로 두면 원래 경계 그대로 — 패딩 기능을 끌 수 있다."""
+    s, e = padded_bounds(_cfg(intro_lead_s=0.0, outro_tail_s=0.0), _perf(1, 100, 250))
+    assert (s, e) == (100.0, 250.0)
+
+
+def test_padded_bounds_uses_start_s_with_tail():
+    """클립 시작은 start_s(팬 댓글값) 그대로, 끝에만 outro_tail을 붙인다."""
+    s, e = padded_bounds(_cfg(intro_lead_s=0.0, outro_tail_s=7.0), _perf(1, 200, 400))
+    assert (s, e) == (200.0, 407.0)
+
+
 def test_build_concat_list_format():
     body = build_concat_list([Path("/tmp/a.mp4"), Path("/tmp/b.mp4")])
     assert body == "file '/tmp/a.mp4'\nfile '/tmp/b.mp4'\n"
@@ -62,3 +106,31 @@ def test_build_concat_list_makes_paths_absolute():
     body = build_concat_list([Path("ytbuild/clip.mp4")])
     assert body.startswith("file '/")
     assert body.rstrip().endswith("ytbuild/clip.mp4'")
+
+
+# --------------------------------------------------------------------------- #
+# assert_parts_aligned — 파트 offset 오염 게이트 (playlist_total_s만 monkeypatch)
+# --------------------------------------------------------------------------- #
+def test_assert_parts_aligned_passes_when_durations_match(monkeypatch):
+    monkeypatch.setattr(media, "playlist_total_s", lambda u: {"u0": 8068.0, "u1": 11918.0}[u])
+    assert_parts_aligned(_Meta(8068, 11918), ["u0", "u1"])   # raise 없음
+
+
+def test_assert_parts_aligned_single_part_skips_network(monkeypatch):
+    called = []
+    monkeypatch.setattr(media, "playlist_total_s", lambda u: called.append(u) or 0.0)
+    assert_parts_aligned(_Meta(18000), ["u0"])
+    assert called == []   # 단일 파트면 m3u8도 안 읽는다
+
+
+def test_assert_parts_aligned_raises_on_offset_shift(monkeypatch):
+    # part0 보고 8068인데 실제 8180 → 뒤 파트 offset 밀림 → 전체 중단
+    monkeypatch.setattr(media, "playlist_total_s", lambda u: {"u0": 8180.0, "u1": 11918.0}[u])
+    with pytest.raises(RuntimeError, match="offset"):
+        assert_parts_aligned(_Meta(8068, 11918), ["u0", "u1"])
+
+
+def test_assert_parts_aligned_last_part_mismatch_passes(monkeypatch):
+    # 마지막 파트만 틀리면 어떤 곡의 offset도 안 미므로 통과
+    monkeypatch.setattr(media, "playlist_total_s", lambda u: {"u0": 8068.0, "u1": 12500.0}[u])
+    assert_parts_aligned(_Meta(8068, 11918), ["u0", "u1"])   # raise 없음

@@ -160,7 +160,7 @@ def _vod_row(
 
 
 def fetch_vods_by_status(statuses: list[str]) -> list[dict[str, Any]]:
-    """주어진 status의 vods 행을 최신 방송순으로 — vod-audit 스킬의 감사 대상 목록용.
+    """주어진 status의 vods 행을 최신 방송순으로 — vod-review(audit 단계)의 감사 대상 목록용.
 
     `soopts vods --status analyzed,done`가 이걸 그대로 노출해, 스킬 안에서 Claude가 어떤
     VOD를 검증할지 고른다(판정은 코드가 아니라 스킬 안의 Claude가 원본 댓글로 한다)."""
@@ -205,9 +205,17 @@ def count_confirmed_performances(vod_row_id: int) -> int:
     return len(rows or [])
 
 
-def mark_vod(title_no: str, status: str, error: str | None = None) -> None:
-    """vods.status 갱신. failed면 retry_count를 1 증가시킨다."""
+def mark_vod(
+    title_no: str, status: str, error: str | None = None, source: str | None = None
+) -> None:
+    """vods.status 갱신. failed면 retry_count를 1 증가시킨다.
+
+    source는 performances의 출처 라벨('comment'=댓글 타임라인/'local'=로컬 전사 ingest)이다.
+    라벨 전용이라 게이팅에 쓰지 않는다 — 사람이 "댓글 아닌 것"만 골라 검토하는 필터용. 주면
+    같이 기록하고, None이면 건드리지 않는다(manual/failed 전이 등 출처가 무의미한 경우)."""
     fields: dict[str, Any] = {"status": status, "error": error}
+    if source is not None:
+        fields["source"] = source
     if status in ("analyzed", "done"):
         fields["processed_at"] = _now_iso()
     client = _client()
@@ -259,6 +267,7 @@ def insert_performances(
 
     identify_results를 생략하면 song_id=NULL, identify_status='needs_review'로 남는다.
     songs 테이블에 신곡 행을 만들지 않는다 — song_id는 기존 카탈로그 매칭 결과만 연결한다.
+    local_review는 컬럼 기본값 pending으로 들어간다 — 실제 end/경계 검증은 로컬 perf가 한다.
 
     clip_status는 쓰지 않는다. 업로드 큐가 사라진 뒤로 이 컬럼은 전 행이 'clipped'인
     상수가 되어 아무 정보도 담지 않는다(예전엔 'none'으로 넣고 곧바로 'clipped'로
@@ -300,7 +309,7 @@ def fetch_performances(
 ) -> list[dict[str, Any]]:
     """performances 행을 필터로 조회하고 각 행에 소속 VOD의 soop_title_no를 붙여 반환한다.
 
-    perf-review 스킬이 곡별로 구간을 다시 받아 로컬 검증할 때 쓴다 — 세그먼트 다운로드에
+    vod-review(perf 단계)가 곡별로 구간을 다시 받아 로컬 검증할 때 쓴다 — 세그먼트 다운로드에
     title_no가 필요하므로 vods와 조인해 얹는다. 필터는 둘 다 선택(없으면 전체).
     """
     client = _client()
@@ -323,7 +332,7 @@ def fetch_performances(
 
 
 def update_performance(perf_id: int, fields: dict[str, Any]) -> dict[str, Any] | None:
-    """performance 한 행을 갱신한다(perf-review 스킬의 보강/검증 적용).
+    """performance 한 행을 갱신한다(vod-review(perf 단계)의 보강/검증 적용).
 
     None 값 필드는 보내지 않는다 — 명시적 NULL 덮어쓰기를 막기 위함. 허용 필드만 통과시킨다.
     """
@@ -346,7 +355,7 @@ def insert_draft_song(
 ) -> str:
     """songs에 신곡을 삽입하고 song_id(uuid)를 반환한다.
 
-    무-카탈로그 곡을 로컬 검증(perf-review)에서 draft로 넣기 위한 유일한 song 생성 경로다.
+    무-카탈로그 곡을 로컬 검증(vod-review perf 단계)에서 draft로 넣기 위한 유일한 song 생성 경로다.
     기존 원칙("songs는 이 repo에서 만들지 않는다")의 의도적 예외 — status='draft'로만 넣어
     검수 UI가 published로 승격하기 전까지 정식 카탈로그와 구분되게 한다.
     """

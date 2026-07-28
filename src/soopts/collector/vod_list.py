@@ -14,8 +14,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 
-import requests
-
+from soopts.collector.http import get_with_retry
 from soopts.config import Config
 from soopts.log import get_logger
 
@@ -52,13 +51,9 @@ def iter_vod_pages(cfg: Config, bj_id: str) -> Iterator[list[dict]]:
     마지막 페이지가 SOOP 만료의 자연 바닥선이다: 더 내려갈 과거가 없으면 순회가 끝난다.
     """
     page = 1
-    headers = {"User-Agent": cfg.collector.user_agent}
     while True:
-        resp = requests.get(
-            _LIST_URL.format(bj_id=bj_id),
-            params={"page": page},
-            headers=headers,
-            timeout=cfg.collector.timeout_s,
+        resp = get_with_retry(
+            cfg, _LIST_URL.format(bj_id=bj_id), params={"page": page}
         )
         resp.raise_for_status()
         candidates, current_page, last_page = extract_page(resp.json())

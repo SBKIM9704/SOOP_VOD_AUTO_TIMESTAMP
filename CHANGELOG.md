@@ -1,5 +1,27 @@
 # Changelog
 
+## [v0.8.0] - 2026-07-28
+
+### Added
+- feat(youtube): 합본 클립 시작을 youtube_start_s로 오버라이드 (딥링크는 start_s 유지) (2c413af, #64)
+- feat(review): vods.source 출처 라벨 기록·조회 (comment/local) (8acff26, #63)
+- feat(youtube): 합본 클립에 전주·여운 여백(intro_lead/outro_tail) 추가 (6e86233, #61)
+
+### Fixed
+- fix(youtube): 전주 여백 기본 0으로, 종료 여백만 7초 유지 (f21fa45, #62)
+- fix(collector): SOOP API GET/POST에 5xx·연결오류 재시도 추가 (b70085e, #60)
+- fix(identify): 부분집합 제목이 동점에서 이기던 문제 (71abb9d, #59)
+
+### Changed
+- docs: 워크플로 케이던스 서술 최신화 (daily 4×/6h, youtube 2×/12h) (3311eef, #69)
+- chore(ci): daily 4회/6h·youtube 2회/12h로 스케줄 상향 (c937603, #68)
+- perf 종료 규칙 개정 + 멀티파트 offset 가드 (6e89d2f, #67)
+- refactor: daily는 start만(댓글) / end는 로컬 perf가 채움 (pull 모델) (5799f12, #66)
+- refactor: 댓글 타임라인을 시작의 진실로 확정 + 관련 정리 (4956f2d, #65)
+- docs(skill): perf 검증에 song_id↔가사 교차검증 가드 추가 (4595c64, #58)
+- refactor(skill): vod-audit·perf-review·manual-ingest를 통합 vod-review 스킬로 병합 (7073f22, #57)
+- chore(skill): release 스킬에 GitHub Release 생성 단계 추가 (bb1cf66, #56)
+
 ## [v0.7.4] - 2026-07-23
 
 ### Added

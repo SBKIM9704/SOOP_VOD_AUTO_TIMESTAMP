@@ -1,8 +1,9 @@
 """`soopts daily` 오케스트레이션 — GitHub Actions 무인 배치.
 
-스테이션 최신 VOD 중 미처리분 → 댓글 타임라인(🎤/🎵)을 마커로 파싱 → 곡별 span(시작=시각,
-끝=다음 곡 6분 캡) → 제목/가수로 카탈로그 매칭 → DB(performances)에 노래 구간 기록.
-다운로드·세그멘테이션·STT 없이 수 초에 끝난다(초경량). 댓글 타임라인이 없는 VOD는
+스테이션 최신 VOD 중 미처리분 → 댓글 타임라인(🎤/🎵)을 마커로 파싱 → 곡별 span(**시작=댓글 시각만,
+끝은 미정=start 센티넬**) → 제목/가수로 카탈로그 매칭 → DB(performances, local_review=pending) 기록.
+곡 끝은 로컬 `perf`가 채운다(pull 방식). 다운로드·세그멘테이션·STT 없이 수 초에 끝난다(초경량).
+댓글 타임라인이 없는 VOD는
 'manual'로 표시만 하고, 사람이 로컬에서 analyze_vod.py 전체 전사 후 `soopts ingest`로 처리한다.
 
 산출물은 **타임스탬프**다. 시청은 SOOP 원본 딥링크(`song_link()`)로 연결하며,
@@ -342,7 +343,7 @@ def run_daily(cfg: Config, *, bj_id: str, count: int) -> dict[str, Any]:
             stats["needs_review"] += vod_stats["needs_review"]
             for k in ("stt_attempted", "stt_ok", "hint_available", "lyrics_only"):
                 stats[k] += vod_stats.get(k, 0)
-            db.mark_vod(title_no, next_vod_status(vod_stats["detected"]))
+            db.mark_vod(title_no, next_vod_status(vod_stats["detected"]), source="comment")
             _notify_slack(format_vod_result(cfg, title_no, vod_stats))
         except Exception as e:  # noqa: BLE001
             log.error("VOD %s 처리 실패: %s", title_no, e)
@@ -382,6 +383,24 @@ def span_to_song(span: dict[str, Any]):
         raise ValueError(f"end_s는 start_s보다 커야 합니다: {span!r}")
     return Song(
         t=start, end=end, duration=end - start,
+        sticker_rate=0.0, song_likely=True,
+        lyrics=(span.get("lyrics") or ""),
+        title=(span.get("title") or None),
+    )
+
+
+def comment_span_to_song(span: dict[str, Any]):
+    """댓글 타임라인 span(dict) → Song. start만 진실이고 end는 **미정(=start, 0길이 센티넬)**.
+
+    `span_to_song`(ingest용)은 end>start를 강제하지만, 댓글 경로는 end를 daily에서 정하지 않는다
+    — 실제 끝은 로컬 `perf`가 채운다. 그래서 여기선 `end == start`를 허용한다. `plan_songs`가
+    dur<=0을 드롭하므로 end가 채워지기 전엔 영상 빌드 대상이 아니다.
+    """
+    from soopts.models import Song
+
+    start = int(span["start_s"])
+    return Song(
+        t=start, end=start, duration=0,
         sticker_rate=0.0, song_likely=True,
         lyrics=(span.get("lyrics") or ""),
         title=(span.get("title") or None),
@@ -428,7 +447,7 @@ def ingest_vod(
     song_objs = [span_to_song(sp) for sp in songs]
     artists = [sp.get("artist") or "" for sp in songs]
     stats = _record_songs(vod_row["id"], song_objs, artists, db.load_song_catalog())
-    db.mark_vod(title_no, next_vod_status(stats["detected"]))
+    db.mark_vod(title_no, next_vod_status(stats["detected"]), source="local")
 
     text = (
         f"VOD {title_no} ingest 완료 — {stats['detected']}곡 기록 "
@@ -447,6 +466,9 @@ def _record_songs(
     댓글 타임라인 처리(_process_vod)와 로컬 ingest(ingest_vod)가 공유하는 코어다.
     제목이 있으면 `resolve_song_match`(가사 추측 생략), 제목 없이 가사만 있으면 `identify_song`,
     둘 다 없으면 needs_review(None)로 남긴다. 감지된 노래 수만큼 hint_available로 센다.
+
+    performances는 `local_review` 기본 pending으로 들어간다 — 댓글이든 로컬이든 실제 end/경계는
+    로컬 `perf`가 검증한 뒤 verified로 승격한다(pull 방식).
     """
     from soopts import db
     from soopts.analyzers.identify import identify_song, resolve_song_match
@@ -474,7 +496,7 @@ def _record_songs(
 
 
 def set_vod_manual(cfg: Config, *, title_no: str, clear_machine: bool) -> dict[str, Any]:
-    """VOD 하나를 'manual'로 되돌린다 — vod-audit 스킬이 Claude 판정 후 호출하는 적용 함수.
+    """VOD 하나를 'manual'로 되돌린다 — vod-review(audit 단계)가 Claude 판정 후 호출하는 적용 함수.
 
     clear_machine=True면 기계 생성 performances를 먼저 지운다(confirmed는 보존). 판정 자체는
     코드가 하지 않는다 — 어떤 VOD를 넘길지는 스킬 안에서 Claude가 원본 댓글을 읽고 정한다.
@@ -501,10 +523,10 @@ def _process_vod(
 ) -> dict[str, Any]:
     """댓글 타임라인 → 곡별 span → 식별 → DB 기록. 초경량(다운로드·STT·세그멘테이션 없음).
 
-    타임라인의 🎤/🎵 항목이 시각·제목·가수를 모두 주므로, 시작=시각·끝=다음 곡(6분 캡)으로
-    span을 만들고 제목/가수로 카탈로그를 매칭해 기록한다 — 예전의 구간 다운로드·경계 탐지·
-    Whisper 전사·Groq 가사추측을 전부 없앴다(VOD당 수 초). 타임라인이 없으면(게임 방송 등)
-    {"no_timeline": True}를 돌려 호출부가 'manual'로 표시한다(로컬 처리 대상).
+    타임라인의 🎤/🎵 항목이 시각·제목·가수를 주므로, **시작=댓글 시각만** 쓰고 **끝은 미정(=start
+    센티넬)** 으로 span을 만들어(comment_span_to_song) 제목/가수 카탈로그 매칭 후 기록한다 — 곡 끝은
+    로컬 perf가 채운다(North Star). 예전의 구간 다운로드·경계 탐지·Whisper·Groq 가사추측은 다 없앴다
+    (VOD당 수 초). 타임라인이 없으면(게임 방송 등) {"no_timeline": True}로 호출부가 'manual' 표시.
 
     재처리는 멱등하다: clear_machine_performances로 이전 기계 생성분을 지우고 다시 넣되
     사람 확정(confirmed)분은 보존한다. 상태 마킹은 호출부(run_daily)가 한다.
@@ -542,7 +564,9 @@ def _process_vod(
 
     db.clear_machine_performances(vod_row["id"])
     spans = timeline_songs_to_spans(timeline, meta.total_duration)
-    song_objs = [span_to_song(sp) for sp in spans]
+    # 댓글은 start만 진실(North Star). end는 미정(=start 센티넬)이라 comment_span_to_song을 쓴다 —
+    # 실제 곡 끝은 로컬 perf가 채운다. local_review는 기본 pending으로 남겨 perf 대상이 되게 한다.
+    song_objs = [comment_span_to_song(sp) for sp in spans]
     artists = [sp["artist"] for sp in spans]
     stats = _record_songs(vod_row["id"], song_objs, artists, db.load_song_catalog())
     stats["mode"] = "comment_timeline"

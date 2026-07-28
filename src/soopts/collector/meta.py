@@ -6,8 +6,7 @@ POST station/video/a/view (nTitleNo, nApiLevel). 멀티파트 duration을 누적
 
 from __future__ import annotations
 
-import requests
-
+from soopts.collector.http import post_with_retry
 from soopts.config import Config
 from soopts.log import get_logger
 from soopts.models import MetaPart, MetaResult, read_meta, write_meta
@@ -79,11 +78,10 @@ def fetch_meta(cfg: Config, vod_id: str, work: WorkPaths, *, force: bool = False
 
     work.ensure()
     log.info("VOD 메타 조회: %s", vod_id)
-    resp = requests.post(
+    resp = post_with_retry(
+        cfg,
         cfg.endpoints.meta_url,
         data={"nTitleNo": vod_id, "nApiLevel": cfg.endpoints.api_level, "nPlaylistIdx": 0},
-        headers={"User-Agent": cfg.collector.user_agent},
-        timeout=cfg.collector.timeout_s,
     )
     resp.raise_for_status()
     meta = parse_meta_response(vod_id, resp.json())
