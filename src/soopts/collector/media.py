@@ -138,6 +138,36 @@ def part_duration_mismatches(
     return out
 
 
+def omitted_parts_gap(
+    parts: list[MetaPart], total_duration: float, *, tol_s: float = 2.0
+) -> dict | None:
+    """응답에서 누락된 파트(분량)와 그 offset 분배가 모호한지 보고한다(순수 함수).
+
+    SOOP view API가 멀티파트 VOD의 중간 파트를 응답에서 빼먹는 일이 있다(`file_order` 1,4처럼
+    번호가 건너뜀). 플레이어는 그 파트도 재생하므로 팬 타임스탬프는 누락분까지 포함한 전역초다.
+    `parse_meta_response`가 `total_file_duration − Σ(반환 duration)`을 빈 자리에 더해 offset을
+    보정하는데, **빈 자리가 하나면 정확**하지만 **둘 이상이면** 파트별 길이를 알 수 없어 총량만으론
+    분배가 불가능하다(첫 자리에 몰아넣고 경고만 한 상태). 그 경우 뒤 파트 offset이 틀어져 곡
+    구간이 엉뚱한 오디오로 잡힐 수 있으므로, 되돌릴 수 없는 업로드 전에 여기서 잡는다.
+
+    반환 없음(None) = 누락 없음(정상). dict면 `ambiguous`가 True일 때 빌드 보류 대상.
+    """
+    if not parts:
+        return None
+    omitted = total_duration - sum(p.duration for p in parts)
+    if omitted <= tol_s:
+        return None
+    orders = [p.file_order for p in parts]
+    slots = 1 if orders[0] > 1 else 0                       # 리딩(첫 파트 앞) 빈 자리
+    slots += sum(1 for i in range(1, len(orders)) if orders[i] - orders[i - 1] > 1)
+    return {
+        "omitted_s": round(omitted, 1),
+        "gap_slots": slots,
+        "ambiguous": slots != 1,   # 0곳(자리 못 찾음)·2곳 이상(분배 모호) 둘 다 위험
+        "file_orders": orders,
+    }
+
+
 def playlist_total_s(m3u8_url: str) -> float:
     """m3u8의 #EXTINF 합 = 이 파트의 실제 재생 길이(초). 세그먼트는 안 받고 플레이리스트만 읽는다."""
     text = _read_url(m3u8_url, timeout=15, min_bytes=1).decode("utf-8", "replace")

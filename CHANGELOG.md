@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.8.1] - 2026-07-28
+
+### Fixed
+- fix(meta): SOOP 누락 파트 offset 보정 + verify-parts 게이트 (c20a606, #71)
+
 ## [v0.8.0] - 2026-07-28
 
 ### Added
