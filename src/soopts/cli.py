@@ -280,6 +280,7 @@ def cmd_verify_parts(args) -> int:
     import json as _json
 
     from soopts.collector.media import (
+        omitted_parts_gap,
         part_duration_mismatches,
         playlist_total_s,
         resolve_m3u8_list,
@@ -288,7 +289,9 @@ def cmd_verify_parts(args) -> int:
 
     cfg, vod_id, work = _ctx(args)
     meta = fetch_meta(cfg, vod_id, work, force=args.force)
-    if len(meta.parts) < 2:
+    # 누락 파트 감사 — 단일 파트든 멀티든 확인한다(리딩 누락은 파트 1개여도 offset을 민다).
+    gap = omitted_parts_gap(meta.parts, meta.total_duration)
+    if len(meta.parts) < 2 and gap is None:
         print(f"VOD {vod_id}: 단일 파트 — offset 오염 위험 없음")
         return 0
     m3u8s = resolve_m3u8_list(args.vod, cfg.clip.quality)
@@ -297,22 +300,37 @@ def cmd_verify_parts(args) -> int:
     if args.json:
         print(_json.dumps({
             "title_no": vod_id,
-            "parts": [{"idx": p.idx, "offset_s": p.offset_s, "reported": p.duration,
-                       "real": r} for p, r in zip(meta.parts, reals, strict=False)],
+            "parts": [{"idx": p.idx, "file_order": p.file_order, "offset_s": p.offset_s,
+                       "reported": p.duration, "real": r}
+                      for p, r in zip(meta.parts, reals, strict=False)],
             "mismatches": mism,
+            "omitted_parts": gap,
         }, ensure_ascii=False, indent=2))
-        return 1 if any(m["shifts_offsets"] for m in mism) else 0
+        bad = any(m["shifts_offsets"] for m in mism) or bool(gap and gap["ambiguous"])
+        return 1 if bad else 0
     for p, r in zip(meta.parts, reals, strict=False):
-        print(f"part{p.idx} offset={p.offset_s:>6} 보고={p.duration:>6} 실제={r:>7.0f}")
+        print(f"part{p.idx}(order{p.file_order}) offset={p.offset_s:>6} "
+              f"보고={p.duration:>6} 실제={r:>7.0f}")
+    if gap is None:
+        print("✓ 누락 파트 없음(total_file_duration = Σ반환)")
+    elif not gap["ambiguous"]:
+        print(f"ℹ️ 누락 파트 {gap['omitted_s']:.0f}s 감지(order {gap['file_orders']}) "
+              f"→ 빈 자리 1곳, offset 자동 보정됨(안전)")
+    else:
+        print(f"⚠️ 누락 파트 {gap['omitted_s']:.0f}s인데 빈 자리 {gap['gap_slots']}곳 "
+              f"(order {gap['file_orders']}) → 분배 불가, 곡 구간이 틀린 오디오일 수 있음. "
+              f"빌드/업로드 보류하고 사람이 확인하세요.")
     if not mism:
-        print("✓ 모든 파트 duration 일치 — 전역 offset·딥링크 안전")
-        return 0
-    for m in mism:
-        tag = ("⚠️ 뒤 파트 offset 오염 → 댓글 start_s/딥링크 틀어짐"
-               if m["shifts_offsets"] else "총길이만 부정확(offset 안전)")
-        print(f"✗ part{m['idx']}: 보고 {m['reported']:.0f}s vs 실제 {m['real']:.0f}s "
-              f"(Δ{m['diff']:+.0f}s) — {tag}")
-    return 1 if any(m["shifts_offsets"] for m in mism) else 0
+        if gap is None or not gap["ambiguous"]:
+            print("✓ 모든 파트 duration 일치 — 전역 offset·딥링크 안전")
+    else:
+        for m in mism:
+            tag = ("⚠️ 뒤 파트 offset 오염 → 댓글 start_s/딥링크 틀어짐"
+                   if m["shifts_offsets"] else "총길이만 부정확(offset 안전)")
+            print(f"✗ part{m['idx']}: 보고 {m['reported']:.0f}s vs 실제 {m['real']:.0f}s "
+                  f"(Δ{m['diff']:+.0f}s) — {tag}")
+    bad = any(m["shifts_offsets"] for m in mism) or bool(gap and gap["ambiguous"])
+    return 1 if bad else 0
 
 
 def cmd_set_manual(args) -> int:

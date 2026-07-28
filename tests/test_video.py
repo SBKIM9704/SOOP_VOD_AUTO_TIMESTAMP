@@ -21,8 +21,10 @@ class _Meta:
     def __init__(self, *durations: int):
         off, self.parts = 0, []
         for i, d in enumerate(durations):
-            self.parts.append(MetaPart(idx=i, file_info_key=f"k{i}", duration=d, offset_s=off))
+            self.parts.append(MetaPart(idx=i, file_info_key=f"k{i}", duration=d,
+                                       offset_s=off, file_order=i + 1))
             off += d
+        self.total_duration = off   # 누락 없음(contiguous order) — omitted_parts_gap None
 
 
 def _cfg(**over) -> Config:

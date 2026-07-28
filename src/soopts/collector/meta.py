@@ -36,7 +36,22 @@ def _norm_duration(raw) -> int:
 
 
 def parse_meta_response(vod_id: str, payload: dict) -> MetaResult:
-    """view API JSON 응답을 MetaResult로 변환한다(순수 함수, 테스트 대상)."""
+    """view API JSON 응답을 MetaResult로 변환한다(순수 함수, 테스트 대상).
+
+    **누락 파트 보정 — 전역 offset은 SOOP 플레이어(=팬 타임라인) 기준이어야 한다.**
+    방송이 중간에 끊기면 파트가 여러 개로 저장되는데(`file_order` 1,2,3,…), 이 API가
+    **일부 파트를 응답에서 빼먹는 일이 있다**(실측: 201586597은 `file_order` [1,4]만 반환,
+    중간 _2·_3 누락). 그런데 SOOP 플레이어는 그 누락 파트도 이어붙여 재생하므로, 팬이 찍은
+    타임스탬프(딥링크·start_s)는 누락분까지 포함한 전역초다. 반환된 파트 duration만 누적하면
+    누락분(∑)만큼 뒤 파트 offset이 **작게** 잡혀, 팬 시각을 그대로 HLS 좌표로 쓰면 그 파트의
+    모든 곡이 누락분만큼 **뒤에서**(곡 중간) 잘린다(종료는 전사로 찾아 맞는데 시작만 틀림).
+
+    누락 여부는 `file_order` 빈칸이 아니라 **`total_file_duration − ∑(반환 duration) > 0`**
+    으로 판정한다(빈 번호라도 그 파트 길이가 0이면 offset은 정상 — total이 말해준다). 누락분을
+    넣을 자리(리딩=첫 order>1, 또는 반환 파트 사이 order 점프)가 **하나면** 거기에 전부 더해
+    정확히 보정하고, 자리가 둘 이상이면 파트별 길이를 알 수 없어 분배가 모호하므로 첫 자리에
+    몰아넣고 경고한다(호출부/빌드 가드가 보류하도록).
+    """
     data = payload.get("data", payload) if isinstance(payload, dict) else {}
 
     title = _dig(data, "title", "full_title", "clip_title") or f"VOD {vod_id}"
@@ -50,14 +65,49 @@ def parse_meta_response(vod_id: str, payload: dict) -> MetaResult:
     if isinstance(files, dict):
         files = [files]
 
-    parts: list[MetaPart] = []
-    offset = 0
+    # (order, key, dur) — file_order로 정렬(응답 순서를 신뢰하지 않는다)
+    entries: list[tuple[int, str, int]] = []
     for i, f in enumerate(files):
         if not isinstance(f, dict):
             continue
         key = _dig(f, "file_info_key", "fileInfoKey", "key", "file_key") or ""
         dur = _norm_duration(_dig(f, "duration", "file_duration", "total_time", "playtime"))
-        parts.append(MetaPart(idx=i, file_info_key=str(key), duration=dur, offset_s=offset))
+        raw_order = _dig(f, "file_order", "fileOrder", "order")
+        order = int(raw_order) if str(raw_order).lstrip("-").isdigit() else (i + 1)
+        entries.append((order, str(key), dur))
+    entries.sort(key=lambda e: e[0])
+
+    returned_sum = sum(d for _, _, d in entries)
+    total_api = _norm_duration(_dig(data, "total_file_duration"))
+    omitted = total_api - returned_sum if total_api else 0
+
+    # 누락분을 더할 자리(=그 파트부터 offset을 밀어야 하는 인덱스). 리딩 + 내부 점프.
+    slots: list[int] = []
+    if entries and entries[0][0] > 1:
+        slots.append(0)
+    for i in range(1, len(entries)):
+        if entries[i][0] - entries[i - 1][0] > 1:
+            slots.append(i)
+
+    add_at: int | None = None
+    if omitted > 0:
+        if len(slots) == 1:
+            add_at = slots[0]
+        elif len(slots) == 0:
+            log.warning("VOD %s: 누락 %ds인데 자리를 못 찾음(후행 누락 추정) — offset 보정 생략",
+                        vod_id, omitted)
+        else:
+            add_at = slots[0]
+            log.warning("VOD %s: 누락 %ds인데 빈 자리 %d곳 — 분배 모호, 첫 자리에 몰아넣음(빌드 전 검토 요망)",
+                        vod_id, omitted, len(slots))
+
+    parts: list[MetaPart] = []
+    offset = 0
+    for i, (order, key, dur) in enumerate(entries):
+        if i == add_at:
+            offset += omitted
+        parts.append(MetaPart(idx=i, file_info_key=key, duration=dur,
+                              offset_s=offset, file_order=order))
         offset += dur
 
     return MetaResult(
@@ -65,7 +115,7 @@ def parse_meta_response(vod_id: str, payload: dict) -> MetaResult:
         title=str(title),
         bj_id=str(bj_id),
         bj_nick=str(bj_nick),
-        total_duration=offset,
+        total_duration=max(offset, total_api),
         parts=parts,
     )
 

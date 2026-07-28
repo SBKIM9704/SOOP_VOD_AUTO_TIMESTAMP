@@ -312,3 +312,51 @@ def test_part_duration_mismatches_last_part_is_offset_safe():
     assert len(out) == 1
     assert out[0]["idx"] == 1
     assert out[0]["shifts_offsets"] is False
+
+
+# --------------------------------------------------------------------------- #
+# omitted_parts_gap — 응답에서 누락된 파트 감지·모호성
+# --------------------------------------------------------------------------- #
+def _ordered(*pairs: tuple[int, int]) -> list[MetaPart]:
+    """(file_order, duration) 목록 → 보정된 offset을 가진 MetaPart 목록."""
+    parts, off = [], 0
+    for i, (order, dur) in enumerate(pairs):
+        parts.append(MetaPart(idx=i, file_info_key=f"k{i}", duration=dur,
+                              offset_s=off, file_order=order))
+        off += dur
+    return parts
+
+
+def test_omitted_none_when_total_matches_sum():
+    parts = _ordered((1, 8000), (2, 12000))
+    assert media.omitted_parts_gap(parts, 20000) is None
+
+
+def test_omitted_single_internal_gap_not_ambiguous():
+    # order [1,4], total 20088 vs 반환 19986 → 누락 102, 빈 자리 1곳.
+    parts = _ordered((1, 8068), (4, 11918))
+    g = media.omitted_parts_gap(parts, 20088)
+    assert g["omitted_s"] == 102.0
+    assert g["gap_slots"] == 1
+    assert g["ambiguous"] is False
+
+
+def test_omitted_leading_gap_single_slot():
+    # 첫 파트 order=3(앞에 _1,_2 누락) → 리딩 자리 1곳.
+    parts = _ordered((3, 13000))
+    g = media.omitted_parts_gap(parts, 13100)
+    assert g["gap_slots"] == 1
+    assert g["ambiguous"] is False
+
+
+def test_omitted_two_gaps_is_ambiguous():
+    # order [1,3,6] → 1↔3, 3↔6 빈 자리 2곳 → 분배 모호.
+    parts = _ordered((1, 5000), (3, 6000), (6, 7000))
+    g = media.omitted_parts_gap(parts, 18100)
+    assert g["gap_slots"] == 2
+    assert g["ambiguous"] is True
+
+
+def test_omitted_below_tolerance_ignored():
+    parts = _ordered((1, 8000), (4, 12000))
+    assert media.omitted_parts_gap(parts, 20001) is None
