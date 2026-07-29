@@ -388,6 +388,13 @@ def youtube_block_reason(vod: dict[str, Any], perfs: list[dict[str, Any]]) -> st
     local_review(구간·가사가 실제로 맞는지) **양쪽 축이 모든 곡에서** 끝나야 한다. 한 곡이라도
     미완이면 제목이 틀린 챕터나 노래가 아닌 구간이 그대로 유튜브에 박히고, 올린 뒤에는
     되돌릴 방법이 사실상 없다(삭제 API를 쓰지 않기로 했다).
+
+    **identify_status만으로는 부족하다 — 카탈로그 곡이 실제로 연결(songs 조인)됐는지도 본다.**
+    정상 흐름에선 auto_matched면 song_id가 보장되지만, perf 검증 단계가 song_id 연결을
+    빠뜨린 채 identify_status=auto_matched·local_review=verified로 마감하면 song_id가 NULL인
+    채로 남는다. 그러면 `_resolved_title_artist`가 title_guess("좋지 아니한가(크라잉넛)")와
+    "아티스트 미상"으로 폴백해 그 문자열이 그대로 챕터에 박힌다(실제 발생: perf #969).
+    카탈로그에 붙지 않은 곡은 올리지 말고 사람이 연결하도록 막는다.
     """
     if vod.get("status") not in UPLOADABLE_VOD_STATUSES:
         return f"vods.status={vod.get('status')} (analyzed/done 아님)"
@@ -398,6 +405,12 @@ def youtube_block_reason(vod: dict[str, Any], perfs: list[dict[str, Any]]) -> st
     for p in perfs:
         if p.get("identify_status") not in COMPLETE_IDENTIFY_STATUSES:
             return f"곡 식별 미완: perf #{p.get('id')} identify_status={p.get('identify_status')}"
+        if not p.get("songs"):
+            return (
+                f"카탈로그 미연결: perf #{p.get('id')} "
+                f"identify_status={p.get('identify_status')}이나 song_id 없음"
+                f"(title_guess={p.get('title_guess')!r}) — 사람이 곡 연결 필요"
+            )
         if p.get("local_review") != COMPLETE_LOCAL_REVIEW:
             return f"로컬 검증 미완: perf #{p.get('id')} local_review={p.get('local_review')}"
     return None
