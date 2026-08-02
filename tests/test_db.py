@@ -283,6 +283,7 @@ def _perf(perf_id: int, **over):
         "id": perf_id,
         "identify_status": "auto_matched",
         "local_review": "verified",
+        "songs": {"title": "곡", "artist": "가수"},
         **over,
     }
 
@@ -342,3 +343,21 @@ def test_youtube_block_reason_explains_rejection():
     assert "manual" in reason
     assert db.youtube_block_reason(_vod(1, "2026-06-25"), []) == "performance 없음"
     assert db.youtube_block_reason(_vod(1, "2026-06-25"), [_perf(10)]) is None
+
+
+def test_youtube_block_reason_blocks_identified_without_catalog_song():
+    """identify_status는 완료(auto_matched)인데 song_id가 안 붙어(songs 조인 없음) 있으면 막는다.
+
+    perf 검증이 카탈로그 연결을 빠뜨린 채 verified로 마감하면 이 상태가 된다(실제: perf #969).
+    그대로 올리면 title_guess + '아티스트 미상'이 챕터에 박히므로 사람이 곡을 연결하게 막는다.
+    """
+    reason = db.youtube_block_reason(_vod(1, "2026-06-25"), [_perf(10, songs=None)])
+    assert "카탈로그 미연결" in reason
+    assert "#10" in reason
+
+
+def test_select_youtube_target_skips_vod_with_unlinked_catalog_song():
+    """song_id 없는 곡이 하나라도 있으면 그 VOD 전체를 건너뛴다."""
+    vods = [_vod(1, "2026-07-19"), _vod(2, "2026-06-25")]
+    perfs = {1: [_perf(10, songs=None)], 2: [_perf(20)]}
+    assert db.select_youtube_target(vods, perfs)["id"] == 2

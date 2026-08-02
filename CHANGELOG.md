@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.8.2] - 2026-08-02
+
+### Fixed
+- fix(youtube): 게이트에 카탈로그 미연결(song_id null) 차단 가드 추가 (28d6a64, #73)
+
+### Changed
+- docs(skill): 🎵-only 타임라인 노래뱅을 ingest 단계에서 먼저 거르도록 (4cb007f, #74)
+
 ## [v0.8.1] - 2026-07-28
 
 ### Fixed
