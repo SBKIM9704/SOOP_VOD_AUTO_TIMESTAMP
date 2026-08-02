@@ -217,6 +217,14 @@ or re-picked. A human processes it locally (`analyze_vod.py` → `soopts ingest`
 Reprocessing is idempotent: `clear_machine_performances()` drops the prior run's rows (sparing
 `confirmed`) before re-inserting.
 
+**Not every `manual` VOD is song-less — some are a whole 노래뱅 the marker rule couldn't see.** Fan
+notation is not uniform: a timeline that lists *only* songs (no 🍊/💬 chatter lines) may mark every
+one of them 🎵, so the 🎤 count is 0 and the VOD is filed `manual` with a full solo set inside
+(measured: `202567837` carried **24 solo songs, all written 🎵**, recovered 2026-08-02). The tell is
+the **artist slot**: original artists (윤하/아이유/…) → the BJ's own set; another streamer's name
+(`🎵 솜주먹 - …`) → a guest/노래배틀 clip, not a target. So the `ingest` stage reads the comments
+*before* the (tens-of-minutes) full transcription — see `.claude/skills/vod-review/ingest.md`.
+
 **Auditing processed VODs — the `vod-review` skill's `audit` stage, not code.** The 🎤-only rule is
 safe (no false positives) but incomplete: a 🎤+🎵 mixed VOD records only its 🎤 songs and is marked
 `analyzed`, so the 🎵 ones are silently missed. Deciding whether such a VOD (or a game/chat/teaser
