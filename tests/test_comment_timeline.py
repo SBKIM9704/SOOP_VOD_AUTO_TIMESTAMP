@@ -83,6 +83,55 @@ def test_crew_name_in_original_artist_note_is_kept():
     assert [s.artist for s in parse_song_timeline([comment])] == ["릴파ver"]
 
 
+def test_crew_performance_excluded_by_section_header():
+    # 크루 신호가 **섹션 헤더에만** 있고 각 곡 줄의 아티스트 자리엔 원곡 가수가 들어가는 합방.
+    # 줄 하나만 보면 평범한 솔로곡과 구분이 안 된다 (실제 사례: 202664153 25곡, 196641369 6곡).
+    comment = (
+        "🎵 하데스 후열 싱크룸 - 솜키띵초챈 순서\n"
+        "04:33:20 🎤 카라(KARA) - Pretty Girl\n"      # 헤더가 크루 → 제외
+        "06:07:18 🎤 소녀시대 - I Got A Boy\n"        # 헤더가 크루 → 제외
+        "\n"                                          # 빈 줄이 구획을 끝낸다
+        "🍊 방종 전 소통\n"
+        "07:35:25 🎤 [방종곡] 아이유 - 무릎\n"         # 다른 구획의 BJ 솔로 → 포함
+    )
+    assert [s.title for s in parse_song_timeline([comment])] == ["무릎"]
+
+
+def test_section_header_keyword_does_not_drop_solo_songs():
+    # 헤더 판정은 **크루명만** 본다. `싱크룸`/`노래방` 같은 키워드로 넓히면
+    # `🎵 후열소통, 알고리즘 따라 노래방`(195027767) 아래 BJ 솔로 8곡이 통째로 날아간다.
+    comment = (
+        "🎵 후열소통, 알고리즘 따라 노래방\n"
+        "05:05:54 🎤 정인 - 장마\n"
+        "05:11:49 🎤 윤하 - 혜성\n"
+    )
+    assert [s.title for s in parse_song_timeline([comment])] == ["장마", "혜성"]
+
+
+def test_section_header_resets_on_blank_line():
+    # 헤더의 유효 범위는 다음 빈 줄까지다 — 안 그러면 뒤따르는 모든 곡이 크루로 오염된다.
+    comment = (
+        "🎵 하데스 싱크룸\n"
+        "04:39:11 🎤 뉴진스 - Ditto\n"
+        "\n"
+        "05:43:53 🎤 이무진 - 굴뚝마을의 푸펠\n"      # 헤더 없는 구획 → 포함
+    )
+    assert [s.title for s in parse_song_timeline([comment])] == ["굴뚝마을의 푸펠"]
+
+
+def test_member_permutation_artist_excluded():
+    # 즉석 조합(`솜띵키초`)은 조합 수가 무한해 목록으로 못 막는다 — 음절 집합으로 판정한다.
+    comment = "07:03:48 🎤 솜띵키초 - 사랑은 선율을 타고(소녀시대)\n"
+    assert parse_song_timeline([comment]) == []
+
+
+def test_single_member_artist_is_kept():
+    # 개인명은 남겨야 한다 — 노래배틀에서 팬이 `🎤 띵귤 - …`로 부른 사람을 명시한다(193160683).
+    # `귤`이 멤버 음절 집합 밖이라 부분집합 판정에서 걸리지 않는다.
+    comment = "03:27:58 🎤 띵귤 - 마지막 사랑(박기영)\n"
+    assert [s.artist for s in parse_song_timeline([comment])] == ["띵귤"]
+
+
 def test_collab_original_artists_are_not_crew():
     # 원곡이 합작인 곡(아이유x오혁)은 크루 공연이 아니다 — 'x 들어가면 그룹' 같은 휴리스틱
     # 대신 명시적 목록을 쓰는 이유다.

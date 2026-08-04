@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from soopts.log import get_logger
@@ -40,7 +41,14 @@ _REF_KEYWORDS = ("편집본", "클립이슈", "틀어놓", "티저", "뮤비", "
 # 반대 방향 오류(크루 자작곡을 BJ가 솔로로 불렀는데 제외됨)도 가능하지만, 이 저장소는
 # 일관되게 **놓치는 쪽**을 택한다 — 잘못 기록된 딥링크(혼자 안 부른 곡)가 더 나쁘다.
 _CREW_NAMES = ("바보즈", "하데스", "키띵초")
+# 크루 멤버 애칭의 첫 음절. 팬은 즉석 조합을 `솜띵키초`/`챈솜초띵`처럼 이어 붙여 아티스트 자리에
+# 쓰는데, 조합 수가 무한해 고정 팀명(`_CREW_NAMES`)으로는 못 막는다. 그래서 순열을 나열하는 대신
+# **이 음절들로만 이루어졌는지**를 본다 — 생성 규칙이라 새 조합도 자동으로 걸린다.
+# 서로 다른 음절 2개 이상을 요구하는 건 `키키`(KiiiKiii) 같은 1음절 반복 아티스트를 지키기 위함이다.
+_MEMBER_SYLLABLES = frozenset("솜띵키초챈")
 _TAG = re.compile(r"\[([^\]]*)\]")
+# 시각 없는 '섹션 헤더' 줄 판별용(`🎵 하데스 후열 싱크룸 - 솜키띵초챈 순서`).
+_TS_ANYWHERE = re.compile(r"^\s*└?\s*\d{1,2}:\d{2}")
 # 선행 이모지/기호(마커 제외한 하트·아이콘 등)를 벗겨 '아티스트 - 제목'만 남기기 위한 패턴.
 _LEAD_JUNK = re.compile(r"^[^\w가-힣(\[]+")
 
@@ -61,12 +69,48 @@ def hms_to_s(hms: str) -> int:
     return h * 3600 + m * 60 + s
 
 
-def _parse_line(line: str) -> TimelineSong | None:
+def _is_member_permutation(name: str) -> bool:
+    """아티스트 자리가 크루 멤버 음절 조합인가(`솜띵키초`). 순수 함수.
+
+    `띵귤`처럼 음절 하나만 겹치는 개인명은 통과시킨다(`귤`이 집합 밖이라 부분집합이 아니다).
+    """
+    core = name.replace("ver", "").strip()
+    chars = set(core)
+    return 2 <= len(core) <= len(_MEMBER_SYLLABLES) and chars <= _MEMBER_SYLLABLES and len(chars) >= 2
+
+
+def _section_lines(comment: str) -> Iterator[tuple[str, str | None]]:
+    """댓글의 각 타임라인 줄에 **그 줄이 속한 섹션 헤더**를 붙여 내보낸다. 순수 함수.
+
+    이 팬의 타임라인은 시각 없는 헤더 줄로 구획을 나누고(`🎵 하데스 후열 싱크룸 - 솜키띵초챈 순서`),
+    빈 줄이 구획을 끝낸다. 크루 신호가 **헤더에만** 있고 각 곡 줄의 아티스트 자리엔 원곡 가수가
+    들어가는 합방이 있어(202664153에서 25곡, 196641369에서 6곡), 줄 하나만 봐서는 그룹 공연임을
+    알 수 없다. 헤더 줄 자체는 타임스탬프가 없어 `_parse_line`이 어차피 버리므로 내보내지 않는다.
+    """
+    section: str | None = None
+    for raw in comment.split("\n"):
+        stripped = raw.strip()
+        if not stripped:
+            section = None
+        elif not _TS_ANYWHERE.match(stripped):
+            section = stripped
+        else:
+            yield raw, section
+
+
+def _parse_line(line: str, section: str | None = None) -> TimelineSong | None:
     """타임라인 한 줄 → TimelineSong(노래일 때만), 아니면 None. 순수 함수.
 
     조건: 맨 앞 타임스탬프 + 🎤 마커 + `아티스트 - 제목` 형식. 클립/티저 참조와 크루
     공연(`_CREW_NAMES`)은 제외 — BJ가 혼자 부른 곡만 남긴다.
+
+    `section`은 이 줄이 속한 섹션 헤더(`_section_lines`가 준다). 헤더에 크루명이 있으면 그 구획은
+    통째로 그룹 공연이라 제외한다. **헤더 판정에 `싱크룸`/`노래방` 같은 키워드는 쓰지 않는다** —
+    `🎵 후열소통, 알고리즘 따라 노래방`(195027767)처럼 BJ 솔로 8곡이 달린 헤더가 실제로 있어,
+    키워드로 넓히면 진짜 솔로곡이 통째로 날아간다. 크루명만 신호로 쓴다.
     """
+    if section and any(c in section for c in _CREW_NAMES):
+        return None
     line = line.strip().lstrip("└").strip()
     m = _TS.match(line)
     if not m or not _SONG_MARK.search(line):
@@ -84,6 +128,8 @@ def _parse_line(line: str) -> TimelineSong | None:
     artist, title = (p.strip() for p in body.split(" - ", 1))
     if any(c in artist or c in tags for c in _CREW_NAMES):
         return None
+    if _is_member_permutation(artist):
+        return None
     # 제목 끝의 장식 하트/이모지(예: "... 💛")를 벗긴다.
     title = re.sub(r"[\s💛💚💜💙🩷🖤🩶✨🔥]+$", "", title).strip()
     if not title:
@@ -98,8 +144,8 @@ def parse_song_timeline(comments: list[str]) -> list[TimelineSong]:
     """
     songs: list[TimelineSong] = []
     for comment in comments:
-        for raw in comment.split("\n"):
-            song = _parse_line(raw)
+        for raw, section in _section_lines(comment):
+            song = _parse_line(raw, section)
             if song is not None:
                 songs.append(song)
     songs.sort(key=lambda s: s.time_s)
