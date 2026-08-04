@@ -415,8 +415,36 @@ def cmd_add_song(args) -> int:
 
     status는 기본 'draft'(검수 UI가 published로 승격 전까지 정식 카탈로그와 구분). 필요 env:
     SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+
+    **가사를 주면 삽입 전에 카탈로그를 가사로 역조회하고, 닮은 곡이 있으면 거절한다.**
+    제목 추측이 통째로 틀리면 `resolve_song_match`가 정답을 shortlist에 넣지도 못해
+    "이미 있는 곡"이 신곡으로 등록된다(perf #1370: 실제로는 `Mela!`인데 `メランコリック`
+    draft가 생겼고, 그 잘못된 제목이 유튜브 오버레이로 구워진 채 올라갔다). 사람이 후보를
+    보고 판단하게 막는 게 목적이므로, 진짜 동명이곡이면 `--force`로 넘긴다.
     """
     from soopts import db
+    from soopts.analyzers.identify import find_lyrics_matches
+
+    if args.lyrics and not args.force:
+        hits = find_lyrics_matches(args.lyrics, db.load_lyrics_catalog())
+        if hits:
+            print(
+                "거절: 가사가 카탈로그의 기존 곡과 닮았습니다 — 신곡이 맞는지 확인하세요.",
+                file=sys.stderr,
+            )
+            for score, e in hits:
+                print(
+                    f"  {score:5.1f}  {e.title!r} / {e.artist!r} [{e.status}]  {e.song_id}",
+                    file=sys.stderr,
+                )
+            print(
+                "  같은 곡이면 위 song_id를 set-perf --song-id로 연결하세요.\n"
+                "  정말 다른 곡이면 --force로 다시 실행하세요.",
+                file=sys.stderr,
+            )
+            return 2
+    elif not args.lyrics:
+        print("경고: --lyrics가 없어 중복 검사를 건너뜁니다.", file=sys.stderr)
 
     song_id = db.insert_draft_song(
         title=args.title, artist=args.artist, lyrics=args.lyrics, status=args.status
@@ -723,6 +751,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--artist")
     sp.add_argument("--lyrics")
     sp.add_argument("--status", default="draft", help="기본 draft")
+    sp.add_argument(
+        "--force", action="store_true",
+        help="가사 중복 검사에 걸려도 강행(진짜 동명이곡일 때만)")
     sp.set_defaults(func=cmd_add_song)
 
     sp = sub.add_parser(

@@ -337,3 +337,78 @@ def identify_song(
     return resolve_song_match(
         guess.title, guess.artist or "", lyrics, song_likely, catalog, api_key=api_key
     )
+
+
+# --------------------------------------------------------------------------- #
+# 가사 역조회 — "이미 있는 곡을 다른 이름의 신곡으로 등록"하는 사고를 막는다.
+#
+# `resolve_song_match`는 가사를 **제목/아티스트 점수로 만든 shortlist 안에서만** 타이브레이커로
+# 쓴다. 그래서 제목 추측이 통째로 틀리면(`メランコリック` vs 실제 `Mela!`) 정답이 애초에
+# shortlist에 못 들어가 가사가 손쓸 수 없고, 카탈로그에 멀쩡히 있는 곡이 신곡 draft로 등록된다
+# (실제 발생: perf #1370 — 잘못된 제목이 유튜브 오버레이로 영상 픽셀에 구워진 채 업로드됐다).
+# 그래서 제목을 거치지 않고 **가사 대 가사**로 카탈로그 전체를 직접 훑는 경로를 따로 둔다.
+
+# 실측 근거(perf #1370): 정답 `Mela!`가 61.9점, 2위가 26.3점으로 2배 이상 벌어졌다.
+# 임계값은 그 사이에 둔다 — 잡음(20점대)보다 확실히 높고 진짜 신호(50~60점대)보다는 낮게.
+#
+# 45로 기존 draft 59개를 소급 점검하니 8개(14%)가 걸렸고, 그중 7개가 실제 중복이었다
+# (`잘 부탁 드립니다`↔`잘 부탁드립니다` 82.1, `Love wins all` 88.9, `L-O-V-E` 81.5,
+# `1,2,3,4`↔`1.2.3.4` 65.3 등). 오탐은 `팬이야`(55.0, 무관한 곡 3개) 1건.
+# **60으로 올리면 오탐은 사라지지만 정작 잡아야 할 `Mela!`(61.9)가 아슬아슬해진다** —
+# 이 가드는 삽입을 거절하고 사람에게 후보를 보여줄 뿐이라(--force로 통과 가능) 놓치는 쪽보다
+# 한 번 더 묻는 쪽이 싸다. 그래서 오탐을 감수하고 45를 유지한다.
+LYRICS_DUP_THRESHOLD = 45.0
+# LRC 타임코드(`[00:00.63]`)와 `[ar:...]` 류 메타 태그. 카탈로그 가사가 LRC로 들어와 있다.
+_LRC_TAG = re.compile(r"\[[^\]]*\]")
+
+
+@dataclass
+class LyricsEntry:
+    """가사 역조회 전용 카탈로그 행. `CatalogEntry`에 가사를 넣지 않는 건 daily 핫패스가
+    카탈로그를 통째로 읽기 때문이다 — 거기서 쓰지 않는 가사까지 실어 나를 이유가 없다."""
+
+    song_id: str
+    title: str
+    artist: str | None
+    status: str | None
+    lyrics: str
+
+
+def normalize_lyrics(text: str) -> str:
+    """가사 비교용 정규화 — LRC 태그·공백·구두점을 걷어낸다. 순수 함수.
+
+    공백을 **전부** 지우는 건 CJK 때문이다. Whisper 전사는 띄어쓰기가 제멋대로라
+    (`ベランベラとダギル` vs `メラメラとたぎれ`) 토큰 단위 비교가 무의미하고, 문자열을 통으로
+    붙여 부분일치로 보는 편이 훨씬 안정적이다.
+    """
+    text = _LRC_TAG.sub(" ", text)
+    return re.sub(r"[^\w가-힣ぁ-んァ-ヴ一-龥]", "", text).lower()
+
+
+def find_lyrics_matches(
+    lyrics: str,
+    entries: list[LyricsEntry],
+    *,
+    threshold: float = LYRICS_DUP_THRESHOLD,
+    limit: int = 5,
+) -> list[tuple[float, LyricsEntry]]:
+    """가사로 카탈로그를 역조회해 임계값 이상인 후보를 점수 내림차순으로. 순수 함수.
+
+    빈 가사나 빈 카탈로그면 빈 리스트 — "확인할 수 없음"과 "중복 없음"을 호출부가 구분해야 하므로
+    여기서 예외를 던지지 않는다.
+    """
+    from rapidfuzz import fuzz
+
+    needle = normalize_lyrics(lyrics)
+    if not needle:
+        return []
+    scored: list[tuple[float, LyricsEntry]] = []
+    for e in entries:
+        hay = normalize_lyrics(e.lyrics)
+        if not hay:
+            continue
+        score = fuzz.partial_ratio(needle, hay)
+        if score >= threshold:
+            scored.append((score, e))
+    scored.sort(key=lambda x: (-x[0], x[1].title))
+    return scored[:limit]
