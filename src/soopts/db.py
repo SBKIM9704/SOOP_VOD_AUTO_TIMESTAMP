@@ -331,10 +331,29 @@ def fetch_performances(
     return perfs
 
 
+def span_moved(current: dict[str, Any], payload: dict[str, Any]) -> bool:
+    """갱신 payload가 이 performance의 구간(start_s/end_s)을 **실제로** 옮기는가. 순수 함수.
+
+    같은 값 재전송은 이동이 아니다 — perf 단계가 바꿀 필드만 보내되 관성적으로 구간을 함께
+    실어 보내는 경우가 있어, 값이 같으면 검증을 무효화하지 않는다.
+    """
+    return any(
+        k in payload and payload[k] != current.get(k) for k in ("start_s", "end_s")
+    )
+
+
 def update_performance(perf_id: int, fields: dict[str, Any]) -> dict[str, Any] | None:
     """performance 한 행을 갱신한다(vod-review(perf 단계)의 보강/검증 적용).
 
     None 값 필드는 보내지 않는다 — 명시적 NULL 덮어쓰기를 막기 위함. 허용 필드만 통과시킨다.
+
+    **구간이 움직이면 `local_review`를 `pending`으로 되돌린다.** `verified`는 "사람이 *이* 구간을
+    확인했다"는 뜻이라, start/end가 바뀌는 순간 그 진술은 더 이상 참이 아니다. 그대로 두면
+    재검증 없이 유튜브 게이트를 통과한다 — 실제로 202470665가 그렇게 나갔다: 구간만 손보고
+    식별은 옛 값을 믿었는데 연결된 곡이 틀린 상태였고(`メランコリック` draft, 실제는 `Mela!`),
+    잘못된 제목이 오버레이로 **영상 픽셀에 구워진 채** 업로드됐다(삭제 API가 없어 재업로드가 유일한 수습).
+    호출부가 같은 요청에서 `local_review`를 **명시하면 그 값이 이긴다** — perf 단계의 정상 흐름
+    (`--end-s X --local-review verified`)은 방금 그 구간을 확인하고 보내는 것이라 무효화 대상이 아니다.
     """
     allowed = {
         "start_s", "end_s", "title_guess", "lyrics_snippet", "song_id",
@@ -344,6 +363,18 @@ def update_performance(perf_id: int, fields: dict[str, Any]) -> dict[str, Any] |
     payload = {k: v for k, v in fields.items() if k in allowed and v is not None}
     if not payload:
         return None
+    if "local_review" not in payload:
+        client = _client()
+        cur = (
+            client.table("performances")
+            .select("start_s,end_s")
+            .eq("id", perf_id)
+            .execute()
+            .data
+        )
+        if cur and span_moved(cur[0], payload):
+            payload["local_review"] = "pending"
+            log.info("perf #%s 구간 변경 — local_review를 pending으로 되돌립니다", perf_id)
     rows = (
         _client().table("performances").update(payload).eq("id", perf_id).execute().data
     )

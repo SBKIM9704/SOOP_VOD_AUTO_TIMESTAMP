@@ -361,3 +361,29 @@ def test_select_youtube_target_skips_vod_with_unlinked_catalog_song():
     vods = [_vod(1, "2026-07-19"), _vod(2, "2026-06-25")]
     perfs = {1: [_perf(10, songs=None)], 2: [_perf(20)]}
     assert db.select_youtube_target(vods, perfs)["id"] == 2
+
+
+# ---------------------------------------------------------------------------
+# span_moved — 구간이 움직이면 로컬 검증을 무효화한다(update_performance가 쓰는 순수 코어)
+
+
+def test_span_moved_detects_start_change():
+    assert db.span_moved({"start_s": 6428, "end_s": 6652}, {"start_s": 6410})
+
+
+def test_span_moved_detects_end_change():
+    assert db.span_moved({"start_s": 6428, "end_s": 6652}, {"end_s": 6659})
+
+
+def test_span_moved_ignores_same_value_resend():
+    """같은 값 재전송은 이동이 아니다 — 관성적으로 구간을 함께 실어 보내도 검증이 안 풀린다."""
+    assert not db.span_moved(
+        {"start_s": 6428, "end_s": 6652}, {"start_s": 6428, "end_s": 6652, "title_guess": "Mela!"}
+    )
+
+
+def test_span_moved_ignores_non_span_fields():
+    """식별만 고치는 갱신(song_id/제목/가사)은 구간 이동이 아니다."""
+    assert not db.span_moved(
+        {"start_s": 6428, "end_s": 6652}, {"song_id": "ca7d8c79", "title_guess": "Mela!"}
+    )
