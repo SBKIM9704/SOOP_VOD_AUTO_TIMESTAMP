@@ -14,7 +14,7 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
-from soopts.analyzers.identify import CatalogEntry, IdentifyResult
+from soopts.analyzers.identify import CatalogEntry, IdentifyResult, LyricsEntry
 from soopts.log import get_logger
 from soopts.models import Song
 
@@ -379,6 +379,28 @@ def update_performance(perf_id: int, fields: dict[str, Any]) -> dict[str, Any] |
         _client().table("performances").update(payload).eq("id", perf_id).execute().data
     )
     return rows[0] if rows else None
+
+
+def load_lyrics_catalog(exclude_song_id: str | None = None) -> list[LyricsEntry]:
+    """가사가 있는 카탈로그 행만(가사 역조회용). `load_song_catalog`과 따로 두는 이유는
+    거기 달린 docstring 참조 — daily 핫패스에 가사를 실어 나르지 않기 위해서다.
+
+    `exclude_song_id`는 소급 점검용이다(자기 자신과의 100% 일치를 빼야 의미가 있다).
+    """
+    rows = (
+        _client().table("songs").select("id,title,artist,status,lyrics").execute().data
+    )
+    return [
+        LyricsEntry(
+            song_id=r["id"],
+            title=r["title"],
+            artist=r.get("artist"),
+            status=r.get("status"),
+            lyrics=r["lyrics"],
+        )
+        for r in rows
+        if (r.get("lyrics") or "").strip() and r["id"] != exclude_song_id
+    ]
 
 
 def insert_draft_song(

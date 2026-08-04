@@ -272,3 +272,55 @@ def test_identify_song_resolves_via_catalog_when_song_with_title(monkeypatch):
     result = identify_song("가사...", True, catalog)
     assert result.song_id == "picked"
     assert result.identify_status == "auto_matched"
+
+
+# ---------------------------------------------------------------------------
+# 가사 역조회 — 제목이 통째로 틀려도 "이미 있는 곡"을 찾아낸다
+
+
+def _lyr(song_id, title, artist, lyrics, status="published"):
+    return identify_module.LyricsEntry(
+        song_id=song_id, title=title, artist=artist, status=status, lyrics=lyrics
+    )
+
+
+def test_normalize_lyrics_strips_lrc_tags():
+    """카탈로그 가사는 LRC(`[00:02.21] ...`)로 들어와 있어 태그를 걷어내야 비교가 된다."""
+    assert identify_module.normalize_lyrics("[ar:녹황색사회]\n[00:02.21] メラメラとたぎれ") == "メラメラとたぎれ"
+
+
+def test_normalize_lyrics_ignores_spacing_and_punctuation():
+    """Whisper 전사는 띄어쓰기·구두점이 제멋대로다 — 둘을 같은 평면에 올린다."""
+    assert identify_module.normalize_lyrics("나만, 봄!") == identify_module.normalize_lyrics("나만 봄")
+
+
+def test_find_lyrics_matches_finds_song_despite_wrong_title():
+    """실제 사고(perf #1370) 재현 — 제목 추측은 `メランコリック`이었지만 가사는 `Mela!`다.
+
+    제목 기반 shortlist에는 정답이 들어가지도 않으므로 가사 대 가사로 직접 훑어야 잡힌다.
+    """
+    catalog = [
+        _lyr(
+            "mela", "Mela!", "녹황색사회",
+            "[00:02.21] メラメラとたぎれ\n[00:07.37] こんな僕も君のヒーローになりたいのさ",
+        ),
+        _lyr("other", "좋아하니까.", "유이카", "[00:01.00] きみのことが すきだから"),
+    ]
+    hits = identify_module.find_lyrics_matches(
+        "君が僕のヒーローだったように 今なんじゃない? メラメラとたぎれ", catalog
+    )
+    assert hits, "가사가 겹치는데 후보가 비면 가드가 무력하다"
+    assert hits[0][1].song_id == "mela"
+
+
+def test_find_lyrics_matches_ignores_unrelated_songs():
+    """겹치지 않는 가사는 임계값에 못 미쳐 걸리지 않는다 — 매번 걸리면 가드가 무시된다."""
+    catalog = [_lyr("other", "좋아하니까.", "유이카", "きみのことが すきだから ずっと")]
+    assert identify_module.find_lyrics_matches("모두 잠드는 밤에 혼자 우두커니 앉아", catalog) == []
+
+
+def test_find_lyrics_matches_empty_inputs():
+    """빈 가사·빈 카탈로그는 예외 없이 빈 결과 — 호출부가 '확인 불가'를 스스로 다룬다."""
+    assert identify_module.find_lyrics_matches("", [_lyr("a", "t", "x", "가사")]) == []
+    assert identify_module.find_lyrics_matches("가사", []) == []
+    assert identify_module.find_lyrics_matches("가사", [_lyr("a", "t", "x", "   ")]) == []
