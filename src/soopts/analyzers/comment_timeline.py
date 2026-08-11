@@ -51,6 +51,11 @@ _TAG = re.compile(r"\[([^\]]*)\]")
 _TS_ANYWHERE = re.compile(r"^\s*└?\s*\d{1,2}:\d{2}")
 # 선행 이모지/기호(마커 제외한 하트·아이콘 등)를 벗겨 '아티스트 - 제목'만 남기기 위한 패턴.
 _LEAD_JUNK = re.compile(r"^[^\w가-힣(\[]+")
+# 아티스트/제목 구분자. 팬이 한쪽 공백을 빠뜨리는 일이 있어(`박기영- 마지막 사랑`,
+# `쪽빛아리아- 월하의 그대에게` — 실측 2건) 리터럴 `" - "`만 받으면 그 줄이 조용히 버려진다.
+# 그렇다고 `\s*-\s*`까지 풀면 `Non-stop`처럼 **제목 안의 붙은 하이픈**을 구분자로 오인하므로,
+# **한쪽에는 공백이 있을 것**을 요구한다 — 팬의 오타는 살리고 붙임표는 건드리지 않는 최소 완화.
+_SEP = re.compile(r"\s-\s*|\s*-\s")
 
 
 @dataclass
@@ -123,9 +128,10 @@ def _parse_line(line: str, section: str | None = None) -> TimelineSong | None:
     body = _LEAD_JUNK.sub("", body).strip()
     tags = " ".join(_TAG.findall(body))  # 벗기기 전에 확보 — [바보즈 불러놔]가 크루 신호다
     body = re.sub(r"^\[[^\]]*\]\s*", "", body).strip()  # [방종곡]·[튠걸고] 등
-    if " - " not in body:
+    parts = _SEP.split(body, maxsplit=1)
+    if len(parts) != 2:
         return None
-    artist, title = (p.strip() for p in body.split(" - ", 1))
+    artist, title = (p.strip() for p in parts)
     if any(c in artist or c in tags for c in _CREW_NAMES):
         return None
     if _is_member_permutation(artist):

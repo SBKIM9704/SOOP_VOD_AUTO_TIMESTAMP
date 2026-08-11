@@ -139,6 +139,43 @@ def test_collab_original_artists_are_not_crew():
     assert [s.title for s in parse_song_timeline([comment])] == ["어른"]
 
 
+def test_separator_missing_leading_space_is_parsed():
+    # 팬이 하이픈 앞 공백을 빠뜨린 줄(실측: 191376799 `박기영- 마지막 사랑`,
+    # 190198963 `Xenesus,쪽빛아리아- 월하의 그대에게`)도 곡으로 살린다.
+    comment = (
+        "02:50:45 🎤 박기영- 마지막 사랑\n"
+        "06:42:52 🎤 [방종곡] Xenesus,쪽빛아리아- 월하의 그대에게\n"
+    )
+    assert parse_song_timeline([comment]) == [
+        TimelineSong(time_s=10245, title="마지막 사랑", artist="박기영"),
+        TimelineSong(
+            time_s=24172, title="월하의 그대에게", artist="Xenesus,쪽빛아리아"
+        ),
+    ]
+
+
+def test_separator_missing_trailing_space_is_parsed():
+    comment = "01:03:22 🎤 아이유 -애타는 마음\n"
+    assert parse_song_timeline([comment]) == [
+        TimelineSong(time_s=3802, title="애타는 마음", artist="아이유")
+    ]
+
+
+def test_hyphen_without_surrounding_space_is_not_a_separator():
+    # 붙임표는 구분자가 아니다 — 제목 안의 `Non-stop`을 아티스트/제목으로 쪼개면 안 된다.
+    # (한쪽에 공백이 있을 때만 구분자로 본다.)
+    comment = "01:03:22 🎤 오마이걸 - Non-stop\n"
+    assert parse_song_timeline([comment]) == [
+        TimelineSong(time_s=3802, title="Non-stop", artist="오마이걸")
+    ]
+
+
+def test_hyphen_only_title_without_separator_yields_no_song():
+    # 구분자 없이 붙임표만 있는 줄은 여전히 버린다(아티스트를 알 수 없음).
+    comment = "01:03:22 🎤 Non-stop\n"
+    assert parse_song_timeline([comment]) == []
+
+
 def test_iconless_timeline_yields_no_songs():
     # 과거 옛 포맷: 곡을 적었지만 🎤/🎵 아이콘이 없다 → 노래인지 판단 불가 → 타임라인 없음으로 취급
     # (호출부가 no_timeline → manual → 로컬 처리). 마커가 있어야만 곡으로 센다.
