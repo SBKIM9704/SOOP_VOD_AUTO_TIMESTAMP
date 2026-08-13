@@ -5,6 +5,7 @@ tomllib(3.11+) 우선, 3.10은 tomli 폴백. 섹션별 부분 오버라이드를
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -126,6 +127,14 @@ class YouTubeConfig:
     title_template: str = "{date} 노래 모음 ({n}곡)"
     # 1곡짜리 VOD는 "모음"이 어색해서 곡명을 그대로 제목에 쓴다(전체의 1/4가 1곡짜리다).
     title_template_single: str = "{date} {title} - {artist}"
+    # 업로드한 영상을 자동으로 넣을 재생목록 ID(`PL...`). 비우면 추가 자체를 건너뛴다.
+    # **soopts.toml에 적지 말 것** — 이 레포는 public이고 재생목록은 unlisted라 ID가 곧
+    # 접근 권한이다. `SOOPTS_YT_PLAYLIST_ID` env(러너에서는 동명의 시크릿)로 주입하며,
+    # `load_config`가 env 값을 이 필드보다 우선한다.
+    # 재생목록 **생성**은 코드에 없다 — 사람이 스튜디오에서 한 번 만든다
+    # (playlists.insert를 안 만들면 유튜브 쓰기 API가 insert 2개로 끝난다). unlisted 영상도
+    # 재생목록에 넣으면 링크를 아는 사람은 그대로 재생할 수 있다.
+    playlist_id: str = ""
 
 
 @dataclass
@@ -215,4 +224,10 @@ def load_config(path: Path | None = None, work_root: Path | None = None) -> Conf
         cfg.work_root = Path(data["work_root"])
     if work_root is not None:
         cfg.work_root = Path(work_root)
+    # 재생목록 ID만 env를 우선한다 — 이 레포는 public이고 재생목록은 unlisted라,
+    # ID를 soopts.toml에 커밋하면 "링크 아는 사람만"이라는 전제가 깨진다. 러너는
+    # SOOPTS_YT_PLAYLIST_ID 시크릿으로 주입한다. 값이 없으면 빈 문자열 → 추가 단계를 건너뛴다.
+    env_playlist = os.environ.get("SOOPTS_YT_PLAYLIST_ID", "").strip()
+    if env_playlist:
+        cfg.youtube.playlist_id = env_playlist
     return cfg

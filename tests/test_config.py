@@ -61,3 +61,19 @@ def test_youtube_section_partial_override(tmp_path):
     assert cfg.video.preset == "veryfast"        # 나머지는 기본값
     assert cfg.youtube.category_id == "24"
     assert cfg.youtube.privacy == "unlisted"
+
+
+def test_playlist_id_comes_from_env(tmp_path, monkeypatch):
+    """재생목록 ID는 env가 toml을 이긴다 — public 레포에 unlisted 목록 ID를 커밋하지 않으려고."""
+    toml = tmp_path / "soopts.toml"
+    toml.write_text('[youtube]\nplaylist_id = "PLfromtoml"\n', encoding="utf-8")
+
+    monkeypatch.delenv("SOOPTS_YT_PLAYLIST_ID", raising=False)
+    assert load_config(toml).youtube.playlist_id == "PLfromtoml"
+
+    monkeypatch.setenv("SOOPTS_YT_PLAYLIST_ID", "PLfromenv")
+    assert load_config(toml).youtube.playlist_id == "PLfromenv"
+
+    # 빈 값/공백은 오버라이드로 치지 않는다(시크릿 미설정 러너에서 toml 값을 지우면 안 된다).
+    monkeypatch.setenv("SOOPTS_YT_PLAYLIST_ID", "   ")
+    assert load_config(toml).youtube.playlist_id == "PLfromtoml"

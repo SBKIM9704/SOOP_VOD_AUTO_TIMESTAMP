@@ -105,7 +105,7 @@ def format_youtube_description(
 
 def format_upload_notice(
     cfg: Config, vod: dict[str, Any], url: str, title: str, placements: list[Any],
-    dropped: list[dict[str, Any]],
+    dropped: list[dict[str, Any]], playlist_added: bool | None = None,
 ) -> str:
     """업로드 완료 Slack 메시지 — 사람이 눈으로 확인할 수 있게 링크와 규모를 담는다.
 
@@ -121,6 +121,13 @@ def format_upload_notice(
     ]
     if dropped:
         lines.append(f"    ⚠️ 제외된 곡 {len(dropped)}개(상한 또는 구간 문제)")
+    # 재생목록 추가 결과를 여기 싣는다 — 실패는 물론이고 **미설정(False)도 알려야 한다**.
+    # ID를 시크릿으로 주는 구조라 코드만 봐서는 켜졌는지 알 수 없고, 조용히 건너뛰면
+    # 아무도 모르는 채 목록만 계속 비어간다.
+    if playlist_added is False:
+        lines.append("    ⚠️ 재생목록 미설정(SOOPTS_YT_PLAYLIST_ID) — 목록에 추가되지 않았습니다")
+    elif playlist_added:
+        lines.append("    ✅ 재생목록에 추가됨")
     return "\n".join(lines)
 
 
@@ -213,7 +220,8 @@ def run_youtube_upload(
                 f"안 그러면 다음 실행이 같은 영상을 또 올립니다(삭제 불가)."
             )
             raise
-        _notify_slack(format_upload_notice(cfg, vod, url, title, placements, dropped))
+        added = _add_to_playlist(cfg, url)
+        _notify_slack(format_upload_notice(cfg, vod, url, title, placements, dropped, added))
         log.info("완료: %s (%d곡)", url, len(placements))
         return {"status": "uploaded", "title_no": tno, "url": url, "songs": len(placements)}
     except Exception as e:  # noqa: BLE001 — 재시도하지 않고 알린 뒤 죽는다
@@ -223,6 +231,30 @@ def run_youtube_upload(
         # dry-run 산출물은 남긴다 — 사람이 눈으로 확인하려고 만든 것이라 지우면 의미가 없다.
         if not dry_run:
             _cleanup(out_dir)
+
+
+def _add_to_playlist(cfg: Config, url: str) -> bool:
+    """업로드한 영상을 재생목록에 넣는다. **실패해도 실행을 죽이지 않는다.** 성공 여부를 돌려준다.
+
+    호출 위치가 중요하다 — `mark_youtube_uploaded` **뒤**여야 한다. 앞에 두면 재생목록 추가
+    실패가 DB 기록을 막고, 그러면 내일 실행이 같은 VOD를 다시 골라 중복 영상을 올린다(삭제 API가
+    없어 되돌릴 수 없다). 재생목록은 사람이 스튜디오에서 1분이면 고칠 수 있는 순수 부가 작업이라
+    영상 업로드의 성패에 끼워 넣지 않는다 — 대신 Slack으로 알려 사람이 손으로 넣게 한다.
+
+    반환값은 업로드 완료 알림에 실린다. 미설정(False)도 성공(True)만큼 중요하게 드러내야 한다 —
+    ID가 시크릿으로 들어오는 구조라, 조용히 건너뛰면 목록이 비어가는 걸 아무도 눈치채지 못한다.
+    """
+    from soopts.export import youtube
+
+    try:
+        return youtube.add_to_playlist(cfg, url)
+    except Exception as e:  # noqa: BLE001 — 업로드는 이미 성공했다. 알리고 계속 간다.
+        log.warning("재생목록 추가 실패(업로드는 완료됨): %s", e)
+        _notify_slack(
+            f"⚠️ 재생목록 추가 실패 — {url}\n    {e}\n"
+            f"    영상은 정상 업로드됐습니다. 스튜디오에서 직접 재생목록에 넣어주세요."
+        )
+        return False
 
 
 def _cleanup(out_dir: Path) -> None:

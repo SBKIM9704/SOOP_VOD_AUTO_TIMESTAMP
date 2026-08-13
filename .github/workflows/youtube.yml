@@ -40,6 +40,9 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      # 업로드한 영상을 넣을 재생목록. 레포가 public이고 재생목록은 unlisted라 ID를
+      # soopts.toml에 커밋하지 않고 시크릿으로 준다. 미설정이면 추가 단계를 건너뛴다.
+      SOOPTS_YT_PLAYLIST_ID: ${{ secrets.YT_PLAYLIST_ID }}
     steps:
       - uses: actions/checkout@v4
 
