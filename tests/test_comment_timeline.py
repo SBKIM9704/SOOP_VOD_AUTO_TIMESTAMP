@@ -139,6 +139,31 @@ def test_collab_original_artists_are_not_crew():
     assert [s.title for s in parse_song_timeline([comment])] == ["어른"]
 
 
+def test_group_singalong_artist_excluded():
+    # 팬이 아티스트 자리에 팀명이 아닌 **일반 표현**을 써서 단체 합창을 🎤로 적은 줄.
+    # 실측: 202998559의 `🎤 [엔딩곡] 다같이 - 다시 만난 세계(소녀시대)` — 나머지 11곡이 완벽했는데도
+    # 이 한 줄이 needs_review로 남아 VOD 전체가 유튜브 게이트에서 막혔다.
+    comment = (
+        "05:38:33 🎤 [엔딩곡] 다같이 - 다시 만난 세계(소녀시대)\n"  # 단체 합창 → 제외
+        "06:12:24 🎤 이상우 - 그녀를 만나는 곳 100m 전\n"          # BJ 솔로 → 포함
+    )
+    assert [s.title for s in parse_song_timeline([comment])] == ["그녀를 만나는 곳 100m 전"]
+
+
+def test_group_word_inside_real_artist_name_is_kept():
+    # 아티스트 자리 **전체 일치**만 보는 이유 — 부분일치로 넓히면 이 단어를 품은 실제 아티스트가
+    # 날아간다. 제목에 든 경우도 건드리지 않는다(`포켓몬스터ost - 우리는 모두 친구`는 200459739·
+    # 201217563에 실재하는 정상 솔로곡).
+    comment = (
+        "01:10:00 🎤 빈 소년 합창단 - Ave Maria\n"
+        "04:36:38 🎤 포켓몬스터ost - 우리는 모두 친구\n"
+    )
+    assert [s.title for s in parse_song_timeline([comment])] == [
+        "Ave Maria",
+        "우리는 모두 친구",
+    ]
+
+
 def test_separator_missing_leading_space_is_parsed():
     # 팬이 하이픈 앞 공백을 빠뜨린 줄(실측: 191376799 `박기영- 마지막 사랑`,
     # 190198963 `Xenesus,쪽빛아리아- 월하의 그대에게`)도 곡으로 살린다.

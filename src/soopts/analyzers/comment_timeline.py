@@ -41,6 +41,14 @@ _REF_KEYWORDS = ("편집본", "클립이슈", "틀어놓", "티저", "뮤비", "
 # 반대 방향 오류(크루 자작곡을 BJ가 솔로로 불렀는데 제외됨)도 가능하지만, 이 저장소는
 # 일관되게 **놓치는 쪽**을 택한다 — 잘못 기록된 딥링크(혼자 안 부른 곡)가 더 나쁘다.
 _CREW_NAMES = ("바보즈", "하데스", "키띵초")
+# 아티스트 자리에 팀명이 아니라 **'다같이' 같은 일반 표현**을 쓴 단체 합창. 팬은 여기에도 "실제로
+# 불렀다"는 뜻으로 🎤를 쓴다 — 실측: `🎤 [엔딩곡] 다같이 - 다시 만난 세계(소녀시대)`(202998559).
+# `_CREW_NAMES`는 고정 팀명 목록이라 이런 일반명사는 목록을 늘려도 영원히 못 잡아 별도 축이 필요하다.
+#
+# **아티스트 자리 전체와 정확히 일치할 때만** 걸러낸다(공백 무시). 부분일치로 넓히면 `빈 소년 합창단`
+# 처럼 이 단어를 품은 실제 아티스트가 통째로 날아간다. 제목은 아예 보지 않는다 —
+# `🎤 포켓몬스터ost - 우리는 모두 친구`(200459739·201217563)는 제목에 '모두'가 있을 뿐 정상 솔로곡이다.
+_GROUP_ARTISTS = frozenset({"다같이", "다함께", "다들", "모두", "모두다", "전원", "떼창", "합창"})
 # 크루 멤버 애칭의 첫 음절. 팬은 즉석 조합을 `솜띵키초`/`챈솜초띵`처럼 이어 붙여 아티스트 자리에
 # 쓰는데, 조합 수가 무한해 고정 팀명(`_CREW_NAMES`)으로는 못 막는다. 그래서 순열을 나열하는 대신
 # **이 음절들로만 이루어졌는지**를 본다 — 생성 규칙이라 새 조합도 자동으로 걸린다.
@@ -107,7 +115,7 @@ def _parse_line(line: str, section: str | None = None) -> TimelineSong | None:
     """타임라인 한 줄 → TimelineSong(노래일 때만), 아니면 None. 순수 함수.
 
     조건: 맨 앞 타임스탬프 + 🎤 마커 + `아티스트 - 제목` 형식. 클립/티저 참조와 크루
-    공연(`_CREW_NAMES`)은 제외 — BJ가 혼자 부른 곡만 남긴다.
+    공연(`_CREW_NAMES`), 단체 합창(`_GROUP_ARTISTS`)은 제외 — BJ가 혼자 부른 곡만 남긴다.
 
     `section`은 이 줄이 속한 섹션 헤더(`_section_lines`가 준다). 헤더에 크루명이 있으면 그 구획은
     통째로 그룹 공연이라 제외한다. **헤더 판정에 `싱크룸`/`노래방` 같은 키워드는 쓰지 않는다** —
@@ -133,6 +141,8 @@ def _parse_line(line: str, section: str | None = None) -> TimelineSong | None:
         return None
     artist, title = (p.strip() for p in parts)
     if any(c in artist or c in tags for c in _CREW_NAMES):
+        return None
+    if artist.replace(" ", "") in _GROUP_ARTISTS:
         return None
     if _is_member_permutation(artist):
         return None
