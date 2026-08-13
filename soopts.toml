@@ -37,9 +37,9 @@ min_song_s = 45.0          # 구간 내 최장 음악 블록이 이보다 짧으
 
 [youtube]                  # 노래모음 업로드 (soopts youtube-upload)
 # unlisted(일부 공개)로 한 번에 올린다 — 링크를 아는 사람만 보고 검색·추천에는 안 뜬다.
-# 2026-07-18 계정 정지 이후의 원칙으로 유튜브 API는 업로드 하나만 쓴다: 조회(videos.list)·
-# 수정(videos.update)·삭제(videos.delete)는 구현 자체가 없다. 올린 뒤 손볼 일이 있으면
-# 사람이 스튜디오에서 한다(완전 공개 전환도 마찬가지).
+# 2026-07-18 계정 정지 이후의 원칙으로 유튜브 API는 추가(insert) 둘만 쓴다: videos.insert와
+# playlistItems.insert. 조회(videos.list)·수정(videos.update)·삭제(videos.delete)는 구현
+# 자체가 없다. 올린 뒤 손볼 일이 있으면 사람이 스튜디오에서 한다(완전 공개 전환도 마찬가지).
 client_secret = "client_secret.json"          # Google Cloud OAuth 클라이언트(사용자 준비)
 token_file = "~/.config/soopts/yt_token.json" # 최초 동의 후 토큰 저장(이후 자동 갱신)
 privacy = "unlisted"       # 링크로만 시청 가능
@@ -47,6 +47,10 @@ daily_upload_limit = 1     # 하루 1건. 쿼터(1600/10000)보다 "봇 같은 �
 # 치환자: {date}(방송일) {n}(곡 수) / 1곡일 때만 {title} {artist}
 title_template = "{date} 노래 모음 ({n}곡)"
 title_template_single = "{date} {title} - {artist}"
+# 업로드 직후 자동으로 넣을 재생목록은 `SOOPTS_YT_PLAYLIST_ID` env로 준다(여기 적지 않는다 —
+# 이 레포는 public이고 재생목록은 unlisted라 ID가 곧 접근 권한이다). 없으면 추가를 건너뛴다.
+# 재생목록 생성과 기존 영상 소급 추가는 사람이 스튜디오에서 — 코드에 생성 경로가 없고,
+# 수십 건 연속 API 호출은 계정 정지를 부른 그 패턴이다.
 
 [video]                    # 합본 영상 빌드 (export/video.py)
 # 모든 클립을 같은 파라미터로 재인코딩한다 — concat을 -c copy로 붙이려면 필수이고,

@@ -346,12 +346,34 @@ use `performances.youtube_url` directly with no visibility gate.
 
 **Account-suspension defenses are load-bearing, not decoration.** The upload account was suspended
 2026-07-18 (hypothesis: bot-like cadence + read/modify/delete API abuse). So `export/youtube.py`
-calls exactly one YouTube API: `videos.insert`. `videos.list`, `search.list`, `videos.update` and
-`videos.delete` are deliberately absent (`test_youtube.py` asserts they stay absent), there is no
+calls exactly two YouTube APIs, both inserts: `videos.insert` and `playlistItems.insert`.
+`videos.list`, `search.list`, `videos.update`, `videos.delete`, `playlists.insert` and
+`playlistItems.list`/`.delete` are deliberately absent (`test_youtube.py` asserts they stay absent),
+there is no
 retry wrapper (failure → Slack + exit; the NULL marker makes tomorrow's run retry), and the workflow
 sleeps a random 10–30 min on schedule. Nothing can be edited or taken down after the fact, so
 "don't upload it wrong" replaces "fix it later" everywhere in this path — that is the reason the
 selection rule is as strict as it is. A human fixes mistakes in YouTube Studio, not through code.
+
+**The channel playlist (`youtube.playlist_id`, added 2026-08-14).** Uploads are `unlisted`, so they
+never appear in the channel's public video list — a playlist is the only browsable index of them, and
+an unlisted video inside one plays fine for anyone with the playlist link. So after a successful
+upload, `add_to_playlist` appends the video (`playlistItems.insert`, 50 units, exactly once per
+upload — no dedup `list` call is needed because `youtube_status` already forbids re-uploading a VOD).
+This does not weaken the defense above: it never touches the uploaded *video*, and the cadence is
+unchanged. Three constraints hold it in place:
+- **It runs *after* `mark_youtube_uploaded`, and its failure never propagates** (`_add_to_playlist`
+  logs + Slack-warns and returns). Before the DB write, a playlist error would leave
+  `youtube_status` NULL and tomorrow's run would upload a duplicate that cannot be deleted. The
+  playlist is cosmetic and a human fixes it in Studio in a minute; the upload's success is not.
+- **Creating the playlist and back-filling old videos are Studio jobs, not code.** `playlists.insert`
+  is not implemented (the ID is configured by hand), and back-filling the pre-existing uploads by
+  firing dozens of `playlistItems.insert` in a row is precisely the bot-like burst that got the
+  account suspended. An empty `playlist_id` (the default) simply skips the step.
+- **The ID comes from `SOOPTS_YT_PLAYLIST_ID`, not `soopts.toml`.** This repo is public and the
+  playlist is unlisted, so its ID *is* the access control — `load_config` lets that env var override
+  the field, and `youtube.yml` injects it from the `YT_PLAYLIST_ID` secret. It's the only config key
+  with an env override; the rest stay toml-only.
 
 **Video build gotchas** (`export/video.py`):
 - **Never use `download_span` here.** Its multi-part join extracts audio-only ADTS and drops video

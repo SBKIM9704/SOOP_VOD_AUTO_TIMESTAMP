@@ -3,13 +3,20 @@
 최초 1회 OAuth 동의가 필요하다(`scripts/mint_token.py`). 이후에는 저장된 토큰으로 자동
 갱신·업로드한다. 무거운 google 라이브러리는 함수 내부에서만 import한다.
 
-**이 모듈이 호출하는 유튜브 API는 업로드(videos.insert) 하나뿐이다.** 조회(videos.list·
-search.list)도 수정(videos.update)도 삭제(videos.delete)도 구현하지 않는다 — 2026-07-18에
+**이 모듈이 호출하는 유튜브 API는 추가(insert) 둘뿐이다 — `videos.insert`와
+`playlistItems.insert`.** 조회(videos.list·search.list·playlistItems.list)도 수정
+(videos.update)도 삭제(videos.delete·playlistItems.delete)도 구현하지 않는다 — 2026-07-18에
 계정(SBKIM9704)이 정지됐고, 원인 가설이 봇 같은 업로드 케이던스와 조회·수정·삭제 API
 남용이었다. 예전 버전에 있던 `delete_video`/`update_video_metadata`는 의도적으로 되살리지
 않았다. 필요해 보이더라도 다시 추가하지 말 것 — 제목·설명·공개범위를 나중에 고칠 수 없다는
 전제가 "처음부터 제대로 만들어 올린다"는 파이프라인 전체 설계를 떠받치고 있다.
 사람이 손볼 일이 생기면 유튜브 스튜디오에서 직접 한다.
+
+`playlistItems.insert`(2026-08-14 추가)가 이 원칙을 깨지 않는 이유: 올린 **영상 자체**는
+건드리지 않고(수정·삭제 경로는 여전히 없다), 업로드 한 건당 정확히 한 번(50유닛)만 호출되어
+케이던스도 그대로다. 재생목록 **생성**(`playlists.insert`)은 만들지 않았다 — 사람이 스튜디오
+에서 한 번 만들고 ID만 설정에 적는다. 기존 영상 소급 추가도 코드가 아니라 스튜디오에서 한다
+(수십 건 연속 호출이 바로 그 "봇 같은 케이던스"다).
 
 youtube.force-ssl 스코프를 쓴다(youtube.upload만으로는 videos.update가 403
 insufficientPermissions로 막힌다 — 실제로 겪음). 스코프를 바꾼 뒤에는 저장된 토큰 파일을
@@ -132,5 +139,53 @@ def upload_video(cfg: Config, video_path: str | Path, title: str, description: s
     url = f"https://youtu.be/{vid}"
     log.info("업로드 완료(%s): %s  %s", cfg.youtube.privacy, title, url)
     return url
+
+
+def video_id_from_url(url: str) -> str:
+    """영상 URL에서 videoId를 뽑는다(순수 함수).
+
+    업로드 경로는 `upload_video`가 만든 `https://youtu.be/{id}`만 넘기지만, 사람이 설정이나
+    수동 호출로 `watch?v=` 형태를 줄 수 있어 둘 다 받는다. 쿼리(`?t=`)와 프래그먼트는 버린다.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    u = urlparse(url.strip())
+    if not u.scheme and not u.netloc:  # 이미 ID만 넘어온 경우
+        return u.path
+    if "youtu.be" in u.netloc:
+        return u.path.strip("/").split("/")[0]
+    return (parse_qs(u.query).get("v") or [""])[0]
+
+
+def add_to_playlist(cfg: Config, video_url: str) -> bool:
+    """업로드한 영상을 `cfg.youtube.playlist_id` 재생목록 **끝에** 추가한다.
+
+    `playlistItems.insert` 하나만 쓴다 — 중복 확인(playlistItems.list)은 하지 않는다. 조회 API를
+    안 만든다는 원칙도 있지만, 애초에 이 함수는 업로드가 성공한 직후에만 불리고 `youtube_status`
+    마커가 같은 VOD의 재업로드를 막으므로 중복이 생길 수 있는 경로가 없다. `position`을 주지
+    않으면 끝에 붙어서, 스튜디오에서 방송일 순으로 소급 추가해둔 목록 뒤로 새 영상이 자연히
+    시간순으로 쌓인다.
+
+    재생목록 ID가 비어 있으면 False를 돌려주고 아무것도 하지 않는다(설정 안 한 상태가 정상 동작).
+    실패는 예외로 올린다 — 삼킬지 말지는 호출부(업로드는 이미 끝났다)가 정한다.
+    """
+    playlist_id = cfg.youtube.playlist_id.strip()
+    if not playlist_id:
+        log.info("youtube.playlist_id가 비어 있어 재생목록 추가를 건너뜁니다")
+        return False
+    vid = video_id_from_url(video_url)
+    if not vid:
+        raise ValueError(f"영상 URL에서 videoId를 뽑지 못했습니다: {video_url}")
+
+    service = _get_service(cfg)
+    body = {
+        "snippet": {
+            "playlistId": playlist_id,
+            "resourceId": {"kind": "youtube#video", "videoId": vid},
+        }
+    }
+    service.playlistItems().insert(part="snippet", body=body).execute()
+    log.info("재생목록 추가 완료: %s → %s", vid, playlist_id)
+    return True
 
 
