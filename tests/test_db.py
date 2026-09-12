@@ -364,6 +364,39 @@ def test_select_youtube_target_skips_vod_with_unlinked_catalog_song():
 
 
 # ---------------------------------------------------------------------------
+# 클립금지 레지스트리 연동 — 완결된 VOD여도 BJ가 막았으면 안 올린다
+
+
+def test_youtube_block_reason_honors_vod_scope_clip_ban():
+    from soopts.clip_ban import ClipBans
+
+    vod = _vod(1, "2026-07-19")
+    bans = ClipBans(vods={vod["soop_title_no"]: "BJ가 방송 전체 클립금지 선언"})
+    assert db.youtube_block_reason(vod, [_perf(10)]) is None      # 장부 없으면 통과
+    reason = db.youtube_block_reason(vod, [_perf(10)], bans)
+    assert reason is not None and "클립금지" in reason
+
+
+def test_youtube_block_reason_reports_ban_before_incompleteness():
+    """미완결은 검증하면 풀리지만 클립금지는 영구 사유 — --title-no에 진짜 이유를 말해준다."""
+    from soopts.clip_ban import ClipBans
+
+    vod = _vod(1, "2026-07-19")
+    bans = ClipBans(vods={vod["soop_title_no"]: "BJ가 막음"})
+    reason = db.youtube_block_reason(vod, [_perf(10, identify_status="needs_review")], bans)
+    assert "클립금지" in reason
+
+
+def test_select_youtube_target_skips_clip_banned_song():
+    from soopts.clip_ban import ClipBans
+
+    vods = [_vod(1, "2026-07-19"), _vod(2, "2026-06-25")]
+    perfs = {1: [_perf(10), _perf(11)], 2: [_perf(20)]}
+    bans = ClipBans(songs={11: "팬 [클립금지] 태그"})
+    assert db.select_youtube_target(vods, perfs, bans)["id"] == 2
+
+
+# ---------------------------------------------------------------------------
 # span_moved — 구간이 움직이면 로컬 검증을 무효화한다(update_performance가 쓰는 순수 코어)
 
 

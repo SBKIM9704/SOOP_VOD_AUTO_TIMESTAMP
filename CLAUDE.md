@@ -333,6 +333,25 @@ VOD — a wrong title becomes a chapter
 name in a video that cannot be taken down (see below). `youtube_block_reason` returns *why* a VOD was
 rejected, which is what `--title-no` reports.
 
+**The clip-ban registry (`clip_bans.toml`, `clip_ban.py`, added 2026-09).** The BJ sometimes declares
+a song — or a whole broadcast — off limits for redistribution, either as a `[클립금지]` tag in the fan
+timeline or out loud in the stream (heard in the `perf` stage's transcript). That is a human judgment,
+so code doesn't detect it; it only reads a committed ledger of `[[vod]]` / `[[song]]` entries, each
+carrying a mandatory `reason` plus a quoted `evidence` line. `parse_clip_bans` rejects an entry with no
+reason — a ban you can't later re-judge is worse than none, and a typo silently dropping a row would
+publish a video that can't be taken down. **Only the YouTube gate consults it**: the deliverable is the
+SOOP deep link, and what the BJ blocked is the *video*, so `parse_song_timeline` still records those
+songs and `performances` keeps them. `youtube_block_reason(vod, perfs, bans)` reports a ban **before**
+any incompleteness reason (incompleteness is temporary; a ban is permanent), and one banned song blocks
+its whole VOD — a compilation is a single video, so dropping one song would shift every later chapter
+and `?t=` offset. `_pick_target` loads the ledger once and passes it down both paths, including
+`--title-no`: the hand-specified path is exactly where a mistake happens. Before this, bans were
+expressed by borrowing unrelated fields (`identify_status='needs_review'` per song,
+`youtube_status='no_songs'` per VOD), which a later reader can't tell apart from "identification isn't
+finished". A DB column would be cleaner but `vods`/`performances` are owned by `singgyul_sing_book`.
+`soopts clip-bans` prints the ledger; entries are added by editing the file by hand (an auto-add
+command would accumulate rows with no evidence).
+
 **`vods.youtube_status` is the queue marker** (`NULL`→`uploaded`, or `no_songs`). Selecting on
 `youtube_url IS NULL` instead would deadlock the queue: a VOD whose build yields zero usable clips
 would stay NULL and be re-picked every day forever. Rows written before 2026-07-23 carry

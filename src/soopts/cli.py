@@ -241,6 +241,31 @@ def cmd_vods(args) -> int:
     return 0
 
 
+def cmd_clip_bans(args) -> int:
+    """클립금지 장부(clip_bans.toml)를 출력 — vod-review가 "이미 등재됐나"를 확인하는 용도.
+
+    DB도 네트워크도 안 쓰는 파일 조회다. 등재는 사람이 파일을 직접 편집한다 — 사유·근거
+    인용을 손으로 적게 하려는 의도적 선택이다(자동 추가 명령을 만들면 근거 없는 행이 쌓인다).
+    """
+    import json
+
+    from soopts.clip_ban import DEFAULT_PATH, load_clip_bans
+
+    bans = load_clip_bans()
+    if args.json:
+        print(json.dumps({"vods": bans.vods, "songs": bans.songs}, ensure_ascii=False, indent=2))
+        return 0
+    if not bans:
+        print(f"클립금지 등재 없음 ({DEFAULT_PATH})")
+        return 0
+    print(f"VOD 전체 금지 {len(bans.vods)}건 / 곡 금지 {len(bans.songs)}건 ({DEFAULT_PATH})")
+    for title_no, reason in sorted(bans.vods.items()):
+        print(f"  VOD {title_no} — {reason}")
+    for perf_id, reason in sorted(bans.songs.items()):
+        print(f"  perf #{perf_id} — {reason}")
+    return 0
+
+
 def cmd_comments(args) -> int:
     """VOD 원본 댓글을 출력 — vod-review(audit 단계)가 노래 타임라인 유무를 Claude로 판정하는 입력.
 
@@ -696,6 +721,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="출처 라벨 필터(comment=댓글 타임라인 / local=로컬 전사 ingest)")
     sp.add_argument("--json", action="store_true", help="JSON 출력")
     sp.set_defaults(func=cmd_vods)
+
+    sp = sub.add_parser(
+        "clip-bans",
+        help="클립금지 장부(clip_bans.toml) 조회 — 유튜브 게이트가 거르는 VOD/곡",
+    )
+    sp.add_argument("--json", action="store_true", help="JSON 출력")
+    sp.set_defaults(func=cmd_clip_bans)
 
     sp = sub.add_parser(
         "comments",
