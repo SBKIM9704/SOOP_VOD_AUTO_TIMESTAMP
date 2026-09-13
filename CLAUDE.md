@@ -176,8 +176,7 @@ performances, or clip references) and **icon-less** lines (older timeline format
 noise. Clip/teaser references (`편집본`/`클립이슈`/`티저`/`뮤비`/…) are denylisted.
 
 **Crew performances are denylisted too (`_CREW_NAMES`).** Fans write 🎤 to mean "actually sang",
-which includes *group* numbers — `🎤 바보즈 - Pretty Girl(카라)` (sync-room trio),
-`🎤 [성공] 하데스 - 낭만 한도 초과` (crew song-polishing). The goal is songs the BJ sang **alone**,
+which includes *group* numbers — `🎤 바보즈 - Pretty Girl(카라)` (sync-room trio). The goal is songs the BJ sang **alone**,
 so a crew name in the **artist slot or a `[tag]`** (`[바보즈 불러놔] 트와이스 - …`) drops the line.
 Only those two positions are checked: parentheses always hold the *original* artist
 (`릴파ver - LADY(요네즈 켄시)`), so a crew name there means the song is originally the crew's — not
@@ -186,8 +185,22 @@ whose *version* the BJ covered, under 🎵 it is the person who performed — `�
 하모니(하데스)` is another streamer's guest spot, which never reaches this check.) Keep the list to stable
 team names; ad-hoc concert permutations (`챈솜초띵`/`솜띵`) are unbounded and are written 🎵 anyway.
 A new crew leaks group songs until it's added here — `vod-review`'s `audit` stage is the backstop. The reverse error
-(BJ solo-covering a crew's own song gets dropped) is accepted: this repo consistently prefers
-missing a song over recording a wrong one.
+(BJ solo-covering a crew's own song gets dropped) is generally accepted — this repo prefers
+missing a song over recording a wrong one — **with one carve-out: the BJ's own group name `하데스` is not a
+crew signal in the artist slot** (2026-09). The BJ often sings the group's `메가 피스 하모니` alone as a closing
+song, fans write it `🎤 [방종곡] 하데스 - 메가 피스 하모니`, and dropping it didn't just lose a song: a VOD whose
+only 🎤 line was that one fell into `manual`, the most expensive queue (185845199, 185242865). The cost is that
+a crew song-polishing line like `🎤 [성공] 하데스 - 낭만 한도 초과` now gets recorded, and `perf`'s transcript
+check (is it the BJ alone?) catches it. In **section headers and `[tags]`** `하데스` still drops lines
+(`_CREW_CONTEXT_NAMES`): under a `🎵 하데스 싱크룸` header every line names the original artist, so the line
+alone can't reveal a group number.
+
+**BJ-inclusive x-joins are collabs (`_BJ_NAMES`, `_is_bj_collab`).** `🎤 띵귤x리리스x유나기x헤스 - Hype Boy` is a
+sync-room group number, and 175737949 recorded seven such lines as solos. The rule fires only when one of the
+x-joined names is the BJ's — a bare "contains x" rule would drop original collab credits like
+`🎤 아이유x오혁 - 어른`, since under 🎤 the artist slot is whose version was covered. Guest-only duets
+(`리리스x헤스`) and guest solos (`🎤 리리스 - …`) still get through — guest names are unbounded — and are left
+to `perf`.
 
 `timeline_songs_to_spans()` turns each 🎤 song into a span with `start = timestamp` and **`end = start`
 (a 0-length sentinel meaning "end undetermined")**. `_record_songs()` matches each by title/artist
