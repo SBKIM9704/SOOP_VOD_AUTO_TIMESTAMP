@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from soopts.analyzers.identify import CatalogEntry, IdentifyResult, LyricsEntry
+from soopts.clip_ban import ClipBans, clip_ban_reason
 from soopts.log import get_logger
 from soopts.models import Song
 
@@ -431,7 +432,9 @@ COMPLETE_LOCAL_REVIEW = "verified"
 UPLOADABLE_VOD_STATUSES = frozenset({"analyzed", "done"})
 
 
-def youtube_block_reason(vod: dict[str, Any], perfs: list[dict[str, Any]]) -> str | None:
+def youtube_block_reason(
+    vod: dict[str, Any], perfs: list[dict[str, Any]], bans: ClipBans | None = None
+) -> str | None:
     """VOD가 업로드 대상이 **못 되는** 이유. None이면 대상이다(순수 함수).
 
     이유를 문자열로 돌려주는 건 `--title-no`로 특정 VOD를 지정했을 때 왜 걸렀는지 사람에게
@@ -448,11 +451,19 @@ def youtube_block_reason(vod: dict[str, Any], perfs: list[dict[str, Any]]) -> st
     채로 남는다. 그러면 `_resolved_title_artist`가 title_guess("좋지 아니한가(크라잉넛)")와
     "아티스트 미상"으로 폴백해 그 문자열이 그대로 챕터에 박힌다(실제 발생: perf #969).
     카탈로그에 붙지 않은 곡은 올리지 말고 사람이 연결하도록 막는다.
+
+    **클립금지는 미완결보다 먼저 본다**(`bans`, [[clip_ban]]). 미완결은 검증을 더 하면
+    풀리는 일시적 상태지만 클립금지는 BJ가 막은 영구 사유라, `--title-no`로 물었을 때
+    "곡 식별 미완" 같은 곧 사라질 이유 대신 진짜 이유를 말해줘야 한다. `bans`를 주지
+    않으면(기본값) 이 검사는 건너뛴다 — 순수 함수를 쓰는 테스트가 파일을 읽지 않도록.
     """
     if vod.get("status") not in UPLOADABLE_VOD_STATUSES:
         return f"vods.status={vod.get('status')} (analyzed/done 아님)"
     if vod.get("youtube_status"):
         return f"이미 처리됨(youtube_status={vod['youtube_status']})"
+    banned = clip_ban_reason(bans, vod, perfs)
+    if banned:
+        return banned
     if not perfs:
         return "performance 없음"
     for p in perfs:
@@ -470,7 +481,9 @@ def youtube_block_reason(vod: dict[str, Any], perfs: list[dict[str, Any]]) -> st
 
 
 def select_youtube_target(
-    vods: list[dict[str, Any]], perfs_by_vod: dict[int, list[dict[str, Any]]]
+    vods: list[dict[str, Any]],
+    perfs_by_vod: dict[int, list[dict[str, Any]]],
+    bans: ClipBans | None = None,
 ) -> dict[str, Any] | None:
     """업로드할 VOD 하나를 고른다 — 최신 방송부터(순수 함수).
 
@@ -478,7 +491,11 @@ def select_youtube_target(
     노출되게 한다. 방송일이 없는 행은 판단 근거가 없으니 맨 뒤로 보낸다(빈 문자열로 두면
     최신인 척 큐를 새치기한다). tie는 title_no 큰 쪽(더 최근에 올라온 VOD)이 먼저다.
     """
-    ok = [v for v in vods if youtube_block_reason(v, perfs_by_vod.get(v["id"], [])) is None]
+    ok = [
+        v
+        for v in vods
+        if youtube_block_reason(v, perfs_by_vod.get(v["id"], []), bans) is None
+    ]
     if not ok:
         return None
     return max(ok, key=lambda v: (v.get("broadcast_date") or "", int(v["soop_title_no"])))
