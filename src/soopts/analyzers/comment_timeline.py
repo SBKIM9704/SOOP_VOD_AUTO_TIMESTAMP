@@ -40,7 +40,16 @@ _REF_KEYWORDS = ("편집본", "클립이슈", "틀어놓", "티저", "뮤비", "
 # 새 크루가 생기면 여기 추가하기 전까지 그룹곡이 섞일 수 있는데, 그건 `vod-review`(audit 단계)가 잡는다.
 # 반대 방향 오류(크루 자작곡을 BJ가 솔로로 불렀는데 제외됨)도 가능하지만, 이 저장소는
 # 일관되게 **놓치는 쪽**을 택한다 — 잘못 기록된 딥링크(혼자 안 부른 곡)가 더 나쁘다.
-_CREW_NAMES = ("바보즈", "하데스", "키띵초")
+#
+# **단, BJ의 소속 그룹명 `하데스`는 아티스트 자리에서만 예외다(2026-09).** BJ는 그룹곡(메가 피스
+# 하모니)을 방종곡으로 혼자 자주 부르고, 팬은 그걸 `🎤 [방종곡] 하데스 - 메가 피스 하모니`로 적는다.
+# 이걸 크루 공연으로 버리자 곡 하나를 놓치는 데서 끝나지 않고, 🎤가 이 한 줄뿐인 VOD가 통째로
+# `manual`(가장 비싼 로컬 큐)로 떨어졌다(185845199·185242865 — 전사로 둘 다 솔로 완창 확인).
+# 대가로 `🎤 [성공] 하데스 - 낭만 한도 초과` 같은 크루 단체 깎기가 기록될 수 있는데, 그건 perf 단계의
+# 전사 검증(BJ 혼자 불렀나)이 거른다. **섹션 헤더와 [태그]의 하데스는 계속 크루 신호다** — 헤더
+# 아래 곡은 줄마다 원곡 가수가 적혀 줄만 봐선 그룹 공연인지 알 수 없어서(`_CREW_CONTEXT_NAMES`).
+_CREW_NAMES = ("바보즈", "키띵초")
+_CREW_CONTEXT_NAMES = (*_CREW_NAMES, "하데스")
 # 아티스트 자리에 팀명이 아니라 **'다같이' 같은 일반 표현**을 쓴 단체 합창. 팬은 여기에도 "실제로
 # 불렀다"는 뜻으로 🎤를 쓴다 — 실측: `🎤 [엔딩곡] 다같이 - 다시 만난 세계(소녀시대)`(202998559).
 # `_CREW_NAMES`는 고정 팀명 목록이라 이런 일반명사는 목록을 늘려도 영원히 못 잡아 별도 축이 필요하다.
@@ -54,6 +63,14 @@ _GROUP_ARTISTS = frozenset({"다같이", "다함께", "다들", "모두", "모�
 # **이 음절들로만 이루어졌는지**를 본다 — 생성 규칙이라 새 조합도 자동으로 걸린다.
 # 서로 다른 음절 2개 이상을 요구하는 건 `키키`(KiiiKiii) 같은 1음절 반복 아티스트를 지키기 위함이다.
 _MEMBER_SYLLABLES = frozenset("솜띵키초챈")
+# BJ 본인 이름. `🎤 띵귤x리리스x유나기x헤스 - Hype Boy`처럼 **x로 이은 이름에 BJ가 끼어 있으면**
+# 합방 듀엣·단체곡이다(175737949 싱크룸 합방에서 이런 줄 7곡이 솔로로 기록돼 perf에서 지웠다).
+# 'x가 있으면 그룹'으로 넓히지 않는 이유: 🎤의 아티스트 자리는 BJ가 커버한 **원곡 버전**이라
+# `🎤 아이유x오혁 - 어른`처럼 원곡 합작도 x로 적힌다. BJ 이름이 들어간 경우만 확실한 합동 공연이다.
+# 한계: 게스트끼리의 듀엣(`리리스x헤스`)과 게스트 솔로(`🎤 리리스 - …`)는 못 막는다 — 게스트 이름은
+# 끝이 없어 목록으로 따라갈 수 없고, 그건 perf 단계의 전사 검증이 거른다.
+_BJ_NAMES = frozenset({"띵귤"})
+_COLLAB_JOIN = re.compile(r"\s*[xX×]\s*")
 _TAG = re.compile(r"\[([^\]]*)\]")
 # 시각 없는 '섹션 헤더' 줄 판별용(`🎵 하데스 후열 싱크룸 - 솜키띵초챈 순서`).
 _TS_ANYWHERE = re.compile(r"^\s*└?\s*\d{1,2}:\d{2}")
@@ -92,6 +109,15 @@ def _is_member_permutation(name: str) -> bool:
     return 2 <= len(core) <= len(_MEMBER_SYLLABLES) and chars <= _MEMBER_SYLLABLES and len(chars) >= 2
 
 
+def _is_bj_collab(name: str) -> bool:
+    """아티스트 자리가 BJ가 낀 x-합동 표기인가(`띵귤x리리스`). 순수 함수.
+
+    이름 하나(`띵귤`)는 솔로라 통과시키고, 원곡 합작(`아이유x오혁`)도 BJ가 없으니 통과시킨다.
+    """
+    parts = [p.replace("ver", "").strip() for p in _COLLAB_JOIN.split(name) if p.strip()]
+    return len(parts) >= 2 and any(p in _BJ_NAMES for p in parts)
+
+
 def _section_lines(comment: str) -> Iterator[tuple[str, str | None]]:
     """댓글의 각 타임라인 줄에 **그 줄이 속한 섹션 헤더**를 붙여 내보낸다. 순수 함수.
 
@@ -115,14 +141,15 @@ def _parse_line(line: str, section: str | None = None) -> TimelineSong | None:
     """타임라인 한 줄 → TimelineSong(노래일 때만), 아니면 None. 순수 함수.
 
     조건: 맨 앞 타임스탬프 + 🎤 마커 + `아티스트 - 제목` 형식. 클립/티저 참조와 크루
-    공연(`_CREW_NAMES`), 단체 합창(`_GROUP_ARTISTS`)은 제외 — BJ가 혼자 부른 곡만 남긴다.
+    공연(`_CREW_NAMES`), BJ가 낀 합동 공연(`띵귤x…`), 단체 합창(`_GROUP_ARTISTS`)은 제외 — BJ가
+    혼자 부른 곡만 남긴다.
 
     `section`은 이 줄이 속한 섹션 헤더(`_section_lines`가 준다). 헤더에 크루명이 있으면 그 구획은
     통째로 그룹 공연이라 제외한다. **헤더 판정에 `싱크룸`/`노래방` 같은 키워드는 쓰지 않는다** —
     `🎵 후열소통, 알고리즘 따라 노래방`(195027767)처럼 BJ 솔로 8곡이 달린 헤더가 실제로 있어,
     키워드로 넓히면 진짜 솔로곡이 통째로 날아간다. 크루명만 신호로 쓴다.
     """
-    if section and any(c in section for c in _CREW_NAMES):
+    if section and any(c in section for c in _CREW_CONTEXT_NAMES):
         return None
     line = line.strip().lstrip("└").strip()
     m = _TS.match(line)
@@ -140,11 +167,13 @@ def _parse_line(line: str, section: str | None = None) -> TimelineSong | None:
     if len(parts) != 2:
         return None
     artist, title = (p.strip() for p in parts)
-    if any(c in artist or c in tags for c in _CREW_NAMES):
+    if any(c in artist for c in _CREW_NAMES) or any(c in tags for c in _CREW_CONTEXT_NAMES):
         return None
     if artist.replace(" ", "") in _GROUP_ARTISTS:
         return None
     if _is_member_permutation(artist):
+        return None
+    if _is_bj_collab(artist):
         return None
     # 제목 끝의 장식 하트/이모지(예: "... 💛")를 벗긴다.
     title = re.sub(r"[\s💛💚💜💙🩷🖤🩶✨🔥]+$", "", title).strip()

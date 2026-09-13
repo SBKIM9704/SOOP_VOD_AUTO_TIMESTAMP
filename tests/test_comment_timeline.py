@@ -60,13 +60,42 @@ def test_clip_and_teaser_references_excluded():
 
 def test_crew_performance_excluded_by_artist():
     # 팬은 "실제로 불렀다"는 뜻으로 그룹 공연에도 🎤를 쓴다. 목표는 BJ 솔로곡이므로 제외한다.
-    # (실제 사례: 201300619의 바보즈 싱크룸 7곡, 200077825의 하데스 단체 노래깎기 2곡)
+    # (실제 사례: 201300619의 바보즈 싱크룸 7곡)
     comment = (
         "06:02:48 🎤 바보즈 - Pretty Girl(카라)\n"                 # 싱크룸 그룹 → 제외
-        "04:22:50 🎤 [성공] 하데스 - 낭만 한도 초과(하이키)\n"        # 크루 단체 → 제외
         "06:40:06 🎤 [방종곡] 이츠(IT&#039;S) - 청록\n"             # BJ 솔로 → 포함
     )
     assert [s.title for s in parse_song_timeline([comment])] == ["청록"]
+
+
+def test_bj_group_name_in_artist_slot_is_kept():
+    # BJ의 소속 그룹명 `하데스`는 아티스트 자리에선 크루 신호로 쓰지 않는다 — 그룹곡을 방종곡으로 혼자
+    # 부르는 일이 잦고, 버리면 🎤가 그 줄뿐인 VOD가 통째로 manual로 떨어졌다(185845199·185242865).
+    comment = "05:14:58 🎤 [방종곡] 하데스 - 메가 피스 하모니\n"
+    assert [(s.artist, s.title) for s in parse_song_timeline([comment])] == [
+        ("하데스", "메가 피스 하모니")
+    ]
+
+
+def test_bj_group_name_still_drops_by_section_header_and_tag():
+    # 헤더·[태그]의 하데스는 계속 크루 신호다 — 헤더 아래 곡은 줄마다 원곡 가수라 줄만 봐선 모른다.
+    comment = (
+        "🎵 하데스 싱크룸\n"
+        "04:39:11 🎤 뉴진스 - Ditto\n"
+        "\n"
+        "05:31:40 🎤 [하데스 불러놔] 트와이스 - Dance The Night Away\n"
+    )
+    assert parse_song_timeline([comment]) == []
+
+
+def test_bj_collab_artist_excluded():
+    # x로 이은 이름에 BJ가 끼면 합방 듀엣·단체곡이다(175737949 싱크룸 합방에서 7곡이 솔로로 기록됐다).
+    comment = (
+        "01:42:02 🎤 띵귤x리리스x유나기x헤스 - Hype Boy(뉴진스)\n"   # 4인 → 제외
+        "02:21:39 🎤 띵귤 x 유나기 - 이름에게(아이유)\n"              # 듀엣(공백 표기) → 제외
+        "02:08:46 🎤 띵귤 - 장마(정인)\n"                            # BJ 솔로 → 포함
+    )
+    assert [s.artist for s in parse_song_timeline([comment])] == ["띵귤"]
 
 
 def test_crew_performance_excluded_by_tag():
