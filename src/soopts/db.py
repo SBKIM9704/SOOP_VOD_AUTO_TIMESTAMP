@@ -332,6 +332,22 @@ def fetch_performances(
     return perfs
 
 
+def fetch_performance_span(perf_id: int) -> dict[str, Any] | None:
+    """performance 한 행의 현재 구간(`start_s`/`end_s`). 행이 없으면 None.
+
+    `set-perf --lyrics-from`이 구간을 따로 받지 않았을 때, DB의 현재 구간으로 가사를 자른다.
+    """
+    rows = (
+        _client()
+        .table("performances")
+        .select("id,start_s,end_s")
+        .eq("id", perf_id)
+        .execute()
+        .data
+    )
+    return rows[0] if rows else None
+
+
 def span_moved(current: dict[str, Any], payload: dict[str, Any]) -> bool:
     """갱신 payload가 이 performance의 구간(start_s/end_s)을 **실제로** 옮기는가. 순수 함수.
 

@@ -53,10 +53,14 @@
 5. **spans 작성 후 ingest.**
    ```bash
    cat > /tmp/spans_<title_no>.json <<'JSON'
-   {"songs": [{"start_s": 1023, "end_s": 1245, "title": "...", "artist": "...", "lyrics": "..."}]}
+   {"songs": [{"start_s": 1023, "end_s": 1245, "title": "...", "artist": "..."}]}
    JSON
    set -a; source .env; set +a; .venv/bin/python -m soopts ingest <title_no> /tmp/spans_<title_no>.json
    ```
+   **`lyrics`는 넣지 않는다** — spans 파일도 Claude가 쓰는 출력이라, 가사를 적으면 출력 필터에
+   막혀 작업이 끊긴다(perf.md 규칙 ⚠️). 식별은 `title`/`artist`로 하고(모르면 비워 두면
+   needs_review로 남는다), 가사는 이 곡들이 perf 단계를 거칠 때 `transcribe --save` →
+   `set-perf --lyrics-from`으로 코드가 채운다.
    ingest는 카탈로그 매칭 후 `performances`를 기록하고 status를 `analyzed`로 승격한다(멱등).
    미매칭 제목은 `needs_review`로 남아 이후 perf 단계/리뷰 UI에서 해소된다.
 

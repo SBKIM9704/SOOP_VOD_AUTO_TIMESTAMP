@@ -414,24 +414,58 @@ def cmd_perfs(args) -> int:
     return 0
 
 
+def _lyrics_from_file(path: str, start_s: float | None, end_s: float | None) -> str:
+    """`--lyrics-from`: 전사 세그먼트 파일에서 [start_s, end_s] 구간 텍스트를 가사로 꺼낸다.
+
+    가사가 모델 출력을 거치지 않게 하는 통로다(배경은 `analyzers/segments.py`). 구간이 비면
+    거절한다 — 빈 가사를 조용히 넣으면 `has_lyrics`만 틀어지고 아무도 모른다.
+    """
+    from soopts.analyzers.segments import load_segments, lyrics_in_span
+
+    if start_s is None or end_s is None:
+        raise ValueError("--lyrics-from에는 구간(--start-s/--end-s)이 필요합니다")
+    text = lyrics_in_span(load_segments(Path(path)), start_s, end_s)
+    if not text:
+        raise ValueError(
+            f"구간 [{start_s}, {end_s}]에 전사 텍스트가 없습니다: {path} "
+            "(end_s가 start_s와 같은 센티넬이면 --end-s를 함께 주세요)"
+        )
+    return text
+
+
 def cmd_set_perf(args) -> int:
     """performance 한 행을 갱신 — vod-review(perf 단계)가 로컬 검증·보강 결과를 적용.
 
     보내지 않은 필드는 그대로 둔다. 필요 env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+
+    `--lyrics-from`은 구간을 이 요청의 `--start-s/--end-s`에서, 없으면 행의 현재 값에서 잡는다 —
+    perf 단계의 정상 흐름(`--end-s X --lyrics-from F`)은 방금 정한 끝까지를 가사로 담는다.
     """
     from soopts import db
 
+    lyrics = args.lyrics
+    if args.lyrics_from:
+        cur = db.fetch_performance_span(args.perf_id)
+        if cur is None:
+            print(f"performance #{args.perf_id}: 행 없음")
+            return 1
+        start = args.start_s if args.start_s is not None else cur["start_s"]
+        end = args.end_s if args.end_s is not None else cur["end_s"]
+        lyrics = _lyrics_from_file(args.lyrics_from, start, end)
+
     fields = {
         "start_s": args.start_s, "end_s": args.end_s, "title_guess": args.title_guess,
-        "lyrics_snippet": args.lyrics, "song_id": args.song_id,
+        "lyrics_snippet": lyrics, "song_id": args.song_id,
         "identify_status": args.identify_status, "local_review": args.local_review,
     }
     r = db.update_performance(args.perf_id, fields)
     if r is None:
         print(f"performance #{args.perf_id}: 갱신할 필드 없음 또는 행 없음")
         return 1
+    # 가사 본문은 찍지 않고 글자 수만 — 들어갔는지 확인하기엔 충분하다.
     print(f"performance #{args.perf_id} 갱신: "
-          f"identify={r.get('identify_status')} local={r.get('local_review')} song_id={r.get('song_id')}")
+          f"identify={r.get('identify_status')} local={r.get('local_review')} song_id={r.get('song_id')}"
+          + (f" lyrics={len(lyrics)}자" if lyrics else ""))
     return 0
 
 
@@ -450,8 +484,11 @@ def cmd_add_song(args) -> int:
     from soopts import db
     from soopts.analyzers.identify import find_lyrics_matches
 
-    if args.lyrics and not args.force:
-        hits = find_lyrics_matches(args.lyrics, db.load_lyrics_catalog())
+    lyrics = args.lyrics
+    if args.lyrics_from:
+        lyrics = _lyrics_from_file(args.lyrics_from, args.start_s, args.end_s)
+    if lyrics and not args.force:
+        hits = find_lyrics_matches(lyrics, db.load_lyrics_catalog())
         if hits:
             print(
                 "거절: 가사가 카탈로그의 기존 곡과 닮았습니다 — 신곡이 맞는지 확인하세요.",
@@ -468,11 +505,11 @@ def cmd_add_song(args) -> int:
                 file=sys.stderr,
             )
             return 2
-    elif not args.lyrics:
-        print("경고: --lyrics가 없어 중복 검사를 건너뜁니다.", file=sys.stderr)
+    elif not lyrics:
+        print("경고: --lyrics/--lyrics-from이 없어 중복 검사를 건너뜁니다.", file=sys.stderr)
 
     song_id = db.insert_draft_song(
-        title=args.title, artist=args.artist, lyrics=args.lyrics, status=args.status
+        title=args.title, artist=args.artist, lyrics=lyrics, status=args.status
     )
     print(song_id)
     return 0
@@ -489,8 +526,11 @@ def cmd_match_song(args) -> int:
     from soopts import db
     from soopts.analyzers.identify import resolve_song_match
 
+    lyrics = args.lyrics or ""
+    if args.lyrics_from:
+        lyrics = _lyrics_from_file(args.lyrics_from, args.start_s, args.end_s)
     catalog = db.load_song_catalog()
-    r = resolve_song_match(args.title, args.artist or "", args.lyrics or "", True, catalog)
+    r = resolve_song_match(args.title, args.artist or "", lyrics, True, catalog)
     print(json.dumps({
         "song_id": r.song_id, "title_guess": r.title_guess,
         "confidence": round(r.match_confidence, 1), "identify_status": r.identify_status,
@@ -503,6 +543,9 @@ def cmd_transcribe(args) -> int:
 
     구간만 받으므로(멀티파트 안전) 긴 VOD도 빠르다. 캐시는 work/{id}/clips/에 남는다.
     필요 env: GROQ_API_KEY (전사).
+
+    `--save`는 `--segments` 결과를 파일로도 남긴다 — `set-perf`/`add-song`/`match-song`의
+    `--lyrics-from`이 그 파일에서 곡 구간 가사를 꺼내, 가사가 모델 출력을 거치지 않게 한다.
     """
     import tempfile
 
@@ -516,6 +559,8 @@ def cmd_transcribe(args) -> int:
     from soopts.collector.media import download_span, resolve_m3u8_list, split_by_part
     from soopts.collector.meta import fetch_meta
 
+    if args.save and not args.segments:   # 다운로드·전사 비용을 쓰기 전에 거른다
+        raise ValueError("--save는 --segments와 함께 써야 합니다")
     cfg = load_config(
         Path(args.config) if args.config else None,
         work_root=Path(args.work_root) if args.work_root else None,
@@ -554,6 +599,11 @@ def cmd_transcribe(args) -> int:
             for s in segs
         ]
         print(_json.dumps(out, ensure_ascii=False))
+        if args.save:
+            save = Path(args.save)
+            save.parent.mkdir(parents=True, exist_ok=True)
+            save.write_text(_json.dumps(out, ensure_ascii=False), encoding="utf-8")
+            log.info("세그먼트 저장: %s (%d개)", save, len(out))
         return 0
     if args.lang:
         with tempfile.TemporaryDirectory() as td:
@@ -677,6 +727,16 @@ def build_parser() -> argparse.ArgumentParser:
     def add_vod(sp):
         sp.add_argument("vod", help="VOD URL 또는 번호")
 
+    def add_lyrics_args(sp):
+        # add-song/match-song 공용: 가사를 인자로 주거나(--lyrics), 전사 파일의 구간에서 꺼낸다.
+        lyr = sp.add_mutually_exclusive_group()
+        lyr.add_argument("--lyrics")
+        lyr.add_argument(
+            "--lyrics-from", dest="lyrics_from", metavar="SEGMENTS_JSON",
+            help="transcribe --segments --save 파일에서 [--start-s, --end-s] 구간 가사를 꺼냄")
+        sp.add_argument("--start-s", type=float, dest="start_s", help="--lyrics-from 구간 시작 초")
+        sp.add_argument("--end-s", type=float, dest="end_s", help="--lyrics-from 구간 끝 초")
+
     sp = sub.add_parser("collect", help="메타 + 채팅(스티커) 수집")
     add_vod(sp)
     sp.add_argument("--reparse", action="store_true", help="raw XML에서 chat.jsonl만 재생성(네트워크 없음)")
@@ -769,7 +829,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--start-s", type=int, dest="start_s")
     sp.add_argument("--end-s", type=int, dest="end_s")
     sp.add_argument("--title-guess", dest="title_guess")
-    sp.add_argument("--lyrics")
+    lyr = sp.add_mutually_exclusive_group()
+    lyr.add_argument("--lyrics")
+    lyr.add_argument(
+        "--lyrics-from", dest="lyrics_from", metavar="SEGMENTS_JSON",
+        help="transcribe --segments --save 파일에서 곡 구간 가사를 꺼내 넣음(가사를 직접 쓰지 않음)")
     sp.add_argument("--song-id", dest="song_id")
     sp.add_argument("--identify-status", dest="identify_status",
                     help="auto_matched/needs_review/confirmed 등")
@@ -781,7 +845,7 @@ def build_parser() -> argparse.ArgumentParser:
         "add-song", help="songs에 draft 신곡 삽입 → song_id 출력 (무-카탈로그 곡 등록)")
     sp.add_argument("--title", required=True)
     sp.add_argument("--artist")
-    sp.add_argument("--lyrics")
+    add_lyrics_args(sp)
     sp.add_argument("--status", default="draft", help="기본 draft")
     sp.add_argument(
         "--force", action="store_true",
@@ -792,7 +856,7 @@ def build_parser() -> argparse.ArgumentParser:
         "match-song", help="제목/가수를 카탈로그에 매칭 → song_id JSON (vod-review perf 재식별용)")
     sp.add_argument("--title", required=True)
     sp.add_argument("--artist")
-    sp.add_argument("--lyrics")
+    add_lyrics_args(sp)
     sp.set_defaults(func=cmd_match_song)
 
     sp = sub.add_parser(
@@ -805,6 +869,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--segments", action="store_true",
         help="텍스트 대신 세그먼트별 [{start,end,text}] 타임스탬프 JSON 출력(종료 경계 판정용)")
+    sp.add_argument(
+        "--save", metavar="PATH",
+        help="--segments 결과를 파일로도 저장(set-perf/add-song/match-song의 --lyrics-from 입력)")
     sp.set_defaults(func=cmd_transcribe)
 
     sp = sub.add_parser("fetch", help="yt-dlp로 전체 오디오 다운로드")
