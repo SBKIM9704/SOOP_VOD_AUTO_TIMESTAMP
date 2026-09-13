@@ -261,11 +261,27 @@ never moved on a comment VOD (it's the trusted fan value).
 
 Primitives these stages orchestrate (all in `cli.py`/`db.py`, no Groq except match/transcribe):
 - `soopts perfs [--identify S] [--local S] --json` (`db.fetch_performances`) — performance worklist.
-- `soopts transcribe <vod> --start --end [--lang]` — download+Whisper just that segment.
-- `soopts match-song --title --artist [--lyrics]` (`resolve_song_match`) — catalog lookup → song_id/null.
-- `soopts add-song --title --artist [--lyrics] [--status draft]` (`db.insert_draft_song`) — new draft song.
-- `soopts set-perf <id> --lyrics/--title-guess/--song-id/--identify-status/--local-review/--start-s/--end-s`
-  (`db.update_performance`) — apply the verified/enriched fields.
+- `soopts transcribe <vod> --start --end [--lang] [--segments [--save F]]` — download+Whisper just that
+  segment; `--save` also writes the `[{start,end,text}]` segments to a file for `--lyrics-from`.
+- `soopts match-song --title --artist [--lyrics | --lyrics-from F --start-s --end-s]` (`resolve_song_match`)
+  — catalog lookup → song_id/null.
+- `soopts add-song --title --artist [--lyrics | --lyrics-from F --start-s --end-s] [--status draft]`
+  (`db.insert_draft_song`) — new draft song.
+- `soopts set-perf <id> --lyrics-from F/--title-guess/--song-id/--identify-status/--local-review/--start-s/--end-s`
+  (`db.update_performance`) — apply the verified/enriched fields. `--lyrics-from` cuts the song span (this
+  request's `--start-s/--end-s`, else the row's current ones) out of a saved segments file.
+
+**Lyrics never pass through the model's own output (`--lyrics-from`, `analyzers/segments.py`, 2026-09).**
+The stages used to have Claude type `--lyrics "<가사>"` itself, and to fix Whisper's mishearings it
+reconstructed the published lyrics from memory — reproducing copyrighted lyrics verbatim, dozens of words
+per song. The API's output content filter blocked those responses and killed the run (twice in one
+backfill, both right before a lyric-bearing `set-perf`). So lyrics now flow file → code → DB: `transcribe
+--segments --save` persists the segments and `--lyrics-from` slices the span, leaving only ids and seconds
+in the model's output. Segments are picked by **overlap**, not containment, so a first/last line whose
+segment straddles the span edge isn't lost. The stored value is the transcript as heard (mishearings
+included), not the published lyric — acceptable because `performances.lyrics_snippet` is read nowhere in
+this repo except the `has_lyrics` flag, and the local-ingest path already stored transcript text.
+`--lyrics` still exists but the skill doesn't use it; evidence in reports is seconds + non-lyric speech.
 
 ### VOD selection (`_select_vods` in `batch.py`, `select_targets` in `db.py`)
 

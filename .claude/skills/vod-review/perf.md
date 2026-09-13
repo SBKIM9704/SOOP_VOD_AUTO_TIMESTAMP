@@ -1,7 +1,7 @@
 # 단계: perf — performance 구간 재전사로 검증·보강
 
 이미 기록된 `performances`(daily 자동매칭 또는 ingest가 만든 것)를 **로컬에서 검증·보강**한다.
-각 곡을 재전사해 ①진짜 노래인지 ②BJ가 혼자 불렀는지 ③**곡 끝(end_s)** 을 채우고, 정확한 가사·
+각 곡을 재전사해 ①진짜 노래인지 ②BJ가 혼자 불렀는지 ③**곡 끝(end_s)** 을 채우고, 구간 가사(전사문)·
 제목·`song_id`를 채운 뒤 `local_review`를 기록한다.
 
 **핵심 — start는 진실, end는 여기서 정한다(North Star).** 댓글 타임라인 곡은 daily가 `start_s`(팬
@@ -47,8 +47,11 @@
    의 start**가 자연스러운 상한이다. (제목이 영어권이면 `--lang en`.)
    ```bash
    set -a; source .env; set +a; \
-     .venv/bin/python -m soopts transcribe <title_no> --start <start_s> --end $((<start_s> + 420)) --segments
+     .venv/bin/python -m soopts transcribe <title_no> --start <start_s> --end $((<start_s> + 420)) --segments \
+     --save work/<title_no>/segs/<perf_id>.json
    ```
+   `--save`는 같은 세그먼트를 파일로도 남긴다 — ③의 식별과 ④의 적용이 `--lyrics-from`으로 여기서 곡 구간
+   가사를 꺼내므로 **가사를 손으로 옮겨 쓰지 않는다**(아래 규칙 ⚠️ 참조).
    `--segments`는 `[{start,end,text}]`(VOD 절대초)를 출력한다 — **종료 멘트 위치를 찾아 그 앞의
    마지막 가사를 종료로 잡는 용도**(③ 참조). (ingest 곡은 이미 end>start가 있으니 그 구간을 전사해 확인만.)
 
@@ -82,12 +85,12 @@
      (ingest 곡은 사람이 넣은 end가 길면 트림, 시작이 명백히 틀렸으면 그때만 start도 보정.)
    - **식별:** 가사로 제목/가수를 정하고 카탈로그 매칭 확인:
      ```bash
-     set -a; source .env; set +a; .venv/bin/python -m soopts match-song --title "<제목>" --artist "<가수>" --lyrics "<가사일부>"
+     set -a; source .env; set +a; .venv/bin/python -m soopts match-song --title "<제목>" --artist "<가수>" --lyrics-from work/<title_no>/segs/<perf_id>.json --start-s <start_s> --end-s <end_s>
      ```
      - `song_id` 나옴 → 카탈로그에 있음.
      - `song_id: null` → 신곡. **실제로 없을 때만** draft 등록(match-song으로 먼저 확인, 중복 방지):
        ```bash
-       set -a; source .env; set +a; .venv/bin/python -m soopts add-song --title "<제목>" --artist "<가수>" --lyrics "<가사>"
+       set -a; source .env; set +a; .venv/bin/python -m soopts add-song --title "<제목>" --artist "<가수>" --lyrics-from work/<title_no>/segs/<perf_id>.json --start-s <start_s> --end-s <end_s>
        # 출력된 uuid가 song_id
        ```
    - **⚠️ song_id가 이미 있어도(auto_matched) 믿지 말고 교차검증하라.** 연결된
@@ -106,7 +109,7 @@
 4. **적용(set-perf).** 검토했으면 **항상 `--local-review verified`**, `identify-status`는 결과에 따라:
    ```bash
    set -a; source .env; set +a; .venv/bin/python -m soopts set-perf <id> \
-     --lyrics "<정확한 가사>" --title-guess "<제목>" --song-id <song_id> \
+     --lyrics-from work/<title_no>/segs/<perf_id>.json --title-guess "<제목>" --song-id <song_id> \
      --identify-status auto_matched --local-review verified \
      --start-s <보정시작> --end-s <보정끝>
    ```
@@ -117,6 +120,12 @@
 
 ## 규칙 (공유 규칙에 더해)
 - **전사문을 실제로 읽고 판정하라** — title_guess만 믿지 말 것(그게 틀렸을 수 있어 재검증하는 것).
+- **⚠️ 가사를 직접 쓰지 마라 — 응답이 출력 필터에 막혀 작업이 중단된다.** `--lyrics "<가사>"`처럼 가사를
+  인자로 타이핑하거나 보고에 가사 소절을 인용하면 저작권 가사를 원문 그대로 출력하게 되고, API의 출력
+  콘텐츠 필터가 그 응답을 막는다(2026-09 백필 중 2회 — 둘 다 가사가 든 `set-perf`를 쓰기 직전).
+  Whisper 오인식을 공개 가사로 '고쳐' 적는 것도 같은 문제다. 가사는 항상 `transcribe --save` 파일 →
+  `--lyrics-from`으로 **코드가** 넣게 하고(저장값은 들린 그대로의 전사문), 판정 근거는
+  `17854s "(곡명)였습니다"`처럼 **초 + 비가사 발화**로 적는다.
 - **song_id가 연결돼 있어도 그 곡이 맞는지 가사로 확인하라** — auto_matched는 "식별 시도됨"일 뿐
   정답 보장이 아니다. 틀린 song_id가 유튜브 오버레이/설명에 그대로 박히고, 오버레이는 재업로드로만
   고칠 수 있다(삭제/수정 API 없음).
@@ -126,6 +135,6 @@
   마지막 가사에서 자르면 아웃트로가 날아감). 단 그 사이가 별풍선 감사·게임 잡담이면 아웃트로 아님 →
   마지막 가사 직후로(Guard B). 곡 중간 조용한 구간에서 멈추지 말 것(Guard A). 댓글 곡은 센티넬(=start)을
   실제 끝으로 **설정**, ingest 곡은 긴 end를 트림. start는 신뢰(안 건드림). 구간 비정상(<30s)이면 보류.
-- **대량 처리 시 진행/결과 요약을 보여준다.** 파괴적 판단(needs_human·경계 보정)은 가사 인용 근거를 남긴다.
+- **대량 처리 시 진행/결과 요약을 보여준다.** 파괴적 판단(needs_human·경계 보정)은 근거를 남기되 **초 단위 시각 + 비가사 발화**로 적는다(가사 인용 금지 — 위 ⚠️).
 - 전사 실패한 곡은 건너뛰고(그대로 pending) 표에 남긴다.
-- 처리 후 캐시 정리: `rm -f work/*/clips/seg_*.mp4`
+- 처리 후 캐시 정리: `rm -f work/*/clips/seg_*.mp4`, 세그먼트 파일은 `rm -rf work/*/segs`
