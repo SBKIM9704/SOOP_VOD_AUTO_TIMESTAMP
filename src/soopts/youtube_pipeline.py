@@ -140,22 +140,29 @@ def _pick_target(
     """업로드 대상 VOD와 그 곡 목록. title_no를 주면 그 VOD로 고정하되 자격 조건은 똑같이 본다.
 
     곡 목록을 함께 돌려주는 건 호출부가 같은 조회를 한 번 더 하지 않게 하기 위해서다.
+
+    클립금지 레지스트리는 여기서 **한 번만** 읽어 양쪽 경로(자동 선택 / `--title-no` 지정)에
+    똑같이 넘긴다. `--title-no`로 지정해도 예외를 주지 않는 게 핵심이다 — 사람이 손으로
+    지정하는 경로가 곧 실수하는 경로다.
     """
     from soopts import db
+    from soopts.clip_ban import load_clip_bans
+
+    bans = load_clip_bans()
 
     if title_no:
         vod = db.fetch_vod_by_title_no(title_no)
         if not vod:
             raise RuntimeError(f"vods에 없는 VOD입니다: {title_no}")
         perfs = db.fetch_performances_for_vods([vod["id"]]).get(vod["id"], [])
-        reason = db.youtube_block_reason(vod, perfs)
+        reason = db.youtube_block_reason(vod, perfs, bans)
         if reason:
             raise RuntimeError(f"VOD {title_no}는 업로드 대상이 아닙니다 — {reason}")
         return vod, perfs
 
     candidates = db.fetch_youtube_candidates()
     perfs_by_vod = db.fetch_performances_for_vods([v["id"] for v in candidates])
-    vod = db.select_youtube_target(candidates, perfs_by_vod)
+    vod = db.select_youtube_target(candidates, perfs_by_vod, bans)
     if not vod:
         return None, None
     return vod, perfs_by_vod[vod["id"]]
