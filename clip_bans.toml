@@ -55,3 +55,59 @@ song = "윤하 - 사건의 지평선"
 reason = "BJ가 부른 직후 1절이 마음에 안 들었다며 수출(클립 유출) 금지를 선언"
 evidence = "전사 25880s(요지): \"1절이 마음에 안 들어서 1절 끝나고 마이크 끄고 목 가다듬고 다시 했다\" → 25904s: \"아무튼 뭐 알잘딱 하시겠지만 수출 금지입니다\" (팬 타임라인에는 태그 없음 — perf 2490 구간 전사에서 발견)"
 recorded = "2026-09-14"
+
+[[song]]
+perf_id = 1602
+title_no = "189524997"
+song = "성시경 - 거리에서"
+reason = "팬 타임라인 [클립금지] 태그 (BJ 육성은 미확인)"
+evidence = "댓글 07:02:43 \"🎤 [클립금지] 성시경 - 거리에서\""
+recorded = "2026-09-14"
+
+[[song]]
+perf_id = 1727
+title_no = "187717783"
+song = "아이유 - 아이와 나의 바다"
+reason = "팬 타임라인 [클립금지] 태그 (BJ 육성은 미확인)"
+evidence = "댓글 04:25:46 \"🎤 [클립금지] 아이유 - 아이와 나의 바다\""
+recorded = "2026-09-14"
+
+[[song]]
+perf_id = 1728
+title_no = "187717783"
+song = "손디아 - 나의 노래"
+reason = "팬 타임라인 [클립금지] 태그 (BJ 육성은 미확인)"
+evidence = "댓글 04:35:20 \"🎤 [클립금지] 손디아 - 나의 노래\""
+recorded = "2026-09-14"
+
+[[song]]
+perf_id = 1768
+title_no = "186662155"
+song = "카더가든 - 그대 작은 나의 세상이 되어"
+reason = "팬 타임라인 [클립금지] 태그 (BJ 육성은 미확인)"
+evidence = "댓글 03:23:33 \"🎤 [클립금지] 카더가든 - 그대 작은 나의 세상이 되어\""
+recorded = "2026-09-14"
+
+[[song]]
+perf_id = 1776
+title_no = "186662155"
+song = "Tori Kelly - Don'"t"
+reason = "팬 타임라인 [클립금지] 태그 (BJ 육성은 미확인)"
+evidence = "댓글 You"
+recorded = "2026-09-14"
+
+[[song]]
+perf_id = 1885
+title_no = "184805891"
+song = "Adam Levine - Lost Stars"
+reason = "팬 타임라인 [클립금지] 태그 (BJ 육성은 미확인)"
+evidence = "댓글 07:17:49 \"🎤 [클립금지] Adam Levine - Lost Stars\""
+recorded = "2026-09-14"
+
+[[song]]
+perf_id = 1954
+title_no = "183928321"
+song = "소향 - 빛의 세상으로"
+reason = "팬 타임라인 [클립금지] 태그 (BJ 육성은 미확인)"
+evidence = "댓글 05:15:46 \"🎤 소향 - 빛의 세상으로 (클립금지)\""
+recorded = "2026-09-14"
