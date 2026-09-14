@@ -62,3 +62,36 @@ def test_no_total_field_falls_back_to_cumulative():
         [_file(1, 8000_000), _file(2, 12000_000)], total_ms=None))
     assert [p.offset_s for p in meta.parts] == [0, 8000]
     assert meta.total_duration == 20000
+
+
+def test_short_leading_part_in_ms_is_not_read_as_seconds():
+    # 179806825 실측: _1이 92초(92000ms). 값별 추정이면 92000초가 되어 _2 offset이 25시간 밀렸다.
+    meta = parse_meta_response("179806825", _payload(
+        [_file(1, 92_000), _file(2, 6354_167)], total_ms=6446_167))
+    assert [p.duration for p in meta.parts] == [92, 6354]
+    assert [p.offset_s for p in meta.parts] == [0, 92]
+    assert meta.total_duration == 6446
+
+
+def test_short_middle_parts_do_not_shift_later_offsets():
+    # 188819223 실측: 중간 _2·_3이 4초·3초.
+    meta = parse_meta_response("v", _payload(
+        [_file(1, 6505_000), _file(2, 4_000), _file(3, 3_000), _file(4, 10471_000)],
+        total_ms=16983_000))
+    assert [p.duration for p in meta.parts] == [6505, 4, 3, 10471]
+    assert [p.offset_s for p in meta.parts] == [0, 6505, 6509, 6512]
+
+
+def test_short_trailing_part_keeps_total_duration():
+    # 196974651 실측: 마지막 _2가 51.684초. offset엔 영향 없지만 총길이가 5만 초로 부풀었다.
+    meta = parse_meta_response("v", _payload(
+        [_file(1, 18000_000), _file(2, 51_684)], total_ms=18051_684))
+    assert [p.duration for p in meta.parts] == [18000, 52]
+    assert meta.total_duration == 18052
+
+
+def test_all_small_values_fall_back_to_per_value_guess():
+    # 임계를 넘는 값이 하나도 없으면(초 단위 응답으로 보이는 경우) 예전 추정 그대로.
+    meta = parse_meta_response("v", _payload([_file(1, 3600), _file(2, 1800)]))
+    assert [p.duration for p in meta.parts] == [3600, 1800]
+    assert [p.offset_s for p in meta.parts] == [0, 3600]

@@ -82,6 +82,13 @@ piece at its original timestamp (a 390s region became an 18308s file with the ta
 Dropping video costs nothing — every downstream consumer (WAV extraction, segmenter, STT) reads
 audio only.
 
+**Part durations arrive in milliseconds, and the unit is decided per response, not per value**
+(`parse_meta_response`). The old per-value guess ("> 100000 means ms") read a sub-100-second part as
+seconds — `92000` ms became 92000 s — so every later part's offset jumped ~25 h and each comment `start_s`
+past it cut audio from the wrong part (179806825, 176606647; `verify-parts` flagged them as `✗ 보고 92000s
+vs 실제 92s`). A short *last* part only inflates `total_duration` (seen on three already-uploaded VODs,
+whose clips were therefore unaffected). If any value in the response is clearly ms, all of it is.
+
 **A slice never starts exactly where you asked, so `download_span` returns `lead_s`.** Segments are
 only fetchable whole, so the file begins at the segment containing the requested start — up to one
 segment (~6s) early. Treating file `t=0` as the requested time skewed every absolute timestamp by
