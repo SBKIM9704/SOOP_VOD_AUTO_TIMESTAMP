@@ -23,16 +23,32 @@ def _dig(d: dict, *keys):
     return None
 
 
-def _norm_duration(raw) -> int:
-    """duration을 초 단위 int로 정규화. 값이 매우 크면 ms로 간주해 환산한다."""
+_MS_THRESHOLD = 100000  # 단일 파트가 100000초(27시간)를 넘을 리 없으므로 이보다 크면 ms
+
+
+def _norm_duration(raw, *, ms: bool | None = None) -> int:
+    """duration을 초 단위 int로 정규화한다.
+
+    `ms`를 모르면(None) 값 크기로 추정한다(`_MS_THRESHOLD` 초과 → ms). 호출부가 응답 전체의
+    단위를 알면 `ms=True`를 넘겨 값마다 추정하지 않게 한다 — 추정은 짧은 값에서 틀린다
+    (`parse_meta_response` 참고).
+    """
     try:
         v = float(raw)
     except (TypeError, ValueError):
         return 0
-    # 단일 파트가 100000초(27시간)를 넘을 리 없으므로 ms로 판단
-    if v > 100000:
+    if ms is None:
+        ms = v > _MS_THRESHOLD
+    if ms:
         v = v / 1000.0
     return int(round(v))
+
+
+def _is_ms(raw) -> bool:
+    try:
+        return float(raw) > _MS_THRESHOLD
+    except (TypeError, ValueError):
+        return False
 
 
 def parse_meta_response(vod_id: str, payload: dict) -> MetaResult:
@@ -51,6 +67,15 @@ def parse_meta_response(vod_id: str, payload: dict) -> MetaResult:
     넣을 자리(리딩=첫 order>1, 또는 반환 파트 사이 order 점프)가 **하나면** 거기에 전부 더해
     정확히 보정하고, 자리가 둘 이상이면 파트별 길이를 알 수 없어 분배가 모호하므로 첫 자리에
     몰아넣고 경고한다(호출부/빌드 가드가 보류하도록).
+
+    **duration 단위는 응답마다 한 번 정한다 — 값마다 추정하면 짧은 파트가 초로 오인된다.**
+    이 API는 duration을 ms로 준다. 예전엔 값마다 "100000 초과면 ms"로 추정해서, 100초 미만
+    파트(방송 직후 끊겨 92초만 저장된 _1 등)는 `92000`이 그대로 92000초가 됐다. 그 파트가
+    마지막이 아니면 뒤 파트 offset이 통째로 약 25시간 밀려, 댓글 start_s가 가리키는 오디오를
+    엉뚱한 파트에서 잘랐다(실측: 179806825 `[92000ms, 6354167ms]`, 176606647 `[72000ms, …]`,
+    188819223 중간 파트 4s·3s). 그래서 응답 안의 값(파트 duration·`total_file_duration`) 중
+    하나라도 임계를 넘으면 전부 ms로 본다. 모두 임계 이하일 때만(100초 미만짜리 VOD 등)
+    예전처럼 값별로 추정한다.
     """
     data = payload.get("data", payload) if isinstance(payload, dict) else {}
 
@@ -65,20 +90,26 @@ def parse_meta_response(vod_id: str, payload: dict) -> MetaResult:
     if isinstance(files, dict):
         files = [files]
 
+    raw_total = _dig(data, "total_file_duration")
+    raw_files = [
+        (i, f, _dig(f, "duration", "file_duration", "total_time", "playtime"))
+        for i, f in enumerate(files) if isinstance(f, dict)
+    ]
+    # 단위는 응답 단위로 한 번 정한다. 어느 값이든 ms로 확실하면(임계 초과) 전부 ms다.
+    ms = True if any(_is_ms(v) for v in [raw_total, *(r for _, _, r in raw_files)]) else None
+
     # (order, key, dur) — file_order로 정렬(응답 순서를 신뢰하지 않는다)
     entries: list[tuple[int, str, int]] = []
-    for i, f in enumerate(files):
-        if not isinstance(f, dict):
-            continue
+    for i, f, raw_dur in raw_files:
         key = _dig(f, "file_info_key", "fileInfoKey", "key", "file_key") or ""
-        dur = _norm_duration(_dig(f, "duration", "file_duration", "total_time", "playtime"))
+        dur = _norm_duration(raw_dur, ms=ms)
         raw_order = _dig(f, "file_order", "fileOrder", "order")
         order = int(raw_order) if str(raw_order).lstrip("-").isdigit() else (i + 1)
         entries.append((order, str(key), dur))
     entries.sort(key=lambda e: e[0])
 
     returned_sum = sum(d for _, _, d in entries)
-    total_api = _norm_duration(_dig(data, "total_file_duration"))
+    total_api = _norm_duration(raw_total, ms=ms)
     omitted = total_api - returned_sum if total_api else 0
 
     # 누락분을 더할 자리(=그 파트부터 offset을 밀어야 하는 인덱스). 리딩 + 내부 점프.
