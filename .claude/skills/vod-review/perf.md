@@ -88,10 +88,13 @@
      넣으면 안 된다. 팬 타임라인의 `[클립금지]` 태그와 **독립된 축**이라 태그가 없어도 나온다
      (실측: `205491275` 15872s에서 그날 곡 **전체**를 금지 — 팬 태그는 없었다).
      발견하면 **사용자에게 알리고 승인받아** `clip_bans.toml`에 등재한다(사유 + 근거 인용 필수,
-     `[[vod]]`=방송 전체 / `[[song]]`=곡 하나). 등재하면 `soopts clip-bans`에 보이고 유튜브
-     게이트가 그 VOD를 거른다. **`performances`는 그대로 둔다** — 막는 건 영상뿐이고
-     딥링크(타임스탬프)는 계속 제공한다. `identify_status`/`youtube_status`를 빌려 막던
-     예전 방식은 쓰지 않는다(사유가 안 남아 나중에 구분이 안 된다).
+     `[[vod]]`=방송 전체 / `[[song]]`=곡 하나). 등재하면 `soopts clip-bans`에 보인다.
+     **막히는 범위가 둘이 다르다(2026-09-16, PR #93):** `[[song]]`은 **그 곡만** 합본에서 빠지고
+     VOD는 그대로 업로드된다(남는 곡이 0개면 그때만 VOD가 막힌다). `[[vod]]`는 방송 전체가 막힌다.
+     그러니 곡 하나를 등재하면서 "이 VOD는 업로드 불가"라고 보고하지 말 것.
+     **`performances`는 그대로 둔다** — 막는 건 영상뿐이고 딥링크(타임스탬프)는 계속 제공한다.
+     `identify_status`/`youtube_status`를 빌려 막던 예전 방식은 쓰지 않는다(사유가 안 남아
+     나중에 구분이 안 된다).
    - **식별:** 가사로 제목/가수를 정하고 카탈로그 매칭 확인:
      ```bash
      set -a; source .env; set +a; .venv/bin/python -m soopts match-song --title "<제목>" --artist "<가수>" --lyrics-from work/<title_no>/segs/<perf_id>.json --start-s <start_s> --end-s <end_s>
