@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from soopts.clip_ban import ClipBans, clip_ban_reason, load_clip_bans, parse_clip_bans
+from soopts.clip_ban import (
+    ClipBans,
+    clip_ban_reason,
+    load_clip_bans,
+    parse_clip_bans,
+    song_ban_reason,
+    split_banned_perfs,
+)
 
 
 def _vod(title_no: str = "205491275") -> dict:
@@ -67,11 +74,41 @@ def test_vod_scope_ban_blocks_regardless_of_perfs():
     assert reason is not None and "BJ가 전체 금지" in reason
 
 
-def test_song_scope_ban_blocks_the_whole_vod():
-    """합본은 한 영상이라 한 곡만 빼고 올릴 수 없다 — 곡 하나 금지면 VOD가 통째로 빠진다."""
+def test_song_scope_ban_does_not_block_the_vod():
+    """곡 단위 금지는 그 곡만 빼면 되므로 VOD를 막지 않는다(2026-09 변경)."""
     bans = ClipBans(songs={2293: "팬 [클립금지] 태그"})
-    reason = clip_ban_reason(bans, _vod("205967387"), [_perf(2292), _perf(2293)])
-    assert reason is not None and "#2293" in reason
+    assert clip_ban_reason(bans, _vod("205967387"), [_perf(2292), _perf(2293)]) is None
+
+
+# --------------------------------------------------------------------------- #
+# split_banned_perfs — 금지 곡은 빌드 입력에서만 빠진다(performances 행은 그대로)
+# --------------------------------------------------------------------------- #
+def test_split_separates_banned_songs_keeping_order():
+    bans = ClipBans(songs={2293: "곡 금지"})
+    kept, banned = split_banned_perfs(bans, [_perf(2292), _perf(2293), _perf(2294)])
+    assert [p["id"] for p in kept] == [2292, 2294]
+    assert [p["id"] for p in banned] == [2293]
+
+
+def test_split_without_bans_keeps_everything():
+    for empty in (None, ClipBans()):
+        kept, banned = split_banned_perfs(empty, [_perf(1), _perf(2)])
+        assert [p["id"] for p in kept] == [1, 2]
+        assert banned == []
+
+
+def test_split_can_empty_the_build_when_every_song_is_banned():
+    """남는 곡이 없으면 만들 영상이 없다 — 게이트가 이 경우를 다시 막는다(test_db)."""
+    bans = ClipBans(songs={1: "x", 2: "y"})
+    kept, banned = split_banned_perfs(bans, [_perf(1), _perf(2)])
+    assert kept == [] and len(banned) == 2
+
+
+def test_song_ban_reason_reports_why():
+    bans = ClipBans(songs={2293: "팬 [클립금지] 태그"})
+    assert song_ban_reason(bans, 2293) == "팬 [클립금지] 태그"
+    assert song_ban_reason(bans, 9999) is None
+    assert song_ban_reason(None, 2293) is None
 
 
 def test_unrelated_vod_and_perf_pass():

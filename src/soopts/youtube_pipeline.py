@@ -106,6 +106,7 @@ def format_youtube_description(
 def format_upload_notice(
     cfg: Config, vod: dict[str, Any], url: str, title: str, placements: list[Any],
     dropped: list[dict[str, Any]], playlist_added: bool | None = None,
+    *, banned: list[dict[str, Any]] | None = None,
 ) -> str:
     """업로드 완료 Slack 메시지 — 사람이 눈으로 확인할 수 있게 링크와 규모를 담는다.
 
@@ -121,6 +122,11 @@ def format_upload_notice(
     ]
     if dropped:
         lines.append(f"    ⚠️ 제외된 곡 {len(dropped)}개(상한 또는 구간 문제)")
+    # 클립금지 제외는 상한 제외와 **따로** 적는다 — 전자는 사람이 장부에 적은 의도적 제외라
+    # "빠진 게 맞다"는 확인이고, 후자는 고쳐야 할 사고다. 한 줄에 합치면 구분이 사라진다.
+    if banned:
+        ids = ", ".join(f"#{p.get('id')}" for p in banned)
+        lines.append(f"    🚫 클립금지로 뺀 곡 {len(banned)}개({ids}) — 영상·딥링크에 없음")
     # 재생목록 추가 결과를 여기 싣는다 — 실패는 물론이고 **미설정(False)도 알려야 한다**.
     # ID를 시크릿으로 주는 구조라 코드만 봐서는 켜졌는지 알 수 없고, 조용히 건너뛰면
     # 아무도 모르는 채 목록만 계속 비어간다.
@@ -136,17 +142,21 @@ def format_upload_notice(
 # --------------------------------------------------------------------------- #
 def _pick_target(
     title_no: str | None,
-) -> tuple[dict[str, Any], list[dict[str, Any]]] | tuple[None, None]:
-    """업로드 대상 VOD와 그 곡 목록. title_no를 주면 그 VOD로 고정하되 자격 조건은 똑같이 본다.
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]] | tuple[None, None, None]:
+    """업로드 대상 VOD와 (합본에 넣을 곡, 클립금지로 뺀 곡). title_no를 줘도 자격 조건은 똑같다.
 
     곡 목록을 함께 돌려주는 건 호출부가 같은 조회를 한 번 더 하지 않게 하기 위해서다.
 
     클립금지 레지스트리는 여기서 **한 번만** 읽어 양쪽 경로(자동 선택 / `--title-no` 지정)에
     똑같이 넘긴다. `--title-no`로 지정해도 예외를 주지 않는 게 핵심이다 — 사람이 손으로
     지정하는 경로가 곧 실수하는 경로다.
+
+    **금지 곡은 여기서 잘라 내보낸다.** 빌드에 넘기는 목록 자체에서 빼야 영상·챕터·설명·
+    `performances.youtube_url` 어디에도 남지 않는다. 게이트(`youtube_block_reason`)도 같은
+    기준으로 판정하므로 "게이트는 통과인데 빌드에는 금지 곡이 들어가는" 어긋남이 없다.
     """
     from soopts import db
-    from soopts.clip_ban import load_clip_bans
+    from soopts.clip_ban import load_clip_bans, split_banned_perfs
 
     bans = load_clip_bans()
 
@@ -158,14 +168,16 @@ def _pick_target(
         reason = db.youtube_block_reason(vod, perfs, bans)
         if reason:
             raise RuntimeError(f"VOD {title_no}는 업로드 대상이 아닙니다 — {reason}")
-        return vod, perfs
+        kept, banned = split_banned_perfs(bans, perfs)
+        return vod, kept, banned
 
     candidates = db.fetch_youtube_candidates()
     perfs_by_vod = db.fetch_performances_for_vods([v["id"] for v in candidates])
     vod = db.select_youtube_target(candidates, perfs_by_vod, bans)
     if not vod:
-        return None, None
-    return vod, perfs_by_vod[vod["id"]]
+        return None, None, None
+    kept, banned = split_banned_perfs(bans, perfs_by_vod[vod["id"]])
+    return vod, kept, banned
 
 
 def run_youtube_upload(
@@ -176,13 +188,16 @@ def run_youtube_upload(
     from soopts.collector.meta import fetch_meta
     from soopts.export import video
 
-    vod, perfs = _pick_target(title_no)
+    vod, perfs, banned = _pick_target(title_no)
     if not vod:
         log.info("업로드할 VOD가 없습니다 (모든 곡이 검증 완료된 미업로드 VOD 없음)")
         return {"status": "no_target"}
 
     tno = str(vod["soop_title_no"])
     log.info("대상 VOD %s (%s) — %d곡", tno, vod.get("broadcast_date"), len(perfs))
+    for p in banned:
+        log.warning("클립금지로 제외: perf #%s %s(%s)", p.get("id"),
+                    p.get("title_guess"), fmt_hms(int(p.get("start_s") or 0)))
 
     work = work_paths(cfg.work_root, tno).ensure()
     out_dir = work.root / "ytbuild"
@@ -228,7 +243,9 @@ def run_youtube_upload(
             )
             raise
         added = _add_to_playlist(cfg, url)
-        _notify_slack(format_upload_notice(cfg, vod, url, title, placements, dropped, added))
+        _notify_slack(
+            format_upload_notice(cfg, vod, url, title, placements, dropped, added, banned=banned)
+        )
         log.info("완료: %s (%d곡)", url, len(placements))
         return {"status": "uploaded", "title_no": tno, "url": url, "songs": len(placements)}
     except Exception as e:  # noqa: BLE001 — 재시도하지 않고 알린 뒤 죽는다

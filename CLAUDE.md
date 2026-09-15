@@ -377,10 +377,17 @@ carrying a mandatory `reason` plus a quoted `evidence` line. `parse_clip_bans` r
 reason — a ban you can't later re-judge is worse than none, and a typo silently dropping a row would
 publish a video that can't be taken down. **Only the YouTube gate consults it**: the deliverable is the
 SOOP deep link, and what the BJ blocked is the *video*, so `parse_song_timeline` still records those
-songs and `performances` keeps them. `youtube_block_reason(vod, perfs, bans)` reports a ban **before**
-any incompleteness reason (incompleteness is temporary; a ban is permanent), and one banned song blocks
-its whole VOD — a compilation is a single video, so dropping one song would shift every later chapter
-and `?t=` offset. `_pick_target` loads the ledger once and passes it down both paths, including
+songs and `performances` keeps them. `youtube_block_reason(vod, perfs, bans)` reports a **VOD-scope**
+ban (`[[vod]]`) **before** any incompleteness reason (incompleteness is temporary; a ban is permanent).
+A **song-scope** ban (`[[song]]`) does *not* block the VOD (changed 2026-09): `split_banned_perfs`
+drops that one performance from the build input and the rest of the VOD uploads without it. The old
+"one banned song blocks its whole VOD" rule was too expensive — 11 banned songs were holding back 10
+VODs and 165 songs, most over a single fan `[클립금지]` tag — and its stated reason (dropping a song
+would shift every later chapter and `?t=` offset) did not match the code: `build_vod_video` accumulates
+each offset from `ffprobe` on the clip it actually produced, so removing an input song just renumbers
+the rest. A banned song never reaches `placements`, so it gets no `performances.youtube_url`, and its
+row (with the SOOP deep link) is untouched. If *every* song is banned the gate blocks the VOD again —
+there would be nothing left to build. `_pick_target` loads the ledger once and passes it down both paths, including
 `--title-no`: the hand-specified path is exactly where a mistake happens. Before this, bans were
 expressed by borrowing unrelated fields (`identify_status='needs_review'` per song,
 `youtube_status='no_songs'` per VOD), which a later reader can't tell apart from "identification isn't

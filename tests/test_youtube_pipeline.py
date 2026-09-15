@@ -6,6 +6,7 @@ from soopts.youtube_pipeline import (
     DESCRIPTION_MAX,
     chapters_valid,
     fmt_chapter_time,
+    format_upload_notice,
     format_youtube_description,
     format_youtube_title,
 )
@@ -116,3 +117,23 @@ def test_description_stays_within_youtube_limit():
     desc = format_youtube_description(cfg, _vod(), places)
     assert len(desc) <= DESCRIPTION_MAX
     assert "00:00 " in desc
+
+
+# --------------------------------------------------------------------------- #
+# 업로드 완료 알림
+# --------------------------------------------------------------------------- #
+def test_notice_reports_clip_banned_songs_separately_from_capacity_drops():
+    """장부대로 뺀 곡(의도)과 상한·구간 문제로 빠진 곡(사고)은 한 줄에 합치면 구분이 사라진다."""
+    cfg = Config()
+    notice = format_upload_notice(
+        cfg, _vod(), "https://youtu.be/abc", "제목", [_place(0, 200), _place(203, 200)], [],
+        banned=[{"id": 2293, "title_guess": "곡", "start_s": 100}],
+    )
+    assert "클립금지로 뺀 곡 1개(#2293)" in notice
+    assert "상한" not in notice
+
+
+def test_notice_has_no_ban_line_when_nothing_was_banned():
+    cfg = Config()
+    notice = format_upload_notice(cfg, _vod(), "https://youtu.be/abc", "제목", [_place(0, 200)], [])
+    assert "클립금지" not in notice
