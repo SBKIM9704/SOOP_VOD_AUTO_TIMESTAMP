@@ -1,4 +1,5 @@
 from soopts import db
+from soopts.clip_ban import ClipBans
 from soopts.db import select_targets
 from soopts.models import Song
 
@@ -345,6 +346,45 @@ def test_youtube_block_reason_explains_rejection():
     assert db.youtube_block_reason(_vod(1, "2026-06-25"), [_perf(10)]) is None
 
 
+# --------------------------------------------------------------------------- #
+# 클립금지 — 곡 단위는 "그 곡만 제외", VOD 단위는 "전체 차단"
+# --------------------------------------------------------------------------- #
+def test_youtube_block_reason_excludes_banned_song_instead_of_blocking_vod():
+    """곡 하나가 금지여도 나머지로 합본을 만든다(2026-09 변경) — 예전엔 VOD가 통째로 막혔다."""
+    bans = ClipBans(songs={11: "팬 [클립금지] 태그"})
+    assert db.youtube_block_reason(_vod(1, "2026-06-25"), [_perf(10), _perf(11)], bans) is None
+
+
+def test_youtube_block_reason_ignores_incompleteness_of_a_banned_song():
+    """금지 곡은 영상에 안 들어가므로, 그 곡이 미검증이라고 VOD를 막을 이유가 없다."""
+    bans = ClipBans(songs={11: "곡 금지"})
+    perfs = [_perf(10), _perf(11, local_review="pending", identify_status="needs_review")]
+    assert db.youtube_block_reason(_vod(1, "2026-06-25"), perfs, bans) is None
+
+
+def test_youtube_block_reason_blocks_when_every_song_is_banned():
+    """남는 곡이 0개면 만들 영상이 없다 — 여기서 다시 막아야 빈 빌드로 내려가지 않는다."""
+    bans = ClipBans(songs={10: "곡 금지"})
+    reason = db.youtube_block_reason(_vod(1, "2026-06-25"), [_perf(10)], bans)
+    assert reason is not None and "클립금지" in reason
+
+
+def test_youtube_block_reason_vod_scope_ban_still_blocks_whole_vod():
+    """방송 전체 금지는 곡 구성과 무관하게 그대로 차단이다."""
+    vod = _vod(1, "2026-06-25")
+    bans = ClipBans(vods={vod["soop_title_no"]: "BJ가 그날 곡 전체를 금지"})
+    reason = db.youtube_block_reason(vod, [_perf(10)], bans)
+    assert reason is not None and "VOD 전체" in reason
+
+
+def test_select_youtube_target_picks_vod_whose_only_incomplete_song_is_banned():
+    vods = [_vod(1, "2026-07-19"), _vod(2, "2026-06-25")]
+    perfs = {1: [_perf(10), _perf(11, local_review="pending")], 2: [_perf(20)]}
+    assert db.select_youtube_target(vods, perfs)["id"] == 2          # 금지 장부가 없으면 막힌다
+    bans = ClipBans(songs={11: "곡 금지"})
+    assert db.select_youtube_target(vods, perfs, bans)["id"] == 1    # 금지 곡을 빼면 최신이 선택된다
+
+
 def test_youtube_block_reason_blocks_identified_without_catalog_song():
     """identify_status는 완료(auto_matched)인데 song_id가 안 붙어(songs 조인 없음) 있으면 막는다.
 
@@ -387,12 +427,19 @@ def test_youtube_block_reason_reports_ban_before_incompleteness():
     assert "클립금지" in reason
 
 
-def test_select_youtube_target_skips_clip_banned_song():
-    from soopts.clip_ban import ClipBans
-
+def test_select_youtube_target_keeps_vod_with_a_clip_banned_song():
+    """곡 단위 금지는 그 곡만 빼고 올린다(2026-09 변경) — 예전엔 이 VOD를 통째로 건너뛰었다."""
     vods = [_vod(1, "2026-07-19"), _vod(2, "2026-06-25")]
     perfs = {1: [_perf(10), _perf(11)], 2: [_perf(20)]}
     bans = ClipBans(songs={11: "팬 [클립금지] 태그"})
+    assert db.select_youtube_target(vods, perfs, bans)["id"] == 1
+
+
+def test_select_youtube_target_skips_vod_whose_songs_are_all_banned():
+    """남는 곡이 없으면 만들 영상이 없으니 그 VOD는 건너뛴다."""
+    vods = [_vod(1, "2026-07-19"), _vod(2, "2026-06-25")]
+    perfs = {1: [_perf(10), _perf(11)], 2: [_perf(20)]}
+    bans = ClipBans(songs={10: "금지", 11: "금지"})
     assert db.select_youtube_target(vods, perfs, bans)["id"] == 2
 
 

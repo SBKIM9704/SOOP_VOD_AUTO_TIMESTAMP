@@ -6,10 +6,16 @@ BJ는 가끔 "이 곡(또는 오늘 방송 전체)은 클립 금지"라고 밝�
 기계가 자동으로 판정할 대상이 아니므로 이 모듈은 **판정하지 않는다** — `vod-review`의
 perf/audit 단계에서 사람이 확인한 결과를 받아 적는 장부일 뿐이다.
 
-**막을 지점은 유튜브 업로드 하나뿐이다.** 이 레포의 산출물은 SOOP 딥링크(타임스탬프)이고
-BJ가 막은 건 영상 2차 배포다. 그래서 `parse_song_timeline`은 `[클립금지]` 곡도 그대로
-`performances`에 기록하고(딥링크는 계속 제공된다), 걸러내는 건 `db.youtube_block_reason`
-한 곳이다. 파서에서 버리면 타임스탬프까지 같이 사라져 산출물이 손해를 본다.
+**막을 지점은 유튜브 업로드뿐이다.** 이 레포의 산출물은 SOOP 딥링크(타임스탬프)이고 BJ가 막은
+건 영상 2차 배포다. 그래서 `parse_song_timeline`은 `[클립금지]` 곡도 그대로 `performances`에
+기록한다(딥링크는 계속 제공된다). 파서에서 버리면 타임스탬프까지 같이 사라져 산출물이 손해다.
+
+**두 범위는 막는 방식이 다르다(2026-09).**
+- `[[vod]]`(방송 전체): `db.youtube_block_reason`이 그 VOD를 업로드 후보에서 **통째로** 뺀다.
+- `[[song]]`(곡 하나): VOD는 그대로 올리되 `split_banned_perfs`가 **그 곡만** 빌드 입력에서
+  뺀다. 게이트(`youtube_block_reason`)와 빌드 선택(`youtube_pipeline._pick_target`)이 같은
+  함수를 써서 자르므로 "게이트는 통과인데 영상에는 금지 곡이 들어가는" 어긋남이 없다.
+  남는 곡이 0개면 게이트가 다시 막는다 — 만들 영상이 없기 때문이다.
 
 **왜 DB 컬럼이 아니라 레포 파일인가.** `vods`/`performances` 스키마의 주인은 별도 private
 레포(`singgyul_sing_book`)라 여기서 컬럼을 만들 수 없다. 그전까지는 금지 건을
@@ -94,22 +100,52 @@ def parse_clip_bans(data: dict[str, Any]) -> ClipBans:
 def clip_ban_reason(
     bans: ClipBans | None, vod: dict[str, Any], perfs: list[dict[str, Any]]
 ) -> str | None:
-    """이 VOD가 클립금지로 막히는 이유. None이면 막히지 않는다(순수 함수).
+    """이 VOD가 **통째로** 막히는 이유. None이면 막히지 않는다(순수 함수).
 
-    곡 하나만 금지여도 **VOD 전체를 막는다** — 합본은 한 영상이라 한 곡만 빼고 올릴 수
-    없고, 빼고 올리면 챕터/딥링크 오프셋이 전부 밀린다. 사람이 그 곡을 제외하고 갈지
-    결정할 문제지 코드가 알아서 잘라낼 일이 아니다.
+    **VOD 전체 금지(`[[vod]]`)만 차단 사유다.** 곡 단위 금지(`[[song]]`)는 그 곡만 빌드에서
+    빼면 되므로(`split_banned_perfs`) VOD를 막지 않는다. 예전에는 곡 하나가 VOD 전체를
+    막았는데, 그 대가가 컸다 — 2026-09 실측으로 금지 곡 11건이 VOD 10개·곡 165개를
+    묶어두고 있었고, 대부분은 팬 태그 하나 때문이었다.
+
+    "빼면 챕터·`?t=` 오프셋이 밀린다"는 예전 우려는 코드와 맞지 않는다. `build_vod_video`는
+    실제로 만들어진 클립을 `ffprobe`로 재서 offset을 누적하므로(`video.py`), 입력에서 곡을
+    빼면 그 뒤 곡들의 오프셋도 그대로 다시 계산된다. 금지 곡은 `placements`에 없으니
+    `performances.youtube_url`도 받지 않는다.
+
+    `perfs`는 지금 쓰지 않지만 시그니처에 남긴다 — 호출부가 곡 목록과 함께 판정하는 흐름이고,
+    "곡 구성 때문에 VOD 전체를 막아야 하는" 새 사유가 생기면 여기로 들어와야 한다.
     """
     if not bans:
         return None
     title_no = str(vod.get("soop_title_no") or "")
     if title_no in bans.vods:
         return f"클립금지(VOD 전체): {bans.vods[title_no]}"
-    for perf in perfs:
-        reason = bans.songs.get(perf.get("id"))
-        if reason:
-            return f"클립금지(perf #{perf.get('id')}): {reason}"
     return None
+
+
+def split_banned_perfs(
+    bans: ClipBans | None, perfs: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """곡 목록을 (합본에 넣을 곡, 클립금지로 뺄 곡)으로 나눈다(순수 함수). 입력 순서를 지킨다.
+
+    금지 곡도 `performances` 행은 그대로 둔다 — 막는 건 영상뿐이고 SOOP 딥링크(타임스탬프)는
+    계속 제공한다. 여기서 빼는 건 **빌드 입력**이라, 금지 곡은 영상·챕터·설명·
+    `performances.youtube_url` 어디에도 들어가지 않는다.
+    """
+    if not bans:
+        return list(perfs), []
+    kept: list[dict[str, Any]] = []
+    banned: list[dict[str, Any]] = []
+    for perf in perfs:
+        (banned if bans.songs.get(perf.get("id")) else kept).append(perf)
+    return kept, banned
+
+
+def song_ban_reason(bans: ClipBans | None, perf_id: Any) -> str | None:
+    """곡 하나의 금지 사유(없으면 None). 로그·Slack에 "왜 뺐는지"를 싣기 위한 조회다."""
+    if not bans:
+        return None
+    return bans.songs.get(perf_id)
 
 
 def load_clip_bans(path: Path | None = None) -> ClipBans:

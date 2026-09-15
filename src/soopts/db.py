@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from soopts.analyzers.identify import CatalogEntry, IdentifyResult, LyricsEntry
-from soopts.clip_ban import ClipBans, clip_ban_reason
+from soopts.clip_ban import ClipBans, clip_ban_reason, split_banned_perfs
 from soopts.log import get_logger
 from soopts.models import Song
 
@@ -477,11 +477,17 @@ def youtube_block_reason(
         return f"vods.status={vod.get('status')} (analyzed/done 아님)"
     if vod.get("youtube_status"):
         return f"이미 처리됨(youtube_status={vod['youtube_status']})"
-    banned = clip_ban_reason(bans, vod, perfs)
-    if banned:
-        return banned
+    banned_vod = clip_ban_reason(bans, vod, perfs)
+    if banned_vod:
+        return banned_vod
     if not perfs:
         return "performance 없음"
+    # 곡 단위 금지는 VOD를 막지 않고 **그 곡만** 합본에서 뺀다. 그래서 완결성 검사도 남는
+    # 곡만 본다 — 금지 곡은 어차피 영상에 안 들어가므로, 그 곡이 pending이라고 VOD 전체를
+    # 막을 이유가 없다. 빌드도 똑같은 기준으로 자른다(`youtube_pipeline._pick_target`).
+    perfs, _banned_songs = split_banned_perfs(bans, perfs)
+    if not perfs:
+        return "클립금지: 모든 곡이 금지라 합본에 넣을 곡이 없음"
     for p in perfs:
         if p.get("identify_status") not in COMPLETE_IDENTIFY_STATUSES:
             return f"곡 식별 미완: perf #{p.get('id')} identify_status={p.get('identify_status')}"
