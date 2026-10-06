@@ -84,6 +84,54 @@ def test_select_targets_cutoff_does_not_block_retries():
 
 
 # --------------------------------------------------------------------------- #
+# 백필 하한선 — 🎤 관습 이전 시절 VOD 제외
+# --------------------------------------------------------------------------- #
+def test_select_targets_skips_candidates_older_than_floor():
+    """하한선 아래는 댓글 타임라인이 영원히 없어 'manual'만 쌓인다 — 후보에서 뺀다."""
+    candidates = [
+        {"title_no": "2", "title": "관습 이후", "broadcast_date": "2025-10-01"},
+        {"title_no": "1", "title": "관습 이전", "broadcast_date": "2025-08-15"},
+    ]
+    picked = select_targets([], candidates, {}, n=2, floor_date="2025-09-21")
+    assert [p["soop_title_no"] for p in picked] == ["2"]
+
+
+def test_select_targets_includes_candidate_on_the_floor_date():
+    """하한선 당일은 포함 — cutoff와 같은 경계 규약(둘 다 당일 포함)."""
+    candidates = [{"title_no": "1", "title": "A", "broadcast_date": "2025-09-21"}]
+    picked = select_targets([], candidates, {}, n=1, floor_date="2025-09-21")
+    assert [p["soop_title_no"] for p in picked] == ["1"]
+
+
+def test_select_targets_floor_keeps_candidate_without_broadcast_date():
+    """날짜를 모르면 거르지 않는다 — cutoff와 같은 이유."""
+    candidates = [{"title_no": "1", "title": "A", "broadcast_date": None}]
+    picked = select_targets([], candidates, {}, n=1, floor_date="2025-09-21")
+    assert [p["soop_title_no"] for p in picked] == ["1"]
+
+
+def test_select_targets_floor_does_not_block_retries():
+    """재시도는 면제 — 이미 vods 행이 있는 착수분이라 막으면 큐가 안 비워진다."""
+    retryable = [{"soop_title_no": "9", "status": "failed", "retry_count": 0,
+                  "broadcast_date": "2025-08-15"}]
+    picked = select_targets(retryable, [], {}, n=1, floor_date="2025-09-21")
+    assert [p["soop_title_no"] for p in picked] == ["9"]
+
+
+def test_select_targets_cutoff_and_floor_together_keep_only_the_window():
+    """두 경계가 같이 걸리면 그 사이 구간만 남는다."""
+    candidates = [
+        {"title_no": "3", "title": "너무 최신", "broadcast_date": "2026-07-21"},
+        {"title_no": "2", "title": "창 안", "broadcast_date": "2026-01-10"},
+        {"title_no": "1", "title": "너무 과거", "broadcast_date": "2025-08-15"},
+    ]
+    picked = select_targets(
+        [], candidates, {}, n=3, cutoff_date="2026-07-15", floor_date="2025-09-21"
+    )
+    assert [p["soop_title_no"] for p in picked] == ["2"]
+
+
+# --------------------------------------------------------------------------- #
 # 재시도 — retry_count 처리
 # --------------------------------------------------------------------------- #
 def test_select_targets_bumps_retry_count_for_stale_pending():

@@ -92,6 +92,13 @@ class StationConfig:
     # 두 상태 다 자동 재처리 대상이 아니다(fetch_retryable는 failed/pending만 본다).
     # 쿨다운이 지나도 타임라인이 없으면 그때는 정상적으로 'manual' → 사람이 처리한다.
     min_vod_age_days: int = 7
+    # 백필 하한선 'YYYY-MM-DD'(None=끄기). 이 날짜보다 이전 방송은 후보에서 뺀다.
+    # `min_vod_age_days`의 반대쪽 경계다: 쿨다운은 "타임라인이 아직 없는" 최신을 막고,
+    # 이건 "타임라인이 영원히 없는" 과거를 막는다 — 팬이 🎤 관습을 쓰기 전 시절 VOD는
+    # 댓글에 노래 타임라인이 아예 없어서 전부 'manual'로 떨어진다. 백필은 최신순 순회가
+    # 과거로 계속 걸어가는 구조라 저절로 멈추지 않으므로, 바닥을 두지 않으면 가장 비싼
+    # 사람 큐(전체 전사)가 하루 daily_vod_count개씩 영원히 불어난다(실측: 9일에 24개).
+    backfill_floor_date: str | None = None
     # 무-타임라인 VOD는 서버에서 처리하지 않는다 — daily가 'manual'로 표시하고, 사람이
     # 로컬에서 analyze_vod.py 전체 전사로 곡을 뽑아 `soopts ingest`로 기록한다(느리고 부정확한 서버
     # 전체 오디오 sweep을 없앴다). 로컬 full_sweep 폴백은 `soopts process`.

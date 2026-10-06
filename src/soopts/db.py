@@ -50,6 +50,7 @@ def select_targets(
     existing_by_no: dict[str, dict[str, Any]],
     n: int,
     cutoff_date: str | None = None,
+    floor_date: str | None = None,
 ) -> list[dict[str, Any]]:
     """순수 함수: 우선순위 **재시도 > 신규 > 백필** 로 최대 n개를 고른다.
 
@@ -66,6 +67,12 @@ def select_targets(
       고정 폭이라 사전식 비교가 곧 날짜 비교다. broadcast_date가 없으면 판단 근거가 없으니
       거르지 않는다 — 근거 없이 무기한 보류하느니 처리하는 편이 낫다. **재시도는 면제**다:
       이미 vods 행이 있는 = 착수한 작업이고, 여기서 막으면 큐가 영영 안 비워진다.
+    - **floor_date**: 'YYYY-MM-DD'. broadcast_date가 이보다 이전인 후보는 제외한다(백필 하한선,
+      `station.backfill_floor_date`). cutoff_date의 반대쪽 경계다 — 너무 최신이라 타임라인이
+      아직 없는 쪽을 cutoff가 막고, **팬이 🎤 관습을 쓰기 전이라 타임라인이 영원히 없는 쪽**을
+      이게 막는다. 그 시절 VOD는 자동 처리로 얻을 게 없고 전부 `manual`로 떨어져 가장 비싼
+      사람 큐(전체 전사)만 하루 몇 개씩 불린다 — 백필이 과거로 걸어가는 설계라 저절로 멈추지
+      않으므로 바닥을 명시해 끊는다. 날짜를 모르는 후보와 재시도는 cutoff와 같은 이유로 면제.
 
     선택 시점에 보이는 pending은 반드시 죽은 실행이 남긴 것이다 — `concurrency: soopts-daily`
     가 동시 실행을 막고, 한 실행 안에서 선택은 처리보다 먼저 한 번만 일어난다.
@@ -98,6 +105,8 @@ def select_targets(
             continue
         bdate = c.get("broadcast_date")
         if cutoff_date and bdate and bdate > cutoff_date:
+            continue
+        if floor_date and bdate and bdate < floor_date:
             continue
         picked.append(_vod_row(title_no, c, {}, 0))
         seen.add(title_no)
