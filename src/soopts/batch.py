@@ -103,6 +103,21 @@ def cooldown_cutoff(days: int, now: datetime | None = None) -> str | None:
     return (kst_now.date() - timedelta(days=days)).isoformat()
 
 
+def page_below_floor(page: list[dict[str, Any]], floor_date: str | None) -> bool:
+    """이 페이지가 통째로 백필 하한선 아래인가. 순수 함수 — 페이징 중단 판단용.
+
+    SOOP 목록은 최신순이라 한 페이지가 전부 하한선 아래면 이후 페이지도 전부 아래다.
+    날짜를 모르는 항목(broadcast_date 없음)은 `select_targets`가 거르지 않으므로 여기서도
+    "아래"로 보지 않는다 — 하나라도 살아 있으면 계속 넘긴다. 빈 페이지는 판단 근거가
+    없으니 False(루프의 기존 종료 조건에 맡긴다).
+    """
+    if not floor_date or not page:
+        return False
+    return all(
+        (c.get("broadcast_date") or "") and c["broadcast_date"] < floor_date for c in page
+    )
+
+
 def next_vod_status(detected: int) -> str:
     """VOD 처리 직후 상태. 감지된 노래가 없으면 검수·업로드할 게 없으니 바로 종결(done),
     있으면 업로드 큐 소진까지 거쳐야 하니 analyzed로 남긴다."""
@@ -290,6 +305,11 @@ def _select_vods(cfg: Config, bj_id: str, count: int) -> list[dict[str, Any]]:
     쿨다운(`station.min_vod_age_days`) 안의 최신 VOD는 후보에서 빠진다. 슬롯이 비지는
     않는다 — 순회가 그만큼 과거로 더 내려가 백필로 채우고, 백필까지 마르면 그냥 덜 처리하고
     끝난다(VOD가 창 밖으로 나오면 다음 런이 잡는다).
+
+    백필 하한선(`station.backfill_floor_date`)보다 과거인 후보도 빠진다. **목록은 최신순이라
+    하한선 아래로 내려간 페이지부터는 전부 아래**이므로, 그 지점에서 페이징을 끊는다 —
+    끊지 않으면 하한선 위가 다 처리된 정상 상태에서 매 런이 목록 전체를 헛돌게 된다
+    (`targets`가 count에 영원히 못 닿으므로 루프의 종료 조건이 안 걸린다).
     """
     from soopts import db
     from soopts.collector.vod_list import iter_vod_pages
@@ -297,17 +317,20 @@ def _select_vods(cfg: Config, bj_id: str, count: int) -> list[dict[str, Any]]:
     if count <= 0:
         return []
     cutoff = cooldown_cutoff(cfg.station.min_vod_age_days)
+    floor = cfg.station.backfill_floor_date
     retryable = db.fetch_retryable(count)
     candidates: list[dict[str, Any]] = []
     existing_by_no: dict[str, dict[str, Any]] = {}
-    targets = db.select_targets(retryable, candidates, existing_by_no, count, cutoff)
+    targets = db.select_targets(retryable, candidates, existing_by_no, count, cutoff, floor)
 
     if len(targets) < count:
         for page in iter_vod_pages(cfg, bj_id):
             candidates.extend(page)
             existing_by_no.update(db.fetch_existing([str(c["title_no"]) for c in page]))
-            targets = db.select_targets(retryable, candidates, existing_by_no, count, cutoff)
-            if len(targets) >= count:
+            targets = db.select_targets(
+                retryable, candidates, existing_by_no, count, cutoff, floor
+            )
+            if len(targets) >= count or page_below_floor(page, floor):
                 break
     return db.upsert_pending(targets)
 

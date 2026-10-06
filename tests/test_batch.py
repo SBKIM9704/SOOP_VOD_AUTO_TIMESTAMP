@@ -15,6 +15,7 @@ from soopts.batch import (
     format_vod_result,
     narrate_with_llm,
     next_vod_status,
+    page_below_floor,
     quality_warning,
     song_link,
     span_to_song,
@@ -69,6 +70,32 @@ def test_cooldown_cutoff_uses_kst_not_utc_date():
 
 def test_cooldown_cutoff_disabled_when_days_not_positive():
     assert cooldown_cutoff(0, datetime(2026, 7, 22, tzinfo=UTC)) is None
+
+
+# --------------------------------------------------------------------------- #
+# page_below_floor — 백필 하한선 아래로 내려가면 페이징을 끊는다
+# --------------------------------------------------------------------------- #
+def test_page_below_floor_true_when_every_item_is_older():
+    """목록은 최신순 — 한 페이지가 전부 아래면 이후 페이지도 전부 아래다."""
+    page = [{"broadcast_date": "2025-08-15"}, {"broadcast_date": "2025-07-24"}]
+    assert page_below_floor(page, "2025-09-21") is True
+
+
+def test_page_below_floor_false_when_any_item_survives():
+    """하나라도 살아 있으면 계속 넘긴다."""
+    page = [{"broadcast_date": "2025-10-01"}, {"broadcast_date": "2025-08-15"}]
+    assert page_below_floor(page, "2025-09-21") is False
+
+
+def test_page_below_floor_false_for_unknown_date():
+    """날짜를 모르는 항목은 select_targets가 거르지 않으므로 '아래'로 보지 않는다."""
+    page = [{"broadcast_date": None}, {"broadcast_date": "2025-08-15"}]
+    assert page_below_floor(page, "2025-09-21") is False
+
+
+def test_page_below_floor_false_when_floor_disabled_or_page_empty():
+    assert page_below_floor([{"broadcast_date": "2020-01-01"}], None) is False
+    assert page_below_floor([], "2025-09-21") is False
 
 
 def test_next_vod_status_no_songs_detected_is_done():
