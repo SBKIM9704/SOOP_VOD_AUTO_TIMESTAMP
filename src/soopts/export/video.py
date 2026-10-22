@@ -286,15 +286,29 @@ def resolve_playlists(cfg: Config, title_no: str) -> list[str]:
         return resolve_m3u8_list(title_no, cfg.video.fallback_quality)
 
 
-def assert_parts_aligned(meta, m3u8s: list[str]) -> None:
+class PartsMisalignedError(RuntimeError):
+    """파트 offset을 믿을 수 없어 빌드를 중단한다 — 재시도해도 안 풀리는 **영구** 사유.
+
+    SOOP 메타 응답 자체가 어긋난 거라 내일 다시 받아도 같다. 그래서 호출부는 일반 실패(NULL로
+    두고 재시도)와 달리 종결 마커를 찍어 큐에서 뺀다 — 안 그러면 최신순 선택이 매번 이 VOD를
+    골라 뒤의 VOD가 전부 막힌다(181339925가 3회 연속 같은 사유로 큐를 막았다).
+    """
+
+
+def assert_parts_aligned(meta, m3u8s: list[str], perfs: list[dict] | None = None,
+                         cfg: Config | None = None) -> None:
     """멀티파트 VOD의 SOOP 보고 duration이 실제 m3u8과 맞는지 확인 — 다운로드 전 하드 게이트.
 
     앞 파트 duration이 실제와 어긋나면 뒤 파트 전역 offset이 통째로 밀려, 모든 곡 구간이
     엉뚱한 오디오로 받아진다(딥링크/챕터는 맞는데 오디오만 틀린 합본). 되돌릴 수 없는
-    업로드라 한 곡만 건너뛰는 게 아니라 **VOD 전체 빌드를 중단**한다 — 호출부(run_youtube_upload)
-    의 except가 Slack로 알리고 종료하며, youtube_status는 NULL로 남아 다음 날 재시도된다.
+    업로드라 한 곡만 건너뛰는 게 아니라 **VOD 전체 빌드를 중단**한다(`PartsMisalignedError`
+    — 호출부가 종결 마커를 찍고 Slack으로 알린다).
     단일 파트면 offset 위험이 없어 통과. (마지막 파트만 틀리면 total_duration만 부정확하고
     어떤 곡의 offset도 안 미므로 통과 — `shifts_offsets`로 거른다.)
+
+    누락 파트 분배가 모호할 때는 **곡이 offset 불확실 파트에 걸칠 때만** 중단한다
+    (`omitted_parts_gap`의 `uncertain_parts`). `perfs`를 안 주면 곡 위치를 모르니 불확실 파트가
+    하나라도 있으면 중단한다(보수적 기본값).
     """
     from soopts.collector.media import (
         omitted_parts_gap,
@@ -302,14 +316,26 @@ def assert_parts_aligned(meta, m3u8s: list[str]) -> None:
         playlist_total_s,
     )
 
-    # 누락 파트 offset 분배가 모호하면(빈 자리 2곳 이상) 뒤 파트가 틀린 오디오일 수 있어 중단.
     gap = omitted_parts_gap(meta.parts, meta.total_duration)
-    if gap and gap["ambiguous"]:
-        raise RuntimeError(
-            f"누락 파트 {gap['omitted_s']:.0f}s인데 빈 자리 {gap['gap_slots']}곳(order "
-            f"{gap['file_orders']}) → offset 자동 보정 불가, 곡 구간이 틀린 오디오일 위험. "
-            "빌드 중단(사람 확인 필요)."
-        )
+    if gap and gap["uncertain_parts"]:
+        risky = [p for p in meta.parts if p.idx in set(gap["uncertain_parts"])]
+        if perfs is None:
+            hit = ["(곡 위치 미지정)"]
+        else:
+            hit = []
+            for perf in perfs:
+                # split_by_part와 같은 겹침 판정 — 여백 포함 구간이 실제로 받는 파트 기준.
+                s, e = padded_bounds(cfg or Config(), perf)
+                if any(e > p.offset_s and s < p.offset_s + p.duration for p in risky):
+                    hit.append(f"perf #{perf.get('id')} {fmt_hms(int(perf['start_s']))}")
+        if hit:
+            raise PartsMisalignedError(
+                f"누락 파트 {gap['omitted_s']:.0f}s인데 빈 자리 {gap['gap_slots']}곳(order "
+                f"{gap['file_orders']}) → part{gap['uncertain_parts']} offset 확정 불가, 그 파트의 곡 "
+                f"구간이 틀린 오디오일 위험: {', '.join(hit)}. 빌드 중단(사람 확인 필요)."
+            )
+        log.info("누락 파트 분배 모호(part%s offset 불확실)지만 곡이 모두 확정 파트에 있어 진행",
+                 gap["uncertain_parts"])
     if len(meta.parts) < 2:
         return
     reals = [playlist_total_s(u) for u in m3u8s[:len(meta.parts)]]
@@ -319,7 +345,7 @@ def assert_parts_aligned(meta, m3u8s: list[str]) -> None:
             f"part{m['idx']} 보고{m['reported']:.0f}≠실제{m['real']:.0f}(Δ{m['diff']:+.0f}s)"
             for m in shifted
         )
-        raise RuntimeError(
+        raise PartsMisalignedError(
             "멀티파트 duration 불일치 → 곡 구간 offset이 밀려 틀린 오디오가 합본에 들어감. "
             f"빌드 중단: {detail}"
         )
@@ -371,7 +397,8 @@ def build_vod_video(
         log.warning("상한/구간 문제로 제외된 곡 %d개 (max_songs=%d, max_total_minutes=%.0f)",
                     len(dropped), cfg.video.max_songs, cfg.video.max_total_minutes)
     m3u8s = resolve_playlists(cfg, title_no)
-    assert_parts_aligned(meta, m3u8s)   # 파트 offset이 밀리면 여기서 전체 중단(틀린 오디오 업로드 방지)
+    # 파트 offset이 밀리면 여기서 전체 중단(틀린 오디오 업로드 방지). 다운로드할 곡 기준으로 판정.
+    assert_parts_aligned(meta, m3u8s, kept, cfg)
 
     segments: list[Path] = []       # concat에 들어갈 클립(파트에 걸친 곡은 2개 이상)
     placements: list[ClipPlacement] = []

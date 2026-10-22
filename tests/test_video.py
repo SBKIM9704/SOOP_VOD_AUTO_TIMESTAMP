@@ -7,6 +7,7 @@ import pytest
 import soopts.collector.media as media
 from soopts.config import Config
 from soopts.export.video import (
+    PartsMisalignedError,
     assert_parts_aligned,
     build_concat_list,
     padded_bounds,
@@ -136,3 +137,58 @@ def test_assert_parts_aligned_last_part_mismatch_passes(monkeypatch):
     # 마지막 파트만 틀리면 어떤 곡의 offset도 안 미므로 통과
     monkeypatch.setattr(media, "playlist_total_s", lambda u: {"u0": 8068.0, "u1": 12500.0}[u])
     assert_parts_aligned(_Meta(8068, 11918), ["u0", "u1"])   # raise 없음
+
+
+class _GapMeta:
+    """181339925 형태: order [1,3,5,7], 누락 5686s를 첫 자리(part1 앞)에 몰아넣은 offset."""
+
+    def __init__(self):
+        self.parts = [
+            MetaPart(idx=0, file_info_key="k0", duration=9958, offset_s=0, file_order=1),
+            MetaPart(idx=1, file_info_key="k1", duration=296, offset_s=15644, file_order=3),
+            MetaPart(idx=2, file_info_key="k2", duration=262, offset_s=15940, file_order=5),
+            MetaPart(idx=3, file_info_key="k3", duration=3332, offset_s=16202, file_order=7),
+        ]
+        self.total_duration = 19534
+
+
+def _real_gap_durations(monkeypatch):
+    monkeypatch.setattr(media, "playlist_total_s",
+                        lambda u: {"u0": 9958.0, "u1": 296.0, "u2": 262.0, "u3": 3331.0}[u])
+
+
+def test_gap_gate_passes_when_songs_on_certain_parts(monkeypatch):
+    # 곡이 모두 마지막 파트(offset 확정)면 분배가 모호해도 통과 — 181339925 실제 곡 위치.
+    _real_gap_durations(monkeypatch)
+    perfs = [_perf(1, 18228, 18450), _perf(2, 19030, 19250)]
+    assert_parts_aligned(_GapMeta(), ["u0", "u1", "u2", "u3"], perfs, _cfg())
+
+
+def test_gap_gate_raises_when_song_on_uncertain_part(monkeypatch):
+    _real_gap_durations(monkeypatch)
+    perfs = [_perf(1, 18228, 18450), _perf(7, 15700, 15900)]   # part1 위
+    with pytest.raises(PartsMisalignedError, match="perf #7"):
+        assert_parts_aligned(_GapMeta(), ["u0", "u1", "u2", "u3"], perfs, _cfg())
+
+
+def test_gap_gate_padding_into_uncertain_part_raises(monkeypatch):
+    # 곡 자체는 확정 파트(part3) 안이지만 intro 여백이 part2(불확실)로 넘어가면 그 조각은
+    # 틀린 오디오일 수 있다 — 판정은 DB 구간이 아니라 실제로 받을 여백 포함 구간 기준.
+    _real_gap_durations(monkeypatch)
+    perfs = [_perf(3, 16203, 16400)]
+    with pytest.raises(PartsMisalignedError):
+        assert_parts_aligned(_GapMeta(), ["u0", "u1", "u2", "u3"], perfs,
+                             _cfg(intro_lead_s=5))
+
+
+def test_gap_gate_without_perfs_is_conservative(monkeypatch):
+    _real_gap_durations(monkeypatch)
+    with pytest.raises(PartsMisalignedError):
+        assert_parts_aligned(_GapMeta(), ["u0", "u1", "u2", "u3"])
+
+
+def test_duration_mismatch_raises_parts_misaligned(monkeypatch):
+    # 영구 사유라 호출부가 blocked_parts로 종결할 수 있게 전용 예외로 나간다.
+    monkeypatch.setattr(media, "playlist_total_s", lambda u: {"u0": 8180.0, "u1": 11918.0}[u])
+    with pytest.raises(PartsMisalignedError):
+        assert_parts_aligned(_Meta(8068, 11918), ["u0", "u1"])

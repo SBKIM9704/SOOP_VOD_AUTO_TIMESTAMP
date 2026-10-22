@@ -10,7 +10,8 @@ DB 컬럼도 겹치지 않아(`vods.youtube_*`는 `_vod_row`의 고정 키셋에
 
 실패하면 재시도하지 않고 Slack + 비정상 종료로 끝낸다. `youtube_status`가 NULL로 남으므로
 다음 날 실행이 같은 VOD를 자연히 다시 집는다 — 즉시 재시도 루프가 계정 정지를 부른 패턴이라
-일부러 만들지 않았다.
+일부러 만들지 않았다. 예외는 파트 offset 게이트(`PartsMisalignedError`)다 — 재시도로 안 풀리는
+영구 사유라 `blocked_parts`로 보류해 큐에서 뺀다(안 그러면 같은 VOD가 매번 뽑혀 큐가 막힌다).
 """
 
 from __future__ import annotations
@@ -248,6 +249,18 @@ def run_youtube_upload(
         )
         log.info("완료: %s (%d곡)", url, len(placements))
         return {"status": "uploaded", "title_no": tno, "url": url, "songs": len(placements)}
+    except video.PartsMisalignedError as e:
+        # 다운로드 전에 걸리므로 업로드는 일어나지 않았다. dry-run은 DB를 안 건드린다.
+        if not dry_run:
+            db.mark_youtube_blocked_parts(tno)
+        log.warning("VOD %s 파트 offset 게이트로 보류: %s", tno, e)
+        marker = "" if dry_run else "(youtube_status='blocked_parts')"
+        _notify_slack(
+            f"⚠️ VOD {tno}: 파트 offset을 믿을 수 없어 업로드 보류{marker}\n    {e}\n"
+            f"    `soopts verify-parts {tno}`로 확인 후, 올려도 되면 youtube_status를 NULL로 "
+            f"되돌리세요. 다음 실행은 다른 VOD로 넘어갑니다."
+        )
+        return {"status": "blocked_parts", "title_no": tno, "reason": str(e)}
     except Exception as e:  # noqa: BLE001 — 재시도하지 않고 알린 뒤 죽는다
         _notify_slack_failure(f"youtube 업로드 (VOD {tno})", e)
         raise
@@ -297,6 +310,8 @@ def main_upload(cfg: Config, *, title_no: str | None, dry_run: bool) -> int:
         return 1
     if result["status"] == "no_target":
         print("업로드 대상 VOD 없음")
+    elif result["status"] == "blocked_parts":
+        print(f"VOD {result['title_no']} 보류(blocked_parts): {result['reason']}")
     return 0
 
 
