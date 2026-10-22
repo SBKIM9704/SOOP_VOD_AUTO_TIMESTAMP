@@ -399,6 +399,16 @@ command would accumulate rows with no evidence).
 `youtube_url IS NULL` instead would deadlock the queue: a VOD whose build yields zero usable clips
 would stay NULL and be re-picked every day forever. Rows written before 2026-07-23 carry
 `uploaded_private` from the old private-then-publish flow.
+The same deadlock applies to any *permanent* build failure, so the part-offset gate
+(`assert_parts_aligned` → `PartsMisalignedError`) sets **`blocked_parts`** instead of leaving NULL —
+181339925 was re-picked and failed three runs in a row, holding back every older VOD. A human runs
+`soopts verify-parts`, and resets it to NULL to retry. Other failures still leave NULL (retry tomorrow).
+
+**Omitted-part gate is per song, not per VOD.** When SOOP's meta drops parts at ≥2 places
+(`file_order` [1,3,5,7]), the missing total can't be split between them — but a part *before the
+first* gap (adds 0) or *after the last* gap (adds all of it) still has an exact offset. Only parts
+between gaps are uncertain (`omitted_parts_gap` → `uncertain_parts`), and the build aborts only if a
+song's padded span touches one of them.
 
 **Per-song links.** After upload, each performance gets
 `youtube_url = https://youtu.be/{id}?t={offset in the compilation}`. Offsets exist only on the runner

@@ -342,9 +342,11 @@ def cmd_verify_parts(args) -> int:
         print(f"ℹ️ 누락 파트 {gap['omitted_s']:.0f}s 감지(order {gap['file_orders']}) "
               f"→ 빈 자리 1곳, offset 자동 보정됨(안전)")
     else:
+        sure = [p.idx for p in meta.parts if p.idx not in gap["uncertain_parts"]]
         print(f"⚠️ 누락 파트 {gap['omitted_s']:.0f}s인데 빈 자리 {gap['gap_slots']}곳 "
-              f"(order {gap['file_orders']}) → 분배 불가, 곡 구간이 틀린 오디오일 수 있음. "
-              f"빌드/업로드 보류하고 사람이 확인하세요.")
+              f"(order {gap['file_orders']}) → 분배 불가. part{gap['uncertain_parts']} offset "
+              f"불확실(그 파트의 곡은 틀린 오디오일 수 있음), part{sure}는 확정. "
+              f"youtube-upload는 불확실 파트에 곡이 걸릴 때만 보류합니다.")
     if not mism:
         if gap is None or not gap["ambiguous"]:
             print("✓ 모든 파트 duration 일치 — 전역 offset·딥링크 안전")

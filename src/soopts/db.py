@@ -447,7 +447,8 @@ def insert_draft_song(
 # 유튜브 노래모음 업로드 (soopts youtube-upload)
 #
 # vods.youtube_status가 큐 마커다: NULL=미업로드(대상) / uploaded=올라감(종결)
-# / no_songs=빌드 결과가 0곡이라 종결. youtube_url의 NULL 여부로 고르면 "처리했지만 올릴 게
+# / no_songs=빌드 결과가 0곡이라 종결 / blocked_parts=파트 offset을 믿을 수 없어 보류(사람이
+# 확인 후 NULL로 되돌리면 재시도). youtube_url의 NULL 여부로 고르면 "처리했지만 올릴 게
 # 없었다"를 표현할 수 없어 그 VOD가 매일 다시 뽑히고 큐가 막힌다.
 # (2026-07-23 이전 행에는 'uploaded_private'가 남아 있다 — private 업로드 + 사람이 공개
 #  전환하던 시절의 값이다. 지금은 처음부터 unlisted로 올리므로 그 단계가 없다.)
@@ -598,6 +599,17 @@ def mark_youtube_no_songs(title_no: str) -> None:
     이걸 안 찍으면 youtube_status가 NULL로 남아 같은 VOD가 매일 다시 뽑히고 큐가 데드락된다.
     """
     _client().table("vods").update({"youtube_status": "no_songs"}).eq(
+        "soop_title_no", str(title_no)
+    ).execute()
+
+
+def mark_youtube_blocked_parts(title_no: str) -> None:
+    """파트 offset 게이트(`PartsMisalignedError`)에 걸린 VOD의 **보류 마커**.
+
+    SOOP 메타가 어긋난 건 재시도로 안 풀리는데, NULL로 두면 최신순 선택이 매 실행 이 VOD를
+    다시 골라 뒤 VOD가 전부 막힌다. 사람이 확인 후 youtube_status를 NULL로 되돌리면 재시도된다.
+    """
+    _client().table("vods").update({"youtube_status": "blocked_parts"}).eq(
         "soop_title_no", str(title_no)
     ).execute()
 

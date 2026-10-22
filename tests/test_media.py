@@ -357,6 +357,34 @@ def test_omitted_two_gaps_is_ambiguous():
     assert g["ambiguous"] is True
 
 
+def test_omitted_single_slot_has_no_uncertain_parts():
+    parts = _ordered((1, 8068), (4, 11918))
+    assert media.omitted_parts_gap(parts, 20088)["uncertain_parts"] == []
+
+
+def test_omitted_multi_gap_only_middle_parts_uncertain():
+    # 181339925: order [1,3,5,7], 누락 5686s. 빈 자리는 part1·2·3 앞 — part0(누락 0)과
+    # part3(누락 전부)는 분배와 무관하게 offset이 정해지고, 사이에 낀 part1·2만 불확실.
+    parts = _ordered((1, 9958), (3, 296), (5, 262), (7, 3332))
+    g = media.omitted_parts_gap(parts, 19534)
+    assert g["ambiguous"] is True
+    assert g["uncertain_parts"] == [1, 2]
+
+
+def test_omitted_leading_plus_internal_gap_uncertain_from_start():
+    # 리딩 자리(0) + 내부 자리(2) → part0·1 불확실, part2 확정.
+    parts = _ordered((2, 1000), (3, 1000), (5, 1000))
+    assert media.omitted_parts_gap(parts, 5000)["uncertain_parts"] == [0, 1]
+
+
+def test_omitted_no_slot_all_parts_uncertain():
+    # 번호는 연속인데 총량이 남음 → 어디 끼었는지 모름 → 전부 불확실.
+    parts = _ordered((1, 1000), (2, 1000))
+    g = media.omitted_parts_gap(parts, 2500)
+    assert g["gap_slots"] == 0
+    assert g["uncertain_parts"] == [0, 1]
+
+
 def test_omitted_below_tolerance_ignored():
     parts = _ordered((1, 8000), (4, 12000))
     assert media.omitted_parts_gap(parts, 20001) is None

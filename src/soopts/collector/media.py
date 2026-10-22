@@ -150,7 +150,14 @@ def omitted_parts_gap(
     분배가 불가능하다(첫 자리에 몰아넣고 경고만 한 상태). 그 경우 뒤 파트 offset이 틀어져 곡
     구간이 엉뚱한 오디오로 잡힐 수 있으므로, 되돌릴 수 없는 업로드 전에 여기서 잡는다.
 
-    반환 없음(None) = 누락 없음(정상). dict면 `ambiguous`가 True일 때 빌드 보류 대상.
+    반환 없음(None) = 누락 없음(정상). dict면 `ambiguous`가 True일 때 분배가 모호하다.
+
+    **분배가 모호해도 모든 파트가 위험한 건 아니다** — `uncertain_parts`가 offset을 확정할 수
+    없는 파트(idx)만 담는다. 파트 offset = 앞 파트 반환 길이 합 + 그 앞 빈 자리들의 누락분이라,
+    첫 빈 자리보다 앞 파트는 누락분 0, 마지막 빈 자리 이후 파트는 누락분 전부가 더해져 어느 쪽이든
+    분배와 무관하게 정해진다. 불확실한 건 빈 자리 **사이**에 낀 파트뿐이다(실제 사례: 181339925
+    order [1,3,5,7] — 곡 2개가 모두 마지막 파트에 있어 offset이 확정인데도 VOD 전체가 막혔다).
+    자리를 못 찾으면(0곳) 어디에 누락이 끼었는지 모르니 전부 불확실로 둔다.
     """
     if not parts:
         return None
@@ -158,12 +165,18 @@ def omitted_parts_gap(
     if omitted <= tol_s:
         return None
     orders = [p.file_order for p in parts]
-    slots = 1 if orders[0] > 1 else 0                       # 리딩(첫 파트 앞) 빈 자리
-    slots += sum(1 for i in range(1, len(orders)) if orders[i] - orders[i - 1] > 1)
+    # 빈 자리 = 누락분이 그 파트 앞에 끼는 인덱스. 0 = 리딩(첫 파트 앞).
+    slot_idxs = [0] if orders[0] > 1 else []
+    slot_idxs += [i for i in range(1, len(orders)) if orders[i] - orders[i - 1] > 1]
+    if not slot_idxs:
+        uncertain = [p.idx for p in parts]
+    else:
+        uncertain = [p.idx for p in parts if slot_idxs[0] <= p.idx < slot_idxs[-1]]
     return {
         "omitted_s": round(omitted, 1),
-        "gap_slots": slots,
-        "ambiguous": slots != 1,   # 0곳(자리 못 찾음)·2곳 이상(분배 모호) 둘 다 위험
+        "gap_slots": len(slot_idxs),
+        "ambiguous": len(slot_idxs) != 1,   # 0곳(자리 못 찾음)·2곳 이상(분배 모호)
+        "uncertain_parts": uncertain,
         "file_orders": orders,
     }
 
