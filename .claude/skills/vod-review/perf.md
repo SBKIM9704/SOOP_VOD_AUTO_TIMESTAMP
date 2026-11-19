@@ -31,6 +31,14 @@
    ```
    각 항목: `id, title_no, start_s, end_s, title_guess, song_id, identify_status, local_review, has_lyrics`.
 
+   **구독자 전용 VOD는 자동 스킵 — 전사를 시도하지도, 사용자에게 묻지도 않는다.** 제목에 `구플뱅`이
+   있는 VOD(worklist의 title_no를 `vods --status analyzed,done --json`의 제목과 대조)는 대상에서 뺀다.
+   계정 없이는 yt-dlp가 m3u8을 못 받아 전사·영상 빌드가 모두 불가능하다. 제목에 표시가 없어도
+   전사가 `SubscriberOnlyError: 구독자 전용 VOD…`로 끝나면 그 VOD의 나머지 곡도 바로 건너뛴다.
+   performance는 **pending 그대로 둔다**(삭제·클립금지 등재·needs_review 전환 없음 — 딥링크는 start만으로
+   작동하고, end가 센티넬이라 youtube 게이트가 알아서 막는다). 결과 보고에는 `구독자 전용 J곡 — 스킵`
+   한 줄만 남긴다.
+
    **멀티파트 VOD는 전사 전에 offset 정합성을 VOD당 한 번 확인한다** — SOOP이 앞 파트 duration을
    잘못 보고하면 뒤 파트 곡들이 **엉뚱한 오디오로 전사돼 end_s가 통째로 틀어진다**(딥링크는 맞는데
    오디오만 다른 상황):
@@ -156,5 +164,6 @@
   마지막 가사 직후로(Guard B). 곡 중간 조용한 구간에서 멈추지 말 것(Guard A). 댓글 곡은 센티넬(=start)을
   실제 끝으로 **설정**, ingest 곡은 긴 end를 트림. start는 신뢰(안 건드림). 구간 비정상(<30s)이면 보류.
 - **대량 처리 시 진행/결과 요약을 보여준다.** 파괴적 판단(needs_human·경계 보정)은 근거를 남기되 **초 단위 시각 + 비가사 발화**로 적는다(가사 인용 금지 — 위 ⚠️).
-- 전사 실패한 곡은 건너뛰고(그대로 pending) 표에 남긴다.
+- 전사 실패한 곡은 건너뛰고(그대로 pending) 표에 남긴다. 단 구독자 전용(`구플뱅`/`SubscriberOnlyError`)은
+  실패가 아니라 정해진 스킵이다 — 표에 곡별로 늘어놓지 말고 개수 한 줄만.
 - 처리 후 캐시 정리: `rm -f work/*/clips/seg_*.mp4`, 세그먼트 파일은 `rm -rf work/*/segs`

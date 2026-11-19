@@ -43,6 +43,25 @@ def download_audio_full(url_or_id: str, out_path: Path, quality: str = "hls-hd")
     return out_path
 
 
+class SubscriberOnlyError(RuntimeError):
+    """구독자 전용 VOD(구플뱅) — 계정 없이는 미디어를 받을 수 없어 전사·빌드가 불가능하다."""
+
+
+def _m3u8_error(stderr: str) -> RuntimeError:
+    """yt-dlp -g 실패 stderr를 원인이 보이는 예외로 바꾼다(순수 함수).
+
+    yt-dlp는 오래된 버전이면 `WARNING: ... older than 90 days` 경고를 먼저 찍어, stderr 앞부분을
+    자르면 진짜 원인(`ERROR:` 줄)이 잘려 나간다 — 구독자 전용 VOD가 "m3u8 조회 실패: WARNING: ..."
+    로만 보여 원인을 `yt-dlp -g`로 따로 확인해야 했다. 그래서 `ERROR:` 줄을 우선 보여주고,
+    구독자 전용이면 호출 측이 건너뛸 수 있게 별도 예외로 구분한다."""
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    errors = [ln for ln in lines if ln.startswith("ERROR")]
+    detail = " / ".join(errors or lines)[:300]
+    if "subscribers only" in stderr.lower():
+        return SubscriberOnlyError(f"구독자 전용 VOD라 미디어 접근 불가: {detail}")
+    return RuntimeError(f"m3u8 조회 실패: {detail}")
+
+
 def resolve_m3u8_list(url_or_id: str, quality: str = "hls-hd") -> list[str]:
     """yt-dlp -g로 파트별 m3u8 URL 목록을 얻는다(멀티파트 VOD는 파트마다 1개)."""
     out = subprocess.run(
@@ -50,7 +69,7 @@ def resolve_m3u8_list(url_or_id: str, quality: str = "hls-hd") -> list[str]:
         capture_output=True, text=True,
     )
     if out.returncode != 0 or not out.stdout.strip():
-        raise RuntimeError(f"m3u8 조회 실패: {out.stderr.strip()[:200]}")
+        raise _m3u8_error(out.stderr)
     return out.stdout.strip().splitlines()
 
 

@@ -71,6 +71,9 @@ set -a; source .env; set +a; export PATH="$PWD/.venv/bin:$PATH"; .venv/bin/pytho
    .venv/bin/python -m soopts perfs --local pending --json         # perf 대상
    ```
    `manual N · 미검토 analyzed/done M · local_review=pending K`로 요약한다.
+   **구독자 전용 VOD(제목에 `구플뱅`) 곡은 K에서 빼고** `(구독자 전용 J곡 — 스킵)`으로 따로 한 줄만
+   붙인다. 미디어를 받을 수 없어 처리할 방법이 없으니 할 일로 권하지도, 어떻게 할지 묻지도 않는다
+   (사용자 방침 2026-11-02 · 11-19). title_no→제목은 `vods --status analyzed,done --json` 결과로 붙인다.
 
 2. **라우팅.**
    - **인자에 `--stage audit|ingest|perf`** → 그 단계만 실행.
