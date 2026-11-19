@@ -388,3 +388,36 @@ def test_omitted_no_slot_all_parts_uncertain():
 def test_omitted_below_tolerance_ignored():
     parts = _ordered((1, 8000), (4, 12000))
     assert media.omitted_parts_gap(parts, 20001) is None
+
+
+# --------------------------------------------------------------------------- #
+# _m3u8_error — yt-dlp -g 실패를 원인이 보이는 예외로
+# --------------------------------------------------------------------------- #
+_YTDLP_WARNING = (
+    "WARNING: Your yt-dlp version (2026.07.04) is older than 90 days!\n"
+    "         It is strongly recommended to always use the latest version.\n"
+    "         You installed yt-dlp with pip or using the wheel from PyPi; Use that to update.\n"
+)
+
+
+def test_m3u8_error_subscriber_only_is_distinct_and_shows_cause():
+    stderr = _YTDLP_WARNING + (
+        "ERROR: [soop] 210552003: This VOD is for subscribers only. Use --username and --password\n"
+    )
+    err = media._m3u8_error(stderr)
+    assert isinstance(err, media.SubscriberOnlyError)
+    assert "subscribers only" in str(err)
+    assert "older than 90 days" not in str(err)  # 앞의 버전 경고가 원인을 가리지 않는다
+
+
+def test_m3u8_error_other_failure_prefers_error_line():
+    err = media._m3u8_error(_YTDLP_WARNING + "ERROR: [soop] 1: HTTP Error 404: Not Found\n")
+    assert type(err) is RuntimeError
+    assert "404" in str(err)
+    assert "older than 90 days" not in str(err)
+
+
+def test_m3u8_error_without_error_line_falls_back_to_all_lines():
+    err = media._m3u8_error("something odd happened\n")
+    assert type(err) is RuntimeError
+    assert "something odd happened" in str(err)
